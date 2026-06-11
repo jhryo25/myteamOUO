@@ -1,0 +1,12 @@
+# myteam 默认 agent 配置
+# 先用最少的三类角色跑通 A2A 协作闭环。
+agents:
+  controller:
+    role: "总控 Agent"
+    description: "理解目标、拆分任务、分配 worker、检查结果。"
+  worker:
+    role: "执行 Agent"
+    description: "完成被分配的小任务，并输出可检查的结果。"
+  reviewer:
+    role: "审查 Agent"
+    description: "检查结果是否可靠，指出风险、遗漏和下一步。"

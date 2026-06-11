@@ -1,12 +1,18 @@
 # myteam 默认 agent 配置
-# 先用最少的三类角色跑通 A2A 协作闭环。
+# 先用两个真实可理解的 agent 展示最小 A2A 协作。
 agents:
-  controller:
-    role: "总控 Agent"
-    description: "理解目标、拆分任务、分配 worker、检查结果。"
-  worker:
-    role: "执行 Agent"
-    description: "完成被分配的小任务，并输出可检查的结果。"
-  reviewer:
-    role: "审查 Agent"
-    description: "检查结果是否可靠，指出风险、遗漏和下一步。"
+  agent1_kimi:
+    role: "Agent1：Kimi 执行 Agent"
+    command: "C:\\Users\\Administrator\\.kimi-code\\bin\\kimi.exe"
+    description: "负责作为外部命令行 agent，后续可执行被分配的小任务。"
+    current_status: "已登记，CLI 会检查本地 kimi.exe 是否存在。"
+  agent2_codex:
+    role: "Agent2：Codex 总控/审查 Agent"
+    command: "当前 Codex 对话"
+    description: "负责理解目标、拆任务、审查结果、总结经验，并控制下一轮迭代。"
+    current_status: "已登记，当前由 Codex 扮演。"
+workflow:
+  - "用户提出目标"
+  - "Agent2 Codex 拆分任务和验收标准"
+  - "Agent1 Kimi 执行适合外部 CLI 的任务"
+  - "Agent2 Codex 审查输出并生成下一步"

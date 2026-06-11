@@ -3,19 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>myteam MVP 验收面板</title>
+  <title>myteam A2A MVP 验收面板</title>
   <style>
     :root {
-      --bg: #f7f8fa;
+      --bg: #f6f7f9;
       --surface: #ffffff;
       --text: #18202f;
-      --muted: #5d6878;
-      --line: #d9dee7;
-      --accent: #126b5c;
-      --accent-soft: #dff3ee;
+      --muted: #5f6b7a;
+      --line: #dce2ea;
+      --accent: #0f766e;
+      --accent-soft: #def5ef;
+      --blue: #275db3;
+      --blue-soft: #e8f0ff;
       --warn: #8a5a00;
       --warn-soft: #fff2cf;
-      --shadow: 0 14px 40px rgba(24, 32, 47, 0.08);
+      --shadow: 0 16px 44px rgba(24, 32, 47, 0.08);
     }
 
     * {
@@ -31,34 +33,34 @@
     }
 
     .shell {
-      width: min(1080px, calc(100% - 32px));
+      width: min(1120px, calc(100% - 32px));
       margin: 0 auto;
       padding: 32px 0 44px;
     }
 
     header {
       display: grid;
-      grid-template-columns: minmax(0, 1.3fr) minmax(260px, 0.7fr);
-      gap: 24px;
-      align-items: stretch;
-      margin-bottom: 24px;
+      grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+      gap: 18px;
+      margin-bottom: 18px;
     }
 
-    .intro,
     .panel,
-    .status-item {
+    .agent,
+    .status-item,
+    .step {
       background: var(--surface);
       border: 1px solid var(--line);
       border-radius: 8px;
       box-shadow: var(--shadow);
     }
 
-    .intro {
-      padding: 28px;
+    .panel {
+      padding: 22px;
     }
 
     h1 {
-      margin: 0 0 12px;
+      margin: 0 0 10px;
       font-size: 34px;
       line-height: 1.18;
     }
@@ -68,22 +70,21 @@
       font-size: 20px;
     }
 
+    h3 {
+      margin: 0 0 8px;
+      font-size: 17px;
+    }
+
     p {
       margin: 0;
       color: var(--muted);
     }
 
-    .commands {
-      display: grid;
-      gap: 10px;
-      padding: 22px;
-    }
-
     code {
       display: block;
       padding: 10px 12px;
+      margin-top: 10px;
       overflow-wrap: anywhere;
-      border: 1px solid var(--line);
       border-radius: 6px;
       background: #111827;
       color: #f8fafc;
@@ -93,30 +94,27 @@
 
     main {
       display: grid;
-      gap: 24px;
+      gap: 18px;
     }
 
-    .grid {
+    .agents {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 14px;
     }
 
-    .status-item {
-      padding: 16px;
-      min-height: 112px;
+    .agent {
+      padding: 18px;
+      min-height: 180px;
     }
 
+    .agent-top,
     .status-top {
       display: flex;
       justify-content: space-between;
-      gap: 12px;
       align-items: center;
-      margin-bottom: 8px;
-    }
-
-    .status-name {
-      font-weight: 700;
+      gap: 12px;
+      margin-bottom: 10px;
     }
 
     .badge {
@@ -137,50 +135,63 @@
       background: var(--warn-soft);
     }
 
+    .codex {
+      color: var(--blue);
+      background: var(--blue-soft);
+    }
+
     .path {
-      margin-top: 8px;
+      margin-top: 10px;
       color: var(--muted);
       font-family: Consolas, "Courier New", monospace;
       font-size: 13px;
       overflow-wrap: anywhere;
     }
 
-    .panel {
-      padding: 22px;
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
     }
 
-    .steps {
+    .status-item {
+      padding: 16px;
+      min-height: 120px;
+    }
+
+    .status-name {
+      font-weight: 700;
+    }
+
+    .flow {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 12px;
-      margin-top: 14px;
     }
 
     .step {
+      padding: 14px;
       border-left: 4px solid var(--accent);
-      padding: 8px 10px;
-      background: #f9fbfb;
-      border-radius: 6px;
-      color: var(--muted);
-      min-height: 80px;
+      min-height: 120px;
     }
 
     .step strong {
       display: block;
+      margin-bottom: 6px;
       color: var(--text);
-      margin-bottom: 4px;
     }
 
     footer {
-      margin-top: 24px;
+      margin-top: 18px;
       color: var(--muted);
       font-size: 14px;
     }
 
-    @media (max-width: 820px) {
+    @media (max-width: 860px) {
       header,
+      .agents,
       .grid,
-      .steps {
+      .flow {
         grid-template-columns: 1fr;
       }
 
@@ -193,19 +204,40 @@
 <body>
   <div class="shell">
     <header>
-      <section class="intro">
-        <h1>myteam MVP 验收面板</h1>
-        <p>这个页面用来检查第一版骨架是否已经准备好：CLI、协作目录、agent 配置、任务记录和自迭代入口。</p>
+      <section class="panel">
+        <h1>myteam A2A MVP 验收面板</h1>
+        <p>这个页面展示你要做的核心功能：Agent1 Kimi 负责执行，Agent2 Codex 负责总控、审查和自迭代。</p>
       </section>
-      <aside class="panel commands">
-        <h2>常用命令</h2>
-        <code>python myteam.py init</code>
+      <aside class="panel">
+        <h2>本地命令</h2>
         <code>python myteam.py status</code>
         <code>python myteam.py ui</code>
       </aside>
     </header>
 
     <main>
+      <section class="panel">
+        <h2>双 Agent 角色</h2>
+        <div class="agents">
+          <article class="agent">
+            <div class="agent-top">
+              <h3>Agent1：Kimi</h3>
+              <span class="badge ok">已检测到</span>
+            </div>
+            <p>定位：外部执行 Agent。后续适合接收明确的小任务，例如生成草稿、执行命令、补充方案。</p>
+            <div class="path">C:\Users\Administrator\.kimi-code\bin\kimi.exe</div>
+          </article>
+          <article class="agent">
+            <div class="agent-top">
+              <h3>Agent2：Codex</h3>
+              <span class="badge codex">当前对话</span>
+            </div>
+            <p>定位：总控和审查 Agent。负责拆任务、决定交给谁、检查证据、记录经验，并规划下一轮迭代。</p>
+            <div class="path">Codex in this workspace</div>
+          </article>
+        </div>
+      </section>
+
       <section>
         <h2>骨架状态</h2>
         <div class="grid">
@@ -222,7 +254,7 @@
               <span class="status-name">agent 配置</span>
               <span class="badge ok">已就绪</span>
             </div>
-            <p>保存 controller、worker、reviewer。</p>
+            <p>登记 Agent1 Kimi 和 Agent2 Codex。</p>
             <div class="path">.myteam\agents.yaml</div>
           </article>
           <article class="status-item">
@@ -251,28 +283,27 @@
           </article>
           <article class="status-item">
             <div class="status-top">
-              <span class="status-name">运行记录</span>
+              <span class="status-name">Agent1 Kimi</span>
               <span class="badge ok">已就绪</span>
             </div>
-            <p>后续保存每轮自迭代证据。</p>
-            <div class="path">.myteam\runs</div>
+            <p>本地 Kimi CLI，可作为外部执行 agent。</p>
+            <div class="path">C:\Users\Administrator\.kimi-code\bin\kimi.exe</div>
           </article>
         </div>
       </section>
 
       <section class="panel">
-        <h2>最小自迭代闭环</h2>
-        <p>当前版本先准备存放记录的位置，下一步会让 Controller Agent 把目标拆成任务。</p>
-        <div class="steps">
-          <div class="step"><strong>1. 目标</strong>写清楚本轮要解决的问题。</div>
-          <div class="step"><strong>2. 分工</strong>controller 分配 worker 和 reviewer。</div>
-          <div class="step"><strong>3. 审查</strong>用证据判断任务是否真的完成。</div>
-          <div class="step"><strong>4. 迭代</strong>总结经验，生成下一轮 backlog。</div>
+        <h2>你要做的功能如何运转</h2>
+        <div class="flow">
+          <div class="step"><strong>1. 用户给目标</strong>例如：低成本搭建一个协作性强的 A2A 工具。</div>
+          <div class="step"><strong>2. Codex 拆任务</strong>把目标拆成可执行、可检查的小任务，并写明验收标准。</div>
+          <div class="step"><strong>3. Kimi 执行任务</strong>Agent1 接收明确任务，产出结果或执行记录。</div>
+          <div class="step"><strong>4. Codex 审查迭代</strong>Agent2 检查证据，更新 lessons、memory 和下一轮 backlog。</div>
         </div>
       </section>
     </main>
 
-    <footer>这是本地静态 HTML 页面，不需要安装前端框架。</footer>
+    <footer>这是最小可行性 HTML，不依赖前端框架；后续可以扩展成真正的任务面板。</footer>
   </div>
 </body>
 </html>

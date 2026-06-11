@@ -6,13 +6,25 @@ myteamOUO 是 myteam 的轻量级 A2A 协作工具 MVP。
 
 ## 当前版本能做什么
 
-第一步只做项目骨架：
+第一步只做项目骨架和最小可见演示：
 
 - 创建 `.myteam` 协作目录。
-- 创建默认 agent 配置。
+- 创建 Agent1 Kimi 和 Agent2 Codex 的协作配置。
 - 创建任务记录、踩坑记录和长期记忆文件。
 - 提供 `init`、`status`、`ui` 三个命令。
 - 提供 `index.html` 作为最小 HTML 验收页面。
+
+## 当前 Agent 分工
+
+- Agent1：Kimi，路径是 `C:\Users\Administrator\.kimi-code\bin\kimi.exe`。
+- Agent2：Codex，也就是当前这个开发助手。
+
+当前 HTML 验收页展示的是最小可行流程：
+
+1. 用户提出目标。
+2. Codex 拆任务并写明验收标准。
+3. Kimi 执行适合外部 CLI 的小任务。
+4. Codex 审查结果，记录经验，并生成下一轮迭代建议。
 
 ## 怎么运行
 
@@ -34,13 +46,13 @@ python myteam.py status
 python myteam.py ui
 ```
 
-生成后，打开 `index.html` 就能看到当前 MVP 骨架状态。
+生成后，打开 `index.html` 就能看到当前 MVP 骨架状态和 Agent1/Agent2 协作功能。
 
 ## `.myteam` 目录是什么
 
 `.myteam` 可以理解成 myteam 的“协作大脑”。
 
-- `.myteam/agents.yaml`：保存 controller、worker、reviewer 三类 agent。
+- `.myteam/agents.yaml`：保存 Agent1 Kimi 和 Agent2 Codex 配置。
 - `.myteam/tasks.jsonl`：保存任务记录，目前先为空。
 - `.myteam/lessons.jsonl`：保存踩坑记录，目前先为空。
 - `.myteam/memory.md`：保存长期经验。

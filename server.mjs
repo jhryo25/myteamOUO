@@ -79,6 +79,12 @@ function loadSessions() {
       }));
       activeSessionId = data.activeId && getSession(data.activeId)
         ? data.activeId : sessions[0].id;
+      if (Array.isArray(data.trashedSessions)) {
+        const now = Date.now();
+        trashedSessions = data.trashedSessions
+          .filter(t => now - t.deletedAt < TRASH_RETENTION_MS)
+          .map(t => ({ session: t.session, deletedAt: t.deletedAt }));
+      }
       return;
     }
   } catch (err) {
@@ -95,6 +101,10 @@ function saveSessions() {
       sessions: sessions.map(s => ({
         ...s,
         history: s.history.slice(-40),
+      })),
+      trashedSessions: trashedSessions.map(t => ({
+        session: t.session,
+        deletedAt: t.deletedAt,
       })),
     };
     writeFileSync(MEMORY_FILE, JSON.stringify(payload, null, 2), 'utf8');
@@ -259,12 +269,15 @@ function sseSend(res, event, data) {
 // ── 活跃子进程追踪（用于 abort） ──────────────────────────────
 const activeChildren = new Map(); // id → child process
 let childIdSeq = 0;
+let isAborting = false;
 
 function abortAllChildren() {
+  isAborting = true;
   for (const [id, child] of activeChildren) {
     try { child.kill('SIGTERM'); } catch { /* already dead */ }
   }
   activeChildren.clear();
+  setTimeout(() => { isAborting = false; }, 1000);
 }
 
 // ── 调用 agent 并实时流到 SSE ─────────────────────────────────
@@ -323,8 +336,13 @@ function streamAgent(agentKey, prompt, res, label = 'chunk') {
     child.on('close', (code) => {
       clearInterval(watchdog);
       activeChildren.delete(cid);
-      if (code !== 0) reject(new Error(`exit code ${code}`));
-      else resolve(fullText);
+      if (isAborting) {
+        resolve(fullText);
+      } else if (code !== 0) {
+        reject(new Error(`exit code ${code}`));
+      } else {
+        resolve(fullText);
+      }
     });
   });
 }
@@ -483,7 +501,7 @@ async function handle(req, res) {
 
     // 解析 @mention 路由
     const agentKey = parseAtMention(message) || 'codex';
-    const cleanMessage = message.replace(/^@(claude|codex)\s*/i, '').trim();
+    const cleanMessage = message.replace(/@(claude|codex)\b/gi, '').trim();
 
     // 存入对话历史（按 session）
     session.history.push({ role: 'user', text: message, agent: null });

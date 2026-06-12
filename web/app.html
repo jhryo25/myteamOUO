@@ -1421,7 +1421,8 @@ const welcome = document.getElementById('chatWelcome');
 let agentTypingBubble = null;
 
 function hideWelcome() {
-  if (welcome && welcome.parentNode) welcome.remove();
+  const el = document.getElementById('chatWelcome');
+  if (el && el.parentNode) el.remove();
 }
 
 function addSystemMsg(text) {
@@ -2329,12 +2330,23 @@ async function loadHistory() {
       if (h.role === 'user') {
         addUserBubble(h.text);
       } else if (h.role === 'assistant') {
-        const bubble = startAgentBubble(h.agent || 'codex');
-        bubble.dataset.raw = h.text;
-        bubble.textContent = h.text;
-        finishTyping();
+        const avatarMap = {
+          codex:  { cls: 'codex-av',  emoji: '🤖', name: 'Codex' },
+          claude: { cls: 'claude-av', emoji: '✨', name: 'Claude' },
+        };
+        const a = avatarMap[h.agent] || { cls: 'system-av', emoji: '●', name: h.agent || 'codex' };
+        const row = document.createElement('div');
+        row.className = 'bubble-row';
+        row.innerHTML = `
+          <div class="avatar ${a.cls}">${a.emoji}</div>
+          <div>
+            <div class="bubble-name">${a.name}</div>
+            <div class="bubble agent-bubble">${renderRichText(h.text)}</div>
+          </div>`;
+        chatEl.appendChild(row);
       }
     });
+    scrollChat();
   } catch { /* ignore */ }
 }
 

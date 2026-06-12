@@ -121,11 +121,55 @@ export function invokeAgent(CLI_CONFIG, agentKey, prompt, { silent = false, time
 
 // ── JSON 提取 + 幻觉限制验证 ─────────────────────────────────
 // 教训2 (02-cli-engineering): AI 会产生幻觉，解析结果要做二次验证。
+// IMP-005: 修复贪心匹配问题，使用括号配对算法找到第一个完整的 JSON 对象
 export function extractJson(text) {
   const cleaned = text.replace(/```(?:json)?\s*/g, '').replace(/```/g, '');
-  const m = cleaned.match(/\{[\s\S]+\}/);
-  if (!m) return null;
-  try { return JSON.parse(m[0]); } catch { return null; }
+  
+  // 找到第一个 { 的位置
+  const startIdx = cleaned.indexOf('{');
+  if (startIdx === -1) return null;
+  
+  // 使用栈匹配括号，找到对应的 }
+  let depth = 0;
+  let inString = false;
+  let escapeNext = false;
+  
+  for (let i = startIdx; i < cleaned.length; i++) {
+    const char = cleaned[i];
+    
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    
+    if (char === '\\') {
+      escapeNext = true;
+      continue;
+    }
+    
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    
+    if (inString) continue;
+    
+    if (char === '{') depth++;
+    else if (char === '}') {
+      depth--;
+      if (depth === 0) {
+        // 找到匹配的 }，尝试解析
+        const jsonStr = cleaned.slice(startIdx, i + 1);
+        try {
+          return JSON.parse(jsonStr);
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  
+  return null;
 }
 
 // 教训2: 对 plan 结果做严格验证，tasks 非空且每条必含 title，防止幻觉写入

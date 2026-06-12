@@ -1,0 +1,12 @@
+{
+  "name": "myteamouo",
+  "version": "0.1.0",
+  "description": "myteam A2A 协作工具 MVP",
+  "type": "module",
+  "scripts": {
+    "plan": "node plan.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

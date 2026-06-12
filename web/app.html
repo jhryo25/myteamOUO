@@ -1,0 +1,822 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>myteam · A2A 控制台</title>
+  <style>
+    :root {
+      --bg:          #fdf6ee;
+      --surface:     #fffaf4;
+      --surface2:    #f5ece0;
+      --border:      #e8d8c4;
+      --text:        #3b2f20;
+      --muted:       #9a8270;
+      --accent:      #c96a2a;
+      --accent-soft: rgba(201,106,42,.10);
+      --accent2:     #e8924a;
+      --green:       #5a9e6f;
+      --green-soft:  rgba(90,158,111,.12);
+      --blue:        #4a7fa5;
+      --blue-soft:   rgba(74,127,165,.12);
+      --yellow:      #c09535;
+      --red:         #c0514a;
+      --red-soft:    rgba(192,81,74,.10);
+      --radius:      12px;
+      --shadow:      0 2px 12px rgba(100,60,20,.07);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", Arial, sans-serif;
+      font-size: 14px;
+      line-height: 1.65;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── topbar ── */
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 20px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      box-shadow: var(--shadow);
+      flex-shrink: 0;
+      z-index: 10;
+    }
+    .logo {
+      font-size: 17px;
+      font-weight: 800;
+      color: var(--accent);
+      letter-spacing: -.3px;
+    }
+    .logo-sub {
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 400;
+      margin-left: 2px;
+    }
+    .agent-pills {
+      display: flex; gap: 6px; margin-left: auto;
+    }
+    .agent-pill {
+      display: flex; align-items: center; gap: 4px;
+      padding: 3px 10px; border-radius: 999px;
+      font-size: 11px; font-weight: 700;
+      border: 1.5px solid var(--border);
+      color: var(--muted); background: var(--surface2);
+    }
+    .agent-pill.ok  { color: var(--green); border-color: var(--green); background: var(--green-soft); }
+    .agent-pill.err { color: var(--red);   border-color: var(--red);   background: var(--red-soft); }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+    /* ── layout ── */
+    .layout {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 300px;
+      overflow: hidden;
+    }
+
+    /* ── chat area ── */
+    .chat-area {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border-right: 1px solid var(--border);
+    }
+
+    .chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      scroll-behavior: smooth;
+    }
+
+    /* 欢迎状态 */
+    .chat-welcome {
+      margin: auto;
+      text-align: center;
+      padding: 40px 20px;
+      color: var(--muted);
+    }
+    .chat-welcome .emoji { font-size: 48px; margin-bottom: 12px; }
+    .chat-welcome h2 { font-size: 18px; color: var(--text); margin-bottom: 6px; }
+    .chat-welcome p  { font-size: 13px; line-height: 1.7; }
+
+    /* 气泡 */
+    .bubble-row {
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+    }
+    .bubble-row.user { flex-direction: row-reverse; }
+
+    .avatar {
+      width: 32px; height: 32px; border-radius: 50%;
+      flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px; font-weight: 700;
+    }
+    .avatar.user-av  { background: var(--accent); color: #fff; font-size: 14px; }
+    .avatar.codex-av { background: #dbeafe; color: #1d4ed8; }
+    .avatar.claude-av{ background: #f3e8ff; color: #7c3aed; }
+    .avatar.system-av{ background: var(--surface2); color: var(--muted); font-size: 13px; }
+
+    .bubble {
+      max-width: 72%;
+      padding: 10px 14px;
+      border-radius: 16px;
+      font-size: 13.5px;
+      line-height: 1.65;
+      box-shadow: var(--shadow);
+      word-break: break-word;
+    }
+    .bubble.user-bubble {
+      background: var(--accent);
+      color: #fff;
+      border-bottom-right-radius: 4px;
+    }
+    .bubble.agent-bubble {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 4px;
+    }
+    .bubble.system-bubble {
+      background: var(--surface2);
+      color: var(--muted);
+      font-size: 12px;
+      padding: 7px 12px;
+      border-radius: 8px;
+      align-self: center;
+      max-width: 90%;
+      text-align: center;
+    }
+
+    .bubble-name {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--muted);
+      margin-bottom: 3px;
+    }
+    .bubble-row.user .bubble-name { text-align: right; color: var(--accent); }
+
+    /* 打字机光标 */
+    .typing-cursor::after {
+      content: '▊';
+      color: var(--accent);
+      animation: blink .7s step-end infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    /* 输入区 */
+    .chat-input-area {
+      padding: 14px 20px;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+    .input-row {
+      display: flex;
+      gap: 8px;
+      align-items: flex-end;
+    }
+    .goal-input {
+      flex: 1;
+      padding: 10px 14px;
+      background: var(--surface2);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-family: inherit;
+      font-size: 14px;
+      resize: none;
+      outline: none;
+      min-height: 44px;
+      max-height: 120px;
+      transition: border-color .15s;
+      line-height: 1.5;
+    }
+    .goal-input:focus { border-color: var(--accent); }
+    .goal-input::placeholder { color: var(--muted); }
+
+    .send-btn {
+      width: 44px; height: 44px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      cursor: pointer;
+      font-size: 18px;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+      transition: opacity .15s, transform .1s;
+      box-shadow: 0 2px 8px rgba(201,106,42,.3);
+    }
+    .send-btn:hover:not(:disabled) { opacity: .88; transform: scale(1.05); }
+    .send-btn:disabled { opacity: .4; cursor: not-allowed; transform: none; }
+
+    .options-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .options-label {
+      font-size: 12px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .radio-group { display: flex; gap: 5px; }
+    .radio-btn {
+      padding: 4px 12px;
+      border-radius: 999px;
+      border: 1.5px solid var(--border);
+      background: var(--surface2);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all .15s;
+      user-select: none;
+    }
+    .radio-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .radio-btn.active {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+
+    .dispatch-btn {
+      margin-left: auto;
+      padding: 5px 14px;
+      border-radius: 999px;
+      background: var(--green);
+      color: #fff;
+      border: none;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex; align-items: center; gap: 5px;
+      transition: opacity .15s;
+      white-space: nowrap;
+    }
+    .dispatch-btn:hover:not(:disabled) { opacity: .85; }
+    .dispatch-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+    /* ── right panel: tasks ── */
+    .tasks-panel {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--surface2);
+    }
+    .tasks-header {
+      padding: 12px 16px;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+    .tasks-count {
+      font-size: 11px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      padding: 1px 7px;
+      border-radius: 999px;
+      font-weight: 700;
+    }
+    .tasks-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .tasks-empty {
+      padding: 24px 12px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    /* 任务卡片（默认折叠） */
+    .task-item {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      transition: box-shadow .15s;
+    }
+    .task-item:hover { box-shadow: var(--shadow); }
+    .task-item.active {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px var(--accent-soft);
+    }
+
+    .task-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .task-status-dot {
+      width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+    }
+    .sd-pending  { background: var(--yellow); }
+    .sd-running  { background: var(--blue);   animation: pulse .8s ease-in-out infinite alternate; }
+    .sd-done     { background: var(--green); }
+    .sd-failed   { background: var(--red); }
+    @keyframes pulse { from { opacity: .5; } to { opacity: 1; } }
+
+    .task-row-title {
+      flex: 1;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .task-row-agent {
+      font-size: 10px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .task-chevron {
+      font-size: 10px;
+      color: var(--muted);
+      transition: transform .15s;
+      flex-shrink: 0;
+    }
+    .task-item.open .task-chevron { transform: rotate(90deg); }
+
+    /* 展开详情 */
+    .task-detail {
+      display: none;
+      padding: 0 10px 10px;
+      border-top: 1px solid var(--border);
+    }
+    .task-item.open .task-detail { display: block; }
+    .task-detail-section {
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .task-detail-label {
+      font-weight: 700;
+      color: var(--text);
+      font-size: 11px;
+      margin-bottom: 3px;
+    }
+    .task-detail ul { margin-left: 14px; }
+    .task-detail li { margin-bottom: 2px; }
+    .task-accept-text { color: var(--green); font-size: 12px; }
+    .task-result-pre {
+      margin-top: 6px;
+      padding: 8px;
+      background: #fdf0e0;
+      border-radius: 6px;
+      font-size: 11px;
+      color: var(--text);
+      white-space: pre-wrap;
+      word-break: break-all;
+      max-height: 180px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+    }
+    .task-error-text { color: var(--red); font-size: 12px; margin-top: 4px; }
+
+    /* run 分组标题 */
+    .run-label {
+      padding: 6px 4px 2px;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--muted);
+    }
+
+    /* spinner */
+    .spinner {
+      width: 14px; height: 14px; border-radius: 50%;
+      border: 2px solid transparent;
+      border-top-color: currentColor;
+      animation: spin .6s linear infinite;
+      display: inline-block; vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+
+<!-- ── topbar ── -->
+<div class="topbar">
+  <div class="logo">myteam <span class="logo-sub">A2A 控制台</span></div>
+  <div class="agent-pills" id="agentPills">
+    <span class="agent-pill"><span class="dot"></span>连接中…</span>
+  </div>
+</div>
+
+<div class="layout">
+  <!-- ── 聊天区 ── -->
+  <div class="chat-area">
+    <div class="chat-messages" id="chatMessages">
+      <div class="chat-welcome" id="chatWelcome">
+        <div class="emoji">🤝</div>
+        <h2>欢迎来到 myteam</h2>
+        <p>在下方输入你的目标，我会帮你拆解成可执行的任务，<br>再交给 Claude 和 Codex 来完成。</p>
+      </div>
+    </div>
+
+    <div class="chat-input-area">
+      <div class="options-row">
+        <span class="options-label">规划 Agent：</span>
+        <div class="radio-group" id="planAgentGroup"></div>
+        <button class="dispatch-btn" id="dispatchBtn" disabled>
+          <span id="dispatchSpinner" class="spinner hidden"></span>
+          ▶ 执行 pending 任务
+        </button>
+      </div>
+      <div class="input-row">
+        <textarea
+          class="goal-input"
+          id="goalInput"
+          rows="1"
+          placeholder="输入目标，例如：帮我整理一份本周工作计划…"
+        ></textarea>
+        <button class="send-btn" id="sendBtn" title="发送">➤</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 任务面板 ── -->
+  <div class="tasks-panel">
+    <div class="tasks-header">
+      任务列表
+      <span class="tasks-count hidden" id="tasksCount">0</span>
+    </div>
+    <div class="tasks-list" id="tasksList">
+      <div class="tasks-empty">暂无任务</div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── 工具 ─────────────────────────────────────────────────────
+function esc(s) {
+  return String(s||'')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── chat helpers ─────────────────────────────────────────────
+const chatEl = document.getElementById('chatMessages');
+const welcome = document.getElementById('chatWelcome');
+let agentTypingBubble = null;
+
+function hideWelcome() {
+  if (welcome && welcome.parentNode) welcome.remove();
+}
+
+function addSystemMsg(text) {
+  const row = document.createElement('div');
+  row.innerHTML = `<div class="bubble system-bubble">${esc(text)}</div>`;
+  chatEl.appendChild(row);
+  scrollChat();
+}
+
+function addUserBubble(text) {
+  hideWelcome();
+  const row = document.createElement('div');
+  row.className = 'bubble-row user';
+  row.innerHTML = `
+    <div>
+      <div class="bubble-name">你</div>
+      <div class="bubble user-bubble">${esc(text)}</div>
+    </div>
+    <div class="avatar user-av">我</div>`;
+  chatEl.appendChild(row);
+  scrollChat();
+}
+
+function startAgentBubble(agentKey) {
+  hideWelcome();
+  const avatarMap = {
+    codex:  { cls: 'codex-av',  emoji: '🤖', name: 'Codex' },
+    claude: { cls: 'claude-av', emoji: '✨', name: 'Claude' },
+  };
+  const a = avatarMap[agentKey] || { cls: 'system-av', emoji: '●', name: agentKey };
+
+  const row = document.createElement('div');
+  row.className = 'bubble-row';
+  row.innerHTML = `
+    <div class="avatar ${a.cls}">${a.emoji}</div>
+    <div>
+      <div class="bubble-name">${a.name}</div>
+      <div class="bubble agent-bubble typing-cursor" id="typingBubble"></div>
+    </div>`;
+  chatEl.appendChild(row);
+  agentTypingBubble = row.querySelector('#typingBubble');
+  scrollChat();
+  return agentTypingBubble;
+}
+
+function appendTyping(text) {
+  if (!agentTypingBubble) return;
+  agentTypingBubble.textContent += text;
+  scrollChat();
+}
+
+function finishTyping() {
+  if (agentTypingBubble) {
+    agentTypingBubble.classList.remove('typing-cursor');
+    agentTypingBubble = null;
+  }
+}
+
+function scrollChat() {
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+// ── radio group ───────────────────────────────────────────────
+function buildRadioGroup(containerId, items, defaultVal) {
+  const el = document.getElementById(containerId);
+  el.innerHTML = '';
+  items.forEach(({ key, label }) => {
+    const btn = document.createElement('div');
+    btn.className = 'radio-btn' + (key === defaultVal ? ' active' : '');
+    btn.dataset.value = key;
+    btn.textContent = label;
+    btn.onclick = () => {
+      el.querySelectorAll('.radio-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+    };
+    el.appendChild(btn);
+  });
+}
+
+function getRadio(containerId) {
+  return document.querySelector(`#${containerId} .radio-btn.active`)?.dataset.value || '';
+}
+
+// ── status ────────────────────────────────────────────────────
+async function loadStatus() {
+  try {
+    const { agents } = await fetch('/api/status').then(r => r.json());
+    const pillsEl = document.getElementById('agentPills');
+    pillsEl.innerHTML = agents.map(a =>
+      `<span class="agent-pill ${a.available ? 'ok' : 'err'}">
+        <span class="dot"></span>${a.key}
+      </span>`
+    ).join('');
+
+    const availableAgents = agents.filter(a => a.available);
+    buildRadioGroup('planAgentGroup',
+      availableAgents.map(a => ({ key: a.key, label: a.key })),
+      availableAgents[0]?.key
+    );
+  } catch {
+    document.getElementById('agentPills').innerHTML =
+      '<span class="agent-pill err"><span class="dot"></span>离线</span>';
+    addSystemMsg('⚠ 无法连接 server.mjs，请先运行：node server.mjs');
+  }
+}
+
+// ── tasks ─────────────────────────────────────────────────────
+async function loadTasks() {
+  const { tasks } = await fetch('/api/tasks').then(r => r.json()).catch(() => ({ tasks: [] }));
+  renderTasks(tasks);
+  // 有 pending 就启用 dispatch 按钮
+  const hasPending = tasks.some(t => t.status === 'pending');
+  document.getElementById('dispatchBtn').disabled = !hasPending;
+  return tasks;
+}
+
+const STATUS_DOT = {
+  pending:     'sd-pending',
+  in_progress: 'sd-running',
+  done:        'sd-done',
+  failed:      'sd-failed',
+};
+
+function renderTasks(tasks) {
+  const el = document.getElementById('tasksList');
+  const countEl = document.getElementById('tasksCount');
+
+  if (!tasks.length) {
+    el.innerHTML = '<div class="tasks-empty">暂无任务</div>';
+    countEl.classList.add('hidden');
+    return;
+  }
+
+  countEl.textContent = tasks.length;
+  countEl.classList.remove('hidden');
+
+  // group by run_id
+  const runs = {};
+  tasks.forEach(t => { (runs[t.run_id] = runs[t.run_id] || []).push(t); });
+
+  el.innerHTML = '';
+  Object.entries(runs).forEach(([rid, items]) => {
+    const goal = items[0].goal || rid;
+    const shortGoal = goal.length > 20 ? goal.slice(0, 20) + '…' : goal;
+
+    const label = document.createElement('div');
+    label.className = 'run-label';
+    label.title = goal;
+    label.textContent = shortGoal;
+    el.appendChild(label);
+
+    items.forEach(task => {
+      const item = document.createElement('div');
+      item.className = 'task-item' + (task.status === 'in_progress' ? ' active' : '');
+      item.dataset.id = task.id;
+
+      const dotCls = STATUS_DOT[task.status] || 'sd-pending';
+      const agentLabel = task.executed_by || task.agent || '';
+
+      const steps = (task.steps || []).map(s => `<li>${esc(s)}</li>`).join('');
+      const accept = task.accept
+        ? `<div class="task-detail-section"><div class="task-detail-label">验收标准</div>
+           <div class="task-accept-text">✓ ${esc(task.accept)}</div></div>` : '';
+      const result = task.result
+        ? `<div class="task-detail-section"><div class="task-detail-label">执行结果</div>
+           <pre class="task-result-pre">${esc(task.result)}</pre></div>` : '';
+      const error = task.error
+        ? `<div class="task-error-text">✗ ${esc(task.error)}</div>` : '';
+
+      item.innerHTML = `
+        <div class="task-row">
+          <span class="task-status-dot ${dotCls}"></span>
+          <span class="task-row-title" title="${esc(task.title)}">${esc(task.title)}</span>
+          <span class="task-row-agent">${esc(agentLabel)}</span>
+          <span class="task-chevron">›</span>
+        </div>
+        <div class="task-detail">
+          ${steps ? `<div class="task-detail-section">
+            <div class="task-detail-label">步骤</div>
+            <ul>${steps}</ul></div>` : ''}
+          ${accept}
+          ${result}
+          ${error}
+        </div>`;
+
+      item.querySelector('.task-row').onclick = () => item.classList.toggle('open');
+      el.appendChild(item);
+    });
+  });
+}
+
+function updateTaskDot(id, status) {
+  const item = document.querySelector(`.task-item[data-id="${id}"]`);
+  if (!item) return;
+  const dot = item.querySelector('.task-status-dot');
+  if (dot) {
+    dot.className = `task-status-dot ${STATUS_DOT[status] || 'sd-pending'}`;
+  }
+  item.classList.toggle('active', status === 'in_progress');
+}
+
+// ── SSE fetch ─────────────────────────────────────────────────
+function ssePost(url, body, handlers) {
+  return new Promise(resolve => {
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(async res => {
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const parts = buf.split('\n\n');
+        buf = parts.pop();
+        for (const block of parts) {
+          let event = 'message', data = '';
+          for (const line of block.split('\n')) {
+            if (line.startsWith('event: ')) event = line.slice(7).trim();
+            if (line.startsWith('data: '))  data  = line.slice(6).trim();
+          }
+          let parsed;
+          try { parsed = JSON.parse(data); } catch { continue; }
+          handlers[event]?.(parsed);
+          if (event === 'done') resolve(parsed);
+        }
+      }
+      resolve(null);
+    }).catch(err => { handlers.error?.({ message: err.message }); resolve(null); });
+  });
+}
+
+// ── plan ──────────────────────────────────────────────────────
+const sendBtn   = document.getElementById('sendBtn');
+const goalInput = document.getElementById('goalInput');
+
+async function doPlan() {
+  const goal = goalInput.value.trim();
+  if (!goal) return;
+  const agent = getRadio('planAgentGroup') || 'codex';
+
+  goalInput.value = '';
+  goalInput.style.height = '';
+  sendBtn.disabled = true;
+  document.getElementById('dispatchBtn').disabled = true;
+
+  addUserBubble(goal);
+  addSystemMsg(`正在让 ${agent} 拆解任务…`);
+  const bubble = startAgentBubble(agent);
+
+  await ssePost('/api/plan', { goal, agent }, {
+    chunk: ({ text }) => appendTyping(text),
+    error: ({ message }) => {
+      finishTyping();
+      addSystemMsg(`✗ 拆任务失败：${message}`);
+    },
+    done: ({ runId, written }) => {
+      finishTyping();
+      addSystemMsg(`✓ 拆解完成，共 ${written} 条任务（run_id: ${runId}）`);
+    },
+  });
+
+  sendBtn.disabled = false;
+  await loadTasks();
+}
+
+sendBtn.onclick = doPlan;
+goalInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doPlan(); }
+});
+goalInput.addEventListener('input', () => {
+  goalInput.style.height = 'auto';
+  goalInput.style.height = Math.min(goalInput.scrollHeight, 120) + 'px';
+});
+
+// ── dispatch ─────────────────────────────────────────────────
+document.getElementById('dispatchBtn').onclick = async () => {
+  const dispatchBtn = document.getElementById('dispatchBtn');
+  const dispatchSpinner = document.getElementById('dispatchSpinner');
+
+  dispatchBtn.disabled = true;
+  dispatchSpinner.classList.remove('hidden');
+  sendBtn.disabled = true;
+
+  addSystemMsg('开始执行所有 pending 任务…');
+
+  await ssePost('/api/dispatch', {}, {
+    start:        ({ count }) => addSystemMsg(`共 ${count} 条任务待执行`),
+    'task-start': ({ id, title, agent }) => {
+      updateTaskDot(id, 'in_progress');
+      startAgentBubble(agent);
+      appendTyping(`[${title}]\n`);
+    },
+    chunk:        ({ text }) => appendTyping(text),
+    'task-done':  ({ id }) => { finishTyping(); updateTaskDot(id, 'done'); },
+    'task-failed':({ id, error }) => {
+      finishTyping();
+      updateTaskDot(id, 'failed');
+      addSystemMsg(`✗ 任务失败：${error}`);
+    },
+    done: ({ done, failed }) => {
+      addSystemMsg(`✓ 全部执行完毕：${done} 成功 / ${failed} 失败`);
+    },
+    error: ({ message }) => addSystemMsg(`✗ ${message}`),
+  });
+
+  dispatchSpinner.classList.add('hidden');
+  sendBtn.disabled = false;
+  await loadTasks();
+};
+
+// ── 初始化 ────────────────────────────────────────────────────
+loadStatus();
+loadTasks();
+</script>
+</body>
+</html>

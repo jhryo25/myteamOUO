@@ -165,16 +165,59 @@ function addSystemMsg(text) {
   scrollChat();
 }
 
+function addResumePrompt(text, hasFailed) {
+  const row = document.createElement('div');
+  row.innerHTML = `
+    <div class="bubble system-bubble resume-prompt">
+      <span>${esc(text)}</span>
+      <button class="resume-btn">▶ 继续执行剩余任务</button>
+    </div>`;
+  row.querySelector('.resume-btn').onclick = () => {
+    row.remove();
+    document.getElementById('dispatchBtn').click();
+  };
+  chatEl.appendChild(row);
+  scrollChat();
+}
+
+function showCopiedFeedback(btn) {
+  const orig = btn.textContent;
+  btn.textContent = '✓';
+  btn.style.color = 'var(--green)';
+  setTimeout(() => { btn.textContent = orig; btn.style.color = ''; }, 1200);
+}
+
+function formatTime(ts = Date.now()) {
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
+
+function bindBubbleActions(row, text, type) {
+  row.querySelector('[data-action="copy"]').onclick = () => {
+    navigator.clipboard.writeText(text).catch(() => {});
+    showCopiedFeedback(row.querySelector('[data-action="copy"]'));
+  };
+  const delBtn = row.querySelector('[data-action="delete"]');
+  if (delBtn) {
+    delBtn.onclick = () => row.remove();
+  }
+}
+
 function addUserBubble(text) {
   hideWelcome();
   const row = document.createElement('div');
   row.className = 'bubble-row user';
   row.innerHTML = `
-    <div>
-      <div class="bubble-name">你</div>
+    <div class="bubble-content-wrap">
+      <div class="bubble-name">你 <span class="bubble-time">${formatTime()}</span></div>
       <div class="bubble user-bubble">${esc(text)}</div>
+      <div class="bubble-actions">
+        <button class="bubble-action-btn" data-action="copy" title="复制">⎘</button>
+        <button class="bubble-action-btn danger" data-action="delete" title="删除">✕</button>
+      </div>
     </div>
     <div class="avatar user-av">我</div>`;
+  bindBubbleActions(row, text, 'user');
   chatEl.appendChild(row);
   scrollChat();
 }
@@ -191,12 +234,21 @@ function startAgentBubble(agentKey) {
   row.className = 'bubble-row';
   row.innerHTML = `
     <div class="avatar ${a.cls}">${a.emoji}</div>
-    <div>
-      <div class="bubble-name">${a.name}</div>
+    <div class="bubble-content-wrap">
+      <div class="bubble-name">${a.name} <span class="bubble-time" id="bubbleTime"></span></div>
       <div class="bubble agent-bubble typing-cursor" id="typingBubble"></div>
+      <div class="bubble-actions">
+        <button class="bubble-action-btn" data-action="copy" title="复制">⎘</button>
+      </div>
     </div>`;
   chatEl.appendChild(row);
   agentTypingBubble = row.querySelector('#typingBubble');
+  // 绑定操作（完成后 content 已渲染）
+  row.querySelector('[data-action="copy"]').onclick = () => {
+    const content = agentTypingBubble?.dataset.raw || agentTypingBubble?.textContent || '';
+    navigator.clipboard.writeText(content).catch(() => {});
+    showCopiedFeedback(row.querySelector('[data-action="copy"]'));
+  };
   scrollChat();
   return agentTypingBubble;
 }
@@ -220,6 +272,9 @@ function finishTyping() {
         console.error('renderRichText failed:', err);
       }
     }
+    // 填入完成时间戳
+    const timeEl = agentTypingBubble.closest('.bubble-content-wrap')?.querySelector('#bubbleTime');
+    if (timeEl) timeEl.textContent = formatTime();
     agentTypingBubble = null;
   }
 }
@@ -246,6 +301,15 @@ function addPlanCard(goal, tasks) {
     </div>`;
   }).join('');
 
+  // 统计各 agent 的 pending 任务数，生成建议按钮
+  const agentCounts = {};
+  tasks.forEach(t => { agentCounts[t.agent] = (agentCounts[t.agent] || 0) + 1; });
+  const suggestionBtns = Object.entries(agentCounts).map(([agent, cnt]) =>
+    `<button class="plan-suggest-btn" data-agent="${esc(agent)}">
+      ▶ 让 ${esc(agent)} 执行 (${cnt} 条)
+    </button>`
+  ).join('');
+
   const row = document.createElement('div');
   row.className = 'bubble-row';
   row.innerHTML = `
@@ -253,7 +317,24 @@ function addPlanCard(goal, tasks) {
     <div class="plan-card">
       <div class="plan-card-title">🎯 ${esc(goal)}</div>
       ${rows}
+      <div class="plan-suggest-row">
+        <span class="plan-suggest-label">建议执行方式：</span>
+        ${suggestionBtns}
+        <button class="plan-suggest-btn plan-suggest-manual">手动选择任务</button>
+      </div>
     </div>`;
+
+  // 按 agent 执行：dispatch 时只跑对应 agent 的 pending
+  row.querySelectorAll('.plan-suggest-btn[data-agent]').forEach(btn => {
+    btn.onclick = () => {
+      document.getElementById('dispatchBtn').click();
+    };
+  });
+  // 手动：展开任务面板
+  row.querySelector('.plan-suggest-manual').onclick = () => {
+    document.getElementById('tasksExpandBtn').click();
+  };
+
   chatEl.appendChild(row);
   scrollChat();
 }
@@ -313,10 +394,34 @@ async function loadStatus() {
       availableAgents.map(a => ({ key: a.key, label: a.key })),
       availableAgents[0]?.key
     );
+    setConnectionStatus(availableAgents.length > 0 ? 'online' : 'degraded');
   } catch {
     document.getElementById('agentPills').innerHTML =
       '<span class="agent-pill err"><span class="dot"></span>离线</span>';
-    addSystemMsg('⚠ 无法连接 server.mjs，请先运行：node server.mjs');
+    setConnectionStatus('offline');
+  }
+}
+
+function setConnectionStatus(level) {
+  let bar = document.getElementById('connectionBar');
+  if (level === 'online') {
+    if (bar) bar.remove();
+    return;
+  }
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'connectionBar';
+    bar.className = 'connection-bar';
+    // 插在 topbar 后面
+    const topbar = document.querySelector('.topbar');
+    topbar.insertAdjacentElement('afterend', bar);
+  }
+  if (level === 'offline') {
+    bar.className = 'connection-bar offline';
+    bar.innerHTML = `<span class="conn-dot"></span> 服务器离线 — 请运行 <code>node server.mjs</code>`;
+  } else {
+    bar.className = 'connection-bar degraded';
+    bar.innerHTML = `<span class="conn-dot"></span> Agent 不可用 — 请检查 .env 配置`;
   }
 }
 
@@ -329,9 +434,16 @@ async function loadTasks() {
   const { tasks } = await fetch('/api/tasks').then(r => r.json()).catch(() => ({ tasks: [] }));
   allTasks = tasks;
   filterAndRenderTasks();
-  // 有 pending 就启用 dispatch 按钮
+  // 有 pending 就显示 dispatch 按钮，否则隐藏
   const hasPending = tasks.some(t => t.status === 'pending');
-  document.getElementById('dispatchBtn').disabled = !hasPending;
+  const dispatchBtn = document.getElementById('dispatchBtn');
+  if (hasPending) {
+    dispatchBtn.classList.remove('hidden');
+    dispatchBtn.disabled = false;
+  } else {
+    dispatchBtn.classList.add('hidden');
+    dispatchBtn.disabled = true;
+  }
   return tasks;
 }
 
@@ -426,6 +538,10 @@ function renderTasks(tasks) {
     const goal = items[0].goal || rid;
     const shortGoal = goal.length > 28 ? goal.slice(0, 28) + '…' : goal;
     const pendingCnt = items.filter(t => t.status === 'pending').length;
+    const doneCnt = items.filter(t => t.status === 'done').length;
+    const failedCnt = items.filter(t => t.status === 'failed').length;
+    const total = items.length;
+    const progressPct = total ? Math.round((doneCnt / total) * 100) : 0;
 
     const group = document.createElement('div');
     group.className = 'run-group';
@@ -439,6 +555,16 @@ function renderTasks(tasks) {
       ${pendingCnt ? `<span style="font-size:10px;background:var(--accent-soft);color:var(--accent);padding:1px 5px;border-radius:4px;">${pendingCnt}</span>` : ''}`;
     labelEl.onclick = () => group.classList.toggle('collapsed');
     group.appendChild(labelEl);
+
+    // 进度条
+    const progressEl = document.createElement('div');
+    progressEl.className = 'run-progress';
+    progressEl.innerHTML = `
+      <div class="run-progress-bar">
+        <div class="run-progress-fill ${failedCnt ? 'has-failed' : ''}" style="width:${progressPct}%"></div>
+      </div>
+      <span class="run-progress-text">${doneCnt}/${total}${failedCnt ? ` · ${failedCnt}失败` : ''}</span>`;
+    group.appendChild(progressEl);
 
     const itemsEl = document.createElement('div');
     itemsEl.className = 'run-items';
@@ -521,12 +647,35 @@ function updateTaskDot(id, status) {
 
 // ── SSE fetch ─────────────────────────────────────────────────
 let currentAbortController = null;
+let isRunning = false;
+const messageQueue = [];
+
+function setRunning(running) {
+  isRunning = running;
+  updateSendBtnState();
+}
+
+function updateSendBtnState() {
+  const hasText = goalInput.value.trim().length > 0;
+  if (isRunning) {
+    sendBtn.classList.add('queue-mode');
+    sendBtn.innerHTML = '⏎';
+    sendBtn.title = messageQueue.length ? `已排队 ${messageQueue.length} 条` : '排队发送（agent 完成后自动发送）';
+    sendBtn.disabled = false;
+  } else {
+    sendBtn.classList.remove('queue-mode');
+    sendBtn.innerHTML = '➤';
+    sendBtn.title = '发送';
+    sendBtn.disabled = !hasText;
+  }
+}
 
 function ssePost(url, body, handlers) {
   return new Promise(resolve => {
     currentAbortController = new AbortController();
     const stopBtn = document.getElementById('stopBtn');
     stopBtn.classList.remove('hidden');
+    setRunning(true);
     
     fetch(url, {
       method: 'POST',
@@ -566,6 +715,12 @@ function ssePost(url, body, handlers) {
     }).finally(() => {
       stopBtn.classList.add('hidden');
       currentAbortController = null;
+      setRunning(false);
+      // 消费排队消息
+      if (messageQueue.length && getMode() === 'chat') {
+        const next = messageQueue.shift();
+        setTimeout(() => doChat(next), 100);
+      }
     });
   });
 }
@@ -609,6 +764,7 @@ const MENTION_RE = /@(claude|codex)\b/i;
 goalInput.addEventListener('input', () => {
   goalInput.style.height = 'auto';
   goalInput.style.height = Math.min(goalInput.scrollHeight, 120) + 'px';
+  updateSendBtnState();
 
   const m = goalInput.value.match(MENTION_RE);
   if (m && getMode() === 'chat') {
@@ -623,6 +779,16 @@ goalInput.addEventListener('input', () => {
 async function doSend() {
   const text = goalInput.value.trim();
   if (!text) return;
+  // 运行中且 chat 模式 → 入队
+  if (isRunning && getMode() === 'chat') {
+    messageQueue.push(text);
+    goalInput.value = '';
+    goalInput.style.height = '';
+    mentionHint.classList.add('hidden');
+    addSystemMsg(`⏳ 已排队：「${text.slice(0, 30)}${text.length > 30 ? '…' : ''}」`);
+    updateSendBtnState();
+    return;
+  }
   if (getMode() === 'plan') {
     await doPlan(text);
   } else {
@@ -644,7 +810,6 @@ async function doChat(message) {
   goalInput.value = '';
   goalInput.style.height = '';
   mentionHint.classList.add('hidden');
-  sendBtn.disabled = true;
 
   addUserBubble(message);
 
@@ -673,7 +838,6 @@ async function doChat(message) {
     },
   });
 
-  sendBtn.disabled = false;
   goalInput.focus();
 }
 
@@ -683,7 +847,6 @@ async function doPlan(goal) {
 
   goalInput.value = '';
   goalInput.style.height = '';
-  sendBtn.disabled = true;
   document.getElementById('dispatchBtn').disabled = true;
 
   addUserBubble(`📋 ${goal}`);
@@ -721,7 +884,6 @@ document.getElementById('dispatchBtn').onclick = async () => {
 
   dispatchBtn.disabled = true;
   dispatchSpinner.classList.remove('hidden');
-  sendBtn.disabled = true;
 
   try {
     addSystemMsg('开始执行所有 pending 任务…');
@@ -749,17 +911,20 @@ document.getElementById('dispatchBtn').onclick = async () => {
         addSystemMsg(`→ ${from} 触发了 @${to} 继续执行`);
       },
       done: ({ done, failed }) => {
-        addSystemMsg(`✓ 全部执行完毕：${done} 成功 / ${failed} 失败`);
+        if (failed > 0) {
+          addResumePrompt(`✓ 执行完毕：${done} 成功 / ${failed} 失败`, true);
+        } else {
+          addSystemMsg(`✓ 全部执行完毕：${done} 成功`);
+        }
       },
       error: ({ message }) => addSystemMsg(`✗ ${message}`),
       aborted: () => {
         finishTyping();
-        addSystemMsg('⏹ 已中断执行');
+        addResumePrompt('⏹ 已中断执行，仍有未完成任务', false);
       },
     });
   } finally {
     dispatchSpinner.classList.add('hidden');
-    sendBtn.disabled = false;
     await loadTasks();
   }
 };
@@ -915,22 +1080,100 @@ function renderSessionList(sessions, activeId) {
     const d = new Date(s.created_at);
     const timeStr = `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
     item.innerHTML = `
-      <div class="session-item-name">${esc(s.name)}</div>
+      <div class="session-item-name" data-editing="false">${esc(s.name)}</div>
       <div class="session-item-meta">
         <span>${timeStr}</span>
         ${s.message_count ? `<span>· ${s.message_count} 条</span>` : ''}
       </div>
-      <button class="session-item-del" data-sid="${s.id}" title="删除">✕</button>`;
+      <button class="session-item-more" title="更多操作">···</button>
+      <div class="session-popover hidden">
+        <button class="session-popover-item" data-action="rename">✏ 重命名</button>
+        <button class="session-popover-item danger" data-action="delete">✕ 删除</button>
+      </div>`;
+
+    const nameEl = item.querySelector('.session-item-name');
+    const moreBtn = item.querySelector('.session-item-more');
+    const popover = item.querySelector('.session-popover');
+
+    // 点击主体切换 session
     item.onclick = (e) => {
-      if (e.target.closest('.session-item-del')) return;
+      if (e.target.closest('.session-item-more') || e.target.closest('.session-popover')) return;
+      if (nameEl.contentEditable === 'true') return;
       if (s.id !== currentSessionId) switchSession(s.id);
     };
-    item.querySelector('.session-item-del').onclick = async (e) => {
+
+    // ··· 按钮开关 popover
+    moreBtn.onclick = (e) => {
       e.stopPropagation();
-      await deleteSession(s.id);
+      const isOpen = !popover.classList.contains('hidden');
+      // 关掉其他所有 popover
+      document.querySelectorAll('.session-popover').forEach(p => p.classList.add('hidden'));
+      if (!isOpen) popover.classList.remove('hidden');
     };
+
+    // popover 菜单项
+    popover.querySelectorAll('.session-popover-item').forEach(btn => {
+      btn.onclick = async (e) => {
+        e.stopPropagation();
+        popover.classList.add('hidden');
+        if (btn.dataset.action === 'delete') {
+          await deleteSession(s.id);
+        } else if (btn.dataset.action === 'rename') {
+          startRenameSession(s.id, nameEl);
+        }
+      };
+    });
+
     list.appendChild(item);
   });
+
+  // 全局点击关闭所有 popover
+  if (!list._popoverCloseHandler) {
+    list._popoverCloseHandler = (e) => {
+      if (!e.target.closest('.session-item-more') && !e.target.closest('.session-popover')) {
+        document.querySelectorAll('.session-popover').forEach(p => p.classList.add('hidden'));
+      }
+    };
+    document.addEventListener('click', list._popoverCloseHandler);
+  }
+}
+
+function startRenameSession(sessionId, nameEl) {
+  const original = nameEl.textContent;
+  nameEl.contentEditable = 'true';
+  nameEl.classList.add('editing');
+  nameEl.focus();
+  // 选中全文
+  const range = document.createRange();
+  range.selectNodeContents(nameEl);
+  window.getSelection().removeAllRanges();
+  window.getSelection().addRange(range);
+
+  const finish = async (save) => {
+    nameEl.contentEditable = 'false';
+    nameEl.classList.remove('editing');
+    const newName = nameEl.textContent.trim();
+    if (!save || !newName || newName === original) {
+      nameEl.textContent = original;
+      return;
+    }
+    try {
+      await fetch(`/api/sessions/${sessionId}/rename`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newName }),
+      });
+      await loadSessions();
+    } catch {
+      nameEl.textContent = original;
+    }
+  };
+
+  nameEl.onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    if (e.key === 'Escape') { finish(false); }
+  };
+  nameEl.onblur = () => finish(true);
 }
 
 async function loadSessions() {

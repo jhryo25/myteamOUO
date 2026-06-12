@@ -2,7 +2,7 @@
 
 > 用于新对话冷启动。AI 读完此文件即可接续工作，无需重新理解历史。
 > 
-> **最后更新**: 2026-06-12（IMP-006 代码拆分完成后）
+> **最后更新**: 2026-06-12（IMP-007~010 交互对齐 clowder-ai 完成）
 
 ---
 
@@ -179,7 +179,7 @@ NDJSON 解析：
 21. **.gitignore 遗漏 memory.json**：已添加
 22. **trashedSessions 不持久化**：写入 memory.json，重启后回收站保留
 
-### ✅ 已完成改进（IMP-001~006）
+### ✅ 已完成改进（IMP-001~009）
 
 1. **@mention 改行首匹配**：防止代码/引用中误触发路由
 2. **A2A 链式加乒乓球熔断**：检测 A→B→A→B 交替模式，自动熔断
@@ -187,14 +187,25 @@ NDJSON 解析：
 4. **代码去重**：共享逻辑抽到 `agent-utils.mjs`
 5. **extractJson 贪心匹配修复**：改用括号配对算法
 6. **web/app.html 拆分**：CSS + JS + HTML 三文件分离
+7. **"任务"竖排字倒置修复**：`writing-mode: vertical-rl + rotate(180deg)` → `vertical-lr`（IMP-007）
+8. **pending 按钮改隐藏逻辑**：无 pending 任务时隐藏而非 disabled（IMP-008）
+9. **plan 完成后执行建议**：plan card 底部增加按 agent 分组的建议按钮 + 手动选择（IMP-008）
+10. **Session sidebar popover 菜单**：`···` 按钮展开 rename/delete，inline 重命名，`POST /api/sessions/:id/rename`（IMP-009）
+11. **任务 run 进度条**：任务面板每个 run-group 显示 done/total 进度条，失败时红色（IMP-009）
+12. **中断-继续提示**：dispatch abort 或有 failed 时，聊天区出现高亮"继续执行剩余任务"按钮（IMP-009）
+13. **消息 hover 操作栏**：气泡 hover 时浮出复制/删除按钮，参考 clowder-ai MessageActions（IMP-010）
+14. **发送按钮状态机**：运行中变蓝色"排队"模式（⏎），消息入队，完成后自动消费；无文字时 disabled（IMP-010）
+15. **消息时间戳**：用户气泡显示发送时间，agent 气泡显示完成时间（IMP-010）
+16. **连接状态条**：server 离线/agent 不可用时，topbar 下方出现颜色状态条（IMP-010）
 
 ### 🟡 下一步（可选）
 
 - **Kimi 接入**：KimiCode CLI 需手动安装
-- **P2 优化**：lessons UI、agent pill 执行高亮、session 重命名、历史分页
+- **P2 优化**：lessons UI、agent pill 执行高亮、历史分页
 - **消息写入与执行解耦**：参考 clowder-ai ADR-008，POST 立即返回 → WebSocket 推流
 - **InvocationRecord 状态机**：每次 chat/plan/dispatch 创建 invocation record
 - **Skills 按需加载机制**：参考 clowder-ai 50+ skills 目录结构
+- **Session Draft 持久化**：切换 session 时保留输入框草稿（clowder-ai `threadDrafts` 模式）
 
 ---
 

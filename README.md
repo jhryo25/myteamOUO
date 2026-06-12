@@ -1,79 +1,124 @@
 # myteamOUO
 
-myteamOUO 是 myteam 的轻量级 A2A 协作工具 MVP。
+轻量级本地 A2A（Agent-to-Agent）协作工具 MVP。
 
-它要解决的问题是：如何用低成本的方式，让多个 agent 像一个小团队一样协作，并且能留下任务记录、审查结果和自迭代线索。
+让 Claude 和 Codex 像一个小团队一样协作——对话、拆任务、执行、留记录。
 
-## 当前 Agent 阵容
+**GitHub**: https://github.com/jhryo25/myteamOUO  
+**参考项目**: [clowder-ai](https://github.com/zts212653/clowder-ai) / [cat-cafe-tutorials](https://github.com/zts212653/cat-cafe-tutorials)
 
-| Agent | 角色 | 定位 |
-|-------|------|------|
-| Agent1 Kimi | 轻量执行 | 接收明确小任务：草稿、命令执行、内容补充 |
-| Agent2 Claude | 主架构 / 深度实现 | 深度分析、架构设计、复杂代码生成 |
-| Agent3 Codex | 总控 / 审查 / 自迭代 | 拆任务、决定派工、审查证据、记录经验 |
+---
 
-## 配置 CLI 路径（重要）
+## 快速启动
 
-真实路径不会提交到 GitHub，统一通过 `.env` 文件管理。
+```powershell
+# 1. 复制 .env.example → .env，填入本地 CLI 路径
+cp .env.example .env
 
-1. 复制 `.env.example` 为 `.env`
-2. 在 `.env` 中填入本机真实路径，例如：
+# 2. 启动服务
+node server.mjs
+
+# 3. 打开浏览器
+# http://localhost:7878
+```
+
+---
+
+## Agent 阵容
+
+| Agent | 角色 |
+|-------|------|
+| Claude | 深度分析、架构设计、复杂生成 |
+| Codex | 拆任务、代码执行、审查 |
+
+---
+
+## 功能
+
+### 对话模式
+- 直接发消息，自动路由给默认 agent
+- `@claude` / `@codex` 指定 agent
+- 气泡 hover 显示复制 / 删除操作栏
+- 发送按钮状态机：agent 运行中变蓝色排队模式，消息自动入队，完成后依次发送
+- 消息时间戳
+
+### 拆任务模式
+- 切换到「拆任务」，输入目标
+- Agent 返回结构化任务清单（标题 / 步骤 / 验收标准 / 负责 agent）
+- plan card 底部推荐执行方式：按 agent 分组 + 手动选择
+
+### 任务执行
+- 「执行 pending 任务」按钮（仅在有 pending 时出现）
+- 右侧任务面板：run 分组 + 进度条 + 状态 dot（pending / running / done / failed）
+- dispatch 中断或有失败时，聊天区出现「继续执行剩余任务」按钮
+
+### Session 管理
+- 多对话 session，左侧边栏切换
+- `···` hover 菜单：重命名（inline 编辑）/ 删除
+- 回收站：30 天内可恢复
+
+### 状态
+- topbar agent pill：绿色 = 在线，红色 = 不可用
+- 连接状态条：server 离线 / agent 不可用时显示颜色提示条
+
+---
+
+## 文件结构
+
+```
+myteamOUO/
+├── server.mjs        # Node HTTP server，REST + SSE，端口 7878
+├── plan.mjs          # 拆任务：调 agent → .myteam/tasks.jsonl
+├── dispatch.mjs      # 执行：读 pending 任务 → 分发 → 写回结果
+├── agent-utils.mjs   # 公共模块：loadEnv / invokeAgent / 任务 CRUD
+├── web/
+│   ├── app.html      # HTML 骨架
+│   ├── app.css       # 全部样式
+│   └── app.js        # 全部前端逻辑
+├── .myteam/
+│   ├── agents.yaml   # agent 角色配置（入库）
+│   └── tasks.jsonl   # 运行时任务（不入库）
+├── HANDOVER.md       # AI 冷启动交接文档
+└── ISSUES.md         # 问题 / 解法 / 教训
+```
+
+---
+
+## API
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/status` | agent 可用状态 |
+| GET | `/api/sessions` | session 列表 |
+| POST | `/api/sessions` | 新建 / 切换 session |
+| POST | `/api/sessions/:id/rename` | 重命名 session |
+| DELETE | `/api/sessions?id=` | 删除（移入回收站） |
+| POST | `/api/chat` | SSE 对话流 |
+| POST | `/api/plan` | SSE 拆任务流 |
+| POST | `/api/dispatch` | SSE 执行任务流 |
+| GET | `/api/tasks` | 任务列表 |
+| PATCH | `/api/tasks/:id` | 更新任务状态 |
+| DELETE | `/api/tasks/:id` | 删除任务 |
+
+---
+
+## 环境变量（`.env`）
 
 ```env
-KIMI_PATH=C:\path\to\kimi.exe
 CLAUDE_PATH=C:\path\to\claude.cmd
 CODEX_PATH=C:\path\to\codex.cmd
 ```
 
-`.gitignore` 已包含 `.env`，本地路径不会被推上去。
+`.env` 已在 `.gitignore`，不会上传。
 
-## 当前版本能做什么
+---
 
-- 创建 `.myteam` 协作目录
-- 登记 Agent1 Kimi / Agent2 Claude / Agent3 Codex 的协作配置
-- 创建任务记录、踩坑记录和长期记忆文件
-- 提供 `init`、`status`、`ui` 三个命令
-- 提供 `index.html` 最小 HTML 验收页面（路径已脱敏展示）
+## 新对话冷启动 Prompt
 
-## 怎么运行
-
-```powershell
-python myteam.py init      # 初始化骨架
-python myteam.py status    # 查看状态（含三 CLI 检测）
-python myteam.py ui        # 重新生成验收页面
-python myteam.py plan "目标描述"              # 调用 Codex 拆任务（默认）
-python myteam.py plan "目标描述" --agent claude  # 指定用 Claude 拆
 ```
+项目：myteamOUO（本地 A2A 协作工具 MVP）
+GitHub: https://github.com/jhryo25/myteamOUO
+本地路径: F:\py project\myteamOUO
 
-也可以直接用 Node.js 调用：
-
-```powershell
-node plan.mjs "目标描述"
-node plan.mjs "目标描述" --agent claude
+请先读取 HANDOVER.md 了解当前进度，然后继续下一步工作。
 ```
-
-## `.myteam` 目录是什么
-
-- `.myteam/agents.yaml`：登记三个 Agent 的角色与对应环境变量名
-- `.myteam/tasks.jsonl`：任务记录
-- `.myteam/lessons.jsonl`：踩坑记录
-- `.myteam/memory.md`：长期经验
-- `.myteam/runs/`：每轮自迭代运行记录
-
-## GitHub 版本管控
-
-```text
-https://github.com/jhryo25/myteamOUO
-```
-
-```powershell
-git status
-git add .
-git commit -m "你的提交说明"
-git push
-```
-
-## 下一步
-
-- 加 `plan` 命令：Controller Agent 把目标拆成可执行小任务
-- 加 `dispatch` 命令：根据任务类型派给 Kimi / Claude / Codex

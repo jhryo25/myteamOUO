@@ -386,6 +386,26 @@ async function handle(req, res) {
     return res.end(JSON.stringify({ ok: true, session: s, activeId: activeSessionId }));
   }
 
+  // POST /api/sessions/:id/rename — 重命名 session
+  if (req.method === 'POST' && /^\/api\/sessions\/[^/]+\/rename$/.test(pathname)) {
+    const id = pathname.split('/')[3];
+    const s = sessions.find(s => s.id === id);
+    if (!s) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'session 不存在' }));
+    }
+    const body = await readBody(req);
+    const name = (body.name || '').trim();
+    if (!name) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'name 不能为空' }));
+    }
+    s.name = name;
+    saveSessions();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, session: s }));
+  }
+
   // DELETE /api/sessions?id=xxx — 删除 session（移入回收站）
   if (req.method === 'DELETE' && pathname === '/api/sessions') {
     const id = url.searchParams.get('id');

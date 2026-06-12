@@ -122,7 +122,40 @@
 
 ---
 
-## 待实施改进
+## Phase 3: clowder-ai 交互对齐 (2026-06-12)
+
+### IMP-007: 任务栏竖排文字倒置 [bug]
+
+- **位置**: `web/app.css:458`
+- **问题**: `writing-mode: vertical-rl` + `transform: rotate(180deg)` 双重翻转，"任务"两字倒读
+- **解法**: 改为 `writing-mode: vertical-lr` + `rotate(0deg)`
+- **教训**: `vertical-rl` 字符本身已从上到下排列，`rotate(180deg)` 是多余的翻转
+
+### IMP-008: 交互对齐 - pending 按钮 + plan 执行建议 [ux]
+
+- **参考**: clowder-ai PlanBoardPanel 任务卡片有 running/interrupted/completed 分组
+- **改动 1**: dispatch 按钮无 pending 时隐藏（而非 disabled），有任务时才出现
+- **改动 2**: plan 完成后 plan card 底部增加"执行建议"行，按 agent 分组 + 手动选择两种入口
+- **教训**: 主动展示建议比被动等用户发现 pending 按钮体验更好
+
+### IMP-009: 交互对齐 - session popover + 进度条 + 中断继续 [ux]
+
+- **参考**: clowder-ai ThreadItem.tsx popover 操作菜单 + PlanBoardPanel 进度条 + interrupted 继续按钮
+- **改动 1**: session sidebar `session-item-del` → `session-item-more` (`···`) 按钮展开 popover，含 rename/delete；rename 走 inline `contentEditable`；后端新增 `POST /api/sessions/:id/rename`
+- **改动 2**: 任务面板每个 run-group 标题下加 done/total 进度条，有 failed 时红色
+- **改动 3**: dispatch abort 或有 failed 时，聊天区出现橙色高亮 `resume-prompt`，内嵌"继续执行剩余任务"按钮，点击触发 dispatchBtn
+- **教训**: 中断恢复需要贴近上下文的触发入口（在聊天流里），而不是让用户去找面板按钮
+
+### IMP-010: 交互对齐 - hover 操作栏 + 排队发送 + 时间戳 + 连接状态条 [ux]
+
+- **参考**: clowder-ai MessageActions.tsx + ChatInputActionButton.tsx + ChatMessage.tsx + ConnectionStatusBar.tsx
+- **改动 1 (hover 操作栏)**: `.bubble-content-wrap` 内绝对定位 `.bubble-actions`，hover 时浮现；用户气泡含复制+删除，agent 气泡含复制；`navigator.clipboard.writeText` + 1.2s `✓` 反馈
+- **改动 2 (排队发送)**: 新增 `isRunning` 状态 + `messageQueue` 数组；运行中 sendBtn 变蓝色 `.queue-mode` (⏎)；`doSend` 检测 isRunning 时入队 + addSystemMsg 提示；`ssePost` finally 自动消费队列；移除原 `doChat`/`doPlan`/`dispatch` 中手动 `sendBtn.disabled` 由 `setRunning` + `updateSendBtnState` 统一管理
+- **改动 3 (时间戳)**: `formatTime(ts)` 工具；用户气泡 `bubble-name` 内嵌 `HH:MM`；agent 气泡占位 `#bubbleTime`，`finishTyping` 时回填完成时间
+- **改动 4 (连接状态条)**: `setConnectionStatus(level)`，level `online` 时移除 bar，`degraded`/`offline` 时在 topbar 后插入颜色 bar；脉冲 dot 动画
+- **教训**: 
+  - 异步状态用全局 `isRunning` + 单点更新函数比散落在各处 `disabled = true/false` 易维护
+  - hover 操作栏要绑定到 `bubble-content-wrap` 而非 `bubble-row`，否则用户侧 flex row-reverse 后定位会跑
 
 ### IMP-006: web/app.html 拆分为 CSS + JS + HTML [quality] ✅ 已完成
 

@@ -12,6 +12,42 @@ const ENV = loadEnv();
 const CLI_CONFIG = buildCliConfig(ENV);
 const TASKS_FILE = '.myteam/tasks.jsonl';
 
+// ── 对话历史（内存，重启清空） ────────────────────────────────
+// 参考 clowder-ai/rich-blocks/chat-server.js 的 history[] 设计
+const chatHistory = [];
+
+// ── @mention 路由解析 ─────────────────────────────────────────
+// 参考 clowder-ai 的 parseA2AMentions：用户输入用宽松匹配（任意位置）
+// 行首匹配用于 agent 回复里的 @mention（防止代码注释误触发），此处是用户输入不需要
+const MENTION_MAP = {
+  claude: 'claude',
+  codex:  'codex',
+};
+function parseAtMention(text) {
+  // 匹配 @claude 或 @codex（不区分大小写，允许在任意位置）
+  const m = text.match(/@(claude|codex)\b/i);
+  return m ? MENTION_MAP[m[1].toLowerCase()] : null;
+}
+
+// ── 构建带历史的 chat prompt ──────────────────────────────────
+const CHAT_SYSTEM = {
+  codex:  'You are Codex, a helpful AI assistant in the myteam workspace. You help with code, analysis, and task planning. Reply in Chinese.',
+  claude: 'You are Claude, a helpful AI assistant in the myteam workspace. You excel at deep thinking, writing, and architecture. Reply in Chinese.',
+};
+
+function buildChatPrompt(userMessage, agentKey) {
+  const system = CHAT_SYSTEM[agentKey] || CHAT_SYSTEM.codex;
+  // 取最近 10 条历史避免 token 过多
+  const recentHistory = chatHistory.slice(-10);
+  const historyLines = recentHistory
+    .map(h => `${h.role === 'user' ? '用户' : (h.agent || 'assistant')}: ${h.text}`)
+    .join('\n\n');
+
+  return `${system}
+
+${historyLines ? `对话历史：\n${historyLines}\n\n` : ''}用户: ${userMessage}`;
+}
+
 const PORT = (() => {
   const i = process.argv.indexOf('--port');
   return i >= 0 ? Number(process.argv[i + 1]) : 7878;
@@ -190,6 +226,49 @@ async function handle(req, res) {
     return res.end(html);
   }
 
+  // GET /api/history — 返回对话历史（刷新后前端重建）
+  if (req.method === 'GET' && pathname === '/api/history') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ history: chatHistory }));
+  }
+
+  // POST /api/chat { message } — SSE 流式对话，支持 @mention 路由
+  if (req.method === 'POST' && pathname === '/api/chat') {
+    const body = await readBody(req);
+    const message = (body.message || '').trim();
+    if (!message) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'message 不能为空' }));
+    }
+
+    // 解析 @mention 路由（clowder-ai 教训：行首宽松匹配用户输入，防止误触发）
+    const agentKey = parseAtMention(message) || 'codex';
+    // 剥掉 @claude/@codex 前缀，传给 agent 的是干净的内容
+    const cleanMessage = message.replace(/^@(claude|codex)\s*/i, '').trim();
+
+    // 存入对话历史
+    chatHistory.push({ role: 'user', text: message, agent: null });
+
+    // 构建带历史上下文的 prompt
+    const prompt = buildChatPrompt(cleanMessage, agentKey);
+
+    sseInit(res);
+    sseSend(res, 'start', { agent: agentKey });
+
+    let fullReply = '';
+    try {
+      fullReply = await streamAgent(agentKey, prompt, res, 'chunk');
+      chatHistory.push({ role: 'assistant', text: fullReply, agent: agentKey });
+      // 截断历史防止无限增长（保留最近 40 条）
+      if (chatHistory.length > 40) chatHistory.splice(0, chatHistory.length - 40);
+      sseSend(res, 'done', { agent: agentKey });
+    } catch (err) {
+      chatHistory.pop(); // 回滚失败的 user 消息（可选）
+      sseSend(res, 'error', { message: err.message });
+    }
+    return res.end();
+  }
+
   // GET /api/status — agent 配置 + 路径检测
   if (req.method === 'GET' && pathname === '/api/status') {
     const agents = ['codex', 'claude'].map(k => {
@@ -202,6 +281,57 @@ async function handle(req, res) {
     });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ agents }));
+  }
+
+  // GET /api/agents — 返回当前 agent 路径配置（脱敏显示）
+  if (req.method === 'GET' && pathname === '/api/agents') {
+    const result = ['codex', 'claude'].map(k => {
+      const p = CLI_CONFIG[k]?.path || '';
+      return {
+        key: k,
+        path: p,
+        available: p ? existsSync(p) : false,
+      };
+    });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ agents: result }));
+  }
+
+  // POST /api/agents { codex?: string, claude?: string } — 写回 .env，实时重载
+  if (req.method === 'POST' && pathname === '/api/agents') {
+    const body = await readBody(req);
+    const updates = {};
+    if (body.codex !== undefined) updates.CODEX_PATH = body.codex.trim();
+    if (body.claude !== undefined) updates.CLAUDE_PATH = body.claude.trim();
+
+    if (Object.keys(updates).length === 0) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: '没有需要更新的字段' }));
+    }
+
+    // 读取现有 .env，更新对应 key，写回
+    const envPath = '.env';
+    let lines = existsSync(envPath) ? readFileSync(envPath, 'utf8').split('\n') : [];
+    for (const [key, val] of Object.entries(updates)) {
+      const idx = lines.findIndex(l => l.startsWith(`${key}=`));
+      const newLine = `${key}=${val}`;
+      if (idx >= 0) lines[idx] = newLine;
+      else lines.push(newLine);
+    }
+    writeFileSync(envPath, lines.join('\n'), 'utf8');
+
+    // 实时重载 CLI_CONFIG（无需重启服务）
+    const newEnv = loadEnv(envPath);
+    const newCfg = buildCliConfig(newEnv);
+    CLI_CONFIG.codex  = newCfg.codex;
+    CLI_CONFIG.claude = newCfg.claude;
+
+    const result = ['codex', 'claude'].map(k => {
+      const p = CLI_CONFIG[k]?.path || '';
+      return { key: k, path: p, available: p ? existsSync(p) : false };
+    });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, agents: result }));
   }
 
   // GET /api/tasks

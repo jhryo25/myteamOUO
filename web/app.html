@@ -419,6 +419,15 @@
       color: var(--muted);
     }
 
+    .mention-hint {
+      padding: 4px 12px;
+      font-size: 12px;
+      border-radius: 6px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid rgba(201,106,42,.2);
+    }
+
     /* spinner */
     .spinner {
       width: 14px; height: 14px; border-radius: 50%;
@@ -428,6 +437,110 @@
       display: inline-block; vertical-align: middle;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+    .settings-btn {
+      background: none;
+      border: 1.5px solid var(--border);
+      border-radius: 8px;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 4px 8px;
+      font-size: 16px;
+      transition: all .15s;
+      margin-left: 6px;
+    }
+    .settings-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* ── 抽屉 ── */
+    .drawer-mask {
+      position: fixed; inset: 0;
+      background: rgba(60,40,20,.25);
+      z-index: 100;
+      backdrop-filter: blur(1px);
+    }
+    .drawer {
+      position: fixed;
+      top: 0; right: 0;
+      width: 360px; height: 100vh;
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+      box-shadow: -4px 0 24px rgba(100,60,20,.12);
+      z-index: 101;
+      display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+    .drawer-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .drawer-title { font-weight: 700; font-size: 15px; }
+    .drawer-close {
+      background: none; border: none; cursor: pointer;
+      color: var(--muted); font-size: 16px; padding: 2px 6px;
+      border-radius: 6px; transition: all .15s;
+    }
+    .drawer-close:hover { background: var(--surface2); color: var(--text); }
+    .drawer-body {
+      flex: 1; overflow-y: auto; padding: 16px 18px;
+      display: flex; flex-direction: column; gap: 14px;
+    }
+    .drawer-desc { font-size: 12px; color: var(--muted); line-height: 1.6; }
+
+    .agent-card {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px;
+    }
+    .agent-card-header {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
+    }
+    .agent-card-name { font-weight: 700; font-size: 14px; }
+    .agent-status-badge {
+      font-size: 11px; font-weight: 700; padding: 2px 8px;
+      border-radius: 999px; margin-left: auto;
+    }
+    .agent-status-badge.ok  { color: var(--green); background: var(--green-soft); }
+    .agent-status-badge.err { color: var(--red);   background: var(--red-soft); }
+
+    .path-input-row { display: flex; gap: 6px; align-items: center; }
+    .path-input {
+      flex: 1; padding: 8px 10px;
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-family: Consolas, monospace;
+      font-size: 12px;
+      outline: none;
+      transition: border-color .15s;
+    }
+    .path-input:focus { border-color: var(--accent); }
+    .path-check-btn {
+      padding: 7px 10px; border-radius: 8px;
+      background: var(--surface2); border: 1px solid var(--border);
+      color: var(--muted); font-size: 12px; cursor: pointer;
+      white-space: nowrap; transition: all .15s;
+    }
+    .path-check-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+    .drawer-actions {
+      display: flex; align-items: center; gap: 10px;
+      padding-top: 4px; border-top: 1px solid var(--border);
+    }
+    .drawer-save-btn {
+      padding: 9px 18px; border-radius: var(--radius);
+      background: var(--accent); color: #fff;
+      border: none; font-size: 13px; font-weight: 700;
+      cursor: pointer; transition: opacity .15s;
+    }
+    .drawer-save-btn:hover { opacity: .88; }
+    .drawer-save-btn:disabled { opacity: .4; cursor: not-allowed; }
+    .drawer-save-tip { font-size: 12px; }
+    .drawer-save-tip.ok  { color: var(--green); }
+    .drawer-save-tip.err { color: var(--red); }
+
     .hidden { display: none !important; }
   </style>
 </head>
@@ -439,6 +552,24 @@
   <div class="agent-pills" id="agentPills">
     <span class="agent-pill"><span class="dot"></span>连接中…</span>
   </div>
+  <button class="settings-btn" id="settingsBtn" title="Agent 配置">⚙</button>
+</div>
+
+<!-- ── Agent 管理抽屉 ── -->
+<div class="drawer-mask hidden" id="drawerMask"></div>
+<div class="drawer hidden" id="settingsDrawer">
+  <div class="drawer-header">
+    <span class="drawer-title">⚙ Agent 配置</span>
+    <button class="drawer-close" id="drawerClose">✕</button>
+  </div>
+  <div class="drawer-body">
+    <p class="drawer-desc">修改 CLI 可执行文件路径，保存后立即生效（写回本机 .env，不会上传 GitHub）。</p>
+    <div class="agent-form" id="agentForm"><!-- 动态生成 --></div>
+    <div class="drawer-actions">
+      <button class="drawer-save-btn" id="drawerSaveBtn">💾 保存配置</button>
+      <span class="drawer-save-tip hidden" id="drawerSaveTip"></span>
+    </div>
+  </div>
 </div>
 
 <div class="layout">
@@ -448,25 +579,34 @@
       <div class="chat-welcome" id="chatWelcome">
         <div class="emoji">🤝</div>
         <h2>欢迎来到 myteam</h2>
-        <p>在下方输入你的目标，我会帮你拆解成可执行的任务，<br>再交给 Claude 和 Codex 来完成。</p>
+        <p>直接发消息和 agent 对话，用 <code style="background:var(--surface2);padding:1px 5px;border-radius:4px;font-size:12px;">@claude</code> 或 <code style="background:var(--surface2);padding:1px 5px;border-radius:4px;font-size:12px;">@codex</code> 指定 agent。<br>切换到「拆任务」模式可以把目标分解成可执行清单。</p>
       </div>
     </div>
 
     <div class="chat-input-area">
+      <!-- 模式切换 -->
       <div class="options-row">
-        <span class="options-label">规划 Agent：</span>
-        <div class="radio-group" id="planAgentGroup"></div>
+        <span class="options-label">模式：</span>
+        <div class="radio-group" id="modeGroup">
+          <div class="radio-btn active" data-value="chat">💬 对话</div>
+          <div class="radio-btn" data-value="plan">📋 拆任务</div>
+        </div>
+        <!-- plan 模式下显示 agent 选择 -->
+        <span class="options-label hidden" id="planAgentLabel" style="margin-left:8px;">Agent：</span>
+        <div class="radio-group hidden" id="planAgentGroup"></div>
         <button class="dispatch-btn" id="dispatchBtn" disabled>
           <span id="dispatchSpinner" class="spinner hidden"></span>
           ▶ 执行 pending 任务
         </button>
       </div>
+      <!-- @mention 提示条 -->
+      <div id="mentionHint" class="mention-hint hidden"></div>
       <div class="input-row">
         <textarea
           class="goal-input"
           id="goalInput"
           rows="1"
-          placeholder="输入目标，例如：帮我整理一份本周工作计划…"
+          placeholder="输入消息，或用 @claude / @codex 指定 agent…"
         ></textarea>
         <button class="send-btn" id="sendBtn" title="发送">➤</button>
       </div>
@@ -735,13 +875,96 @@ function ssePost(url, body, handlers) {
   });
 }
 
-// ── plan ──────────────────────────────────────────────────────
-const sendBtn   = document.getElementById('sendBtn');
-const goalInput = document.getElementById('goalInput');
+// ── 模式切换 ──────────────────────────────────────────────────
+const modeGroup       = document.getElementById('modeGroup');
+const planAgentLabel  = document.getElementById('planAgentLabel');
+const planAgentGroupEl= document.getElementById('planAgentGroup');
+const mentionHint     = document.getElementById('mentionHint');
+const sendBtn         = document.getElementById('sendBtn');
+const goalInput       = document.getElementById('goalInput');   // 统一在此声明，避免 TDZ
 
-async function doPlan() {
-  const goal = goalInput.value.trim();
-  if (!goal) return;
+modeGroup.querySelectorAll('.radio-btn').forEach(btn => {
+  btn.onclick = () => {
+    modeGroup.querySelectorAll('.radio-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const isPlan = btn.dataset.value === 'plan';
+    planAgentLabel.classList.toggle('hidden', !isPlan);
+    planAgentGroupEl.classList.toggle('hidden', !isPlan);
+    goalInput.placeholder = isPlan
+      ? '输入目标，例如：帮我整理一份本周工作计划…'
+      : '输入消息，或用 @claude / @codex 指定 agent…';
+  };
+});
+
+function getMode() {
+  return modeGroup.querySelector('.radio-btn.active')?.dataset.value || 'chat';
+}
+
+// ── @mention 实时提示 ─────────────────────────────────────────
+const MENTION_RE = /@(claude|codex)\b/i;
+
+goalInput.addEventListener('input', () => {
+  goalInput.style.height = 'auto';
+  goalInput.style.height = Math.min(goalInput.scrollHeight, 120) + 'px';
+
+  const m = goalInput.value.match(MENTION_RE);
+  if (m && getMode() === 'chat') {
+    mentionHint.textContent = `→ 将路由给 ${m[1].toLowerCase()}`;
+    mentionHint.classList.remove('hidden');
+  } else {
+    mentionHint.classList.add('hidden');
+  }
+});
+
+// ── send 入口：按模式分发 ─────────────────────────────────────
+async function doSend() {
+  const text = goalInput.value.trim();
+  if (!text) return;
+  if (getMode() === 'plan') {
+    await doPlan(text);
+  } else {
+    await doChat(text);
+  }
+}
+
+sendBtn.onclick = doSend;
+goalInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
+});
+
+// ── chat 模式 ─────────────────────────────────────────────────
+async function doChat(message) {
+  goalInput.value = '';
+  goalInput.style.height = '';
+  mentionHint.classList.add('hidden');
+  sendBtn.disabled = true;
+
+  addUserBubble(message);
+
+  // 检测 @mention 用于 UI 预期
+  const mentionMatch = message.match(MENTION_RE);
+  const expectedAgent = mentionMatch ? mentionMatch[1].toLowerCase() : null;
+
+  let bubble = null;
+
+  await ssePost('/api/chat', { message }, {
+    start: ({ agent }) => {
+      bubble = startAgentBubble(agent);
+    },
+    chunk: ({ text }) => appendTyping(text),
+    error: ({ message: msg }) => {
+      finishTyping();
+      addSystemMsg(`✗ ${msg}`);
+    },
+    done: () => finishTyping(),
+  });
+
+  sendBtn.disabled = false;
+  goalInput.focus();
+}
+
+// ── plan 模式 ─────────────────────────────────────────────────
+async function doPlan(goal) {
   const agent = getRadio('planAgentGroup') || 'codex';
 
   goalInput.value = '';
@@ -749,9 +972,9 @@ async function doPlan() {
   sendBtn.disabled = true;
   document.getElementById('dispatchBtn').disabled = true;
 
-  addUserBubble(goal);
+  addUserBubble(`📋 ${goal}`);
   addSystemMsg(`正在让 ${agent} 拆解任务…`);
-  const bubble = startAgentBubble(agent);
+  startAgentBubble(agent);
 
   await ssePost('/api/plan', { goal, agent }, {
     chunk: ({ text }) => appendTyping(text),
@@ -768,15 +991,6 @@ async function doPlan() {
   sendBtn.disabled = false;
   await loadTasks();
 }
-
-sendBtn.onclick = doPlan;
-goalInput.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doPlan(); }
-});
-goalInput.addEventListener('input', () => {
-  goalInput.style.height = 'auto';
-  goalInput.style.height = Math.min(goalInput.scrollHeight, 120) + 'px';
-});
 
 // ── dispatch ─────────────────────────────────────────────────
 document.getElementById('dispatchBtn').onclick = async () => {
@@ -812,6 +1026,130 @@ document.getElementById('dispatchBtn').onclick = async () => {
   dispatchSpinner.classList.add('hidden');
   sendBtn.disabled = false;
   await loadTasks();
+};
+
+// ── agent 管理面板 ────────────────────────────────────────────
+const settingsBtn    = document.getElementById('settingsBtn');
+const settingsDrawer = document.getElementById('settingsDrawer');
+const drawerMask     = document.getElementById('drawerMask');
+const drawerClose    = document.getElementById('drawerClose');
+const agentFormEl    = document.getElementById('agentForm');
+const drawerSaveBtn  = document.getElementById('drawerSaveBtn');
+const drawerSaveTip  = document.getElementById('drawerSaveTip');
+
+const AGENT_META = {
+  codex:  { label: 'Agent · Codex',  emoji: '🤖', desc: '总控 / 审查 / 自迭代' },
+  claude: { label: 'Agent · Claude', emoji: '✨', desc: '主架构 / 深度实现' },
+};
+
+function openDrawer() {
+  settingsDrawer.classList.remove('hidden');
+  drawerMask.classList.remove('hidden');
+  loadAgentConfig();
+}
+function closeDrawer() {
+  settingsDrawer.classList.add('hidden');
+  drawerMask.classList.add('hidden');
+}
+
+settingsBtn.onclick = openDrawer;
+drawerClose.onclick = closeDrawer;
+drawerMask.onclick  = closeDrawer;
+
+async function loadAgentConfig() {
+  agentFormEl.innerHTML = '<div style="color:var(--muted);font-size:13px;">加载中…</div>';
+  try {
+    const { agents } = await fetch('/api/agents').then(r => r.json());
+    agentFormEl.innerHTML = '';
+    agents.forEach(a => {
+      const meta = AGENT_META[a.key] || { label: a.key, emoji: '●', desc: '' };
+      const card = document.createElement('div');
+      card.className = 'agent-card';
+      card.innerHTML = `
+        <div class="agent-card-header">
+          <span style="font-size:18px;">${meta.emoji}</span>
+          <div>
+            <div class="agent-card-name">${meta.label}</div>
+            <div style="font-size:11px;color:var(--muted);">${meta.desc}</div>
+          </div>
+          <span class="agent-status-badge ${a.available ? 'ok' : 'err'}">
+            ${a.available ? '✓ 已检测' : '✗ 未检测'}
+          </span>
+        </div>
+        <div class="path-input-row">
+          <input class="path-input" data-agent="${a.key}" value="${esc(a.path)}"
+            placeholder="填入 CLI 可执行文件路径，例如 C:\\...\\codex.cmd">
+          <button class="path-check-btn" data-agent="${a.key}">检测</button>
+        </div>
+        <div class="path-check-result" data-result="${a.key}"
+          style="font-size:11px;margin-top:5px;color:${a.available ? 'var(--green)' : 'var(--muted)'};">
+          ${a.available ? `✓ 文件存在` : (a.path ? '✗ 文件不存在' : '未配置')}
+        </div>`;
+      agentFormEl.appendChild(card);
+    });
+
+    // 检测按钮：临时保存当前输入路径后调 /api/agents，看返回的 available
+    agentFormEl.querySelectorAll('.path-check-btn').forEach(btn => {
+      btn.onclick = async () => {
+        const key = btn.dataset.agent;
+        const input = agentFormEl.querySelector(`.path-input[data-agent="${key}"]`);
+        const resultEl = agentFormEl.querySelector(`.path-check-result[data-result="${key}"]`);
+        btn.textContent = '…';
+        try {
+          const { agents: updated } = await fetch('/api/agents', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ [key]: input.value.trim() }),
+          }).then(r => r.json());
+          const a = updated.find(x => x.key === key);
+          const badge = agentFormEl.querySelector(`.agent-card:has([data-agent="${key}"]) .agent-status-badge`);
+          if (a?.available) {
+            resultEl.style.color = 'var(--green)';
+            resultEl.textContent = '✓ 文件存在，路径有效';
+            if (badge) { badge.className = 'agent-status-badge ok'; badge.textContent = '✓ 已检测'; }
+          } else {
+            resultEl.style.color = 'var(--red)';
+            resultEl.textContent = '✗ 找不到文件，请检查路径';
+            if (badge) { badge.className = 'agent-status-badge err'; badge.textContent = '✗ 未检测'; }
+          }
+        } catch { resultEl.textContent = '检测失败'; }
+        btn.textContent = '检测';
+      };
+    });
+  } catch {
+    agentFormEl.innerHTML = '<div style="color:var(--red);font-size:13px;">无法加载配置，请确认服务器正在运行。</div>';
+  }
+}
+
+drawerSaveBtn.onclick = async () => {
+  const inputs = agentFormEl.querySelectorAll('.path-input');
+  const payload = {};
+  inputs.forEach(inp => { payload[inp.dataset.agent] = inp.value.trim(); });
+
+  drawerSaveBtn.disabled = true;
+  drawerSaveTip.className = 'drawer-save-tip hidden';
+
+  try {
+    const { agents: updated } = await fetch('/api/agents', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).then(r => r.json());
+
+    drawerSaveTip.textContent = '✓ 已保存，配置立即生效';
+    drawerSaveTip.className = 'drawer-save-tip ok';
+    drawerSaveTip.classList.remove('hidden');
+
+    // 刷新顶部 pills
+    loadStatus();
+    // 刷新抽屉状态
+    setTimeout(loadAgentConfig, 300);
+  } catch (err) {
+    drawerSaveTip.textContent = `✗ 保存失败：${err.message}`;
+    drawerSaveTip.className = 'drawer-save-tip err';
+    drawerSaveTip.classList.remove('hidden');
+  }
+  drawerSaveBtn.disabled = false;
 };
 
 // ── 初始化 ────────────────────────────────────────────────────

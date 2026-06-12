@@ -3,45 +3,16 @@
 // 用法：node dispatch.mjs [--run-id <id>] [--task-id <id>] [--agent codex|claude]
 
 import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { loadEnv, buildCliConfig, invokeAgent } from './agent-utils.mjs';
+import { loadEnv, buildCliConfig, invokeAgent, readTasks, writeAllTasks, buildExecPrompt } from './agent-utils.mjs';
 
 const ENV = loadEnv();
 const CLI_CONFIG = buildCliConfig(ENV);
 
 const TASKS_FILE = '.myteam/tasks.jsonl';
 
-// ── tasks.jsonl 读写 ──────────────────────────────────────────
-function readTasks() {
-  if (!existsSync(TASKS_FILE)) return [];
-  return readFileSync(TASKS_FILE, 'utf8')
-    .split('\n')
-    .filter(l => l.trim())
-    .map(l => { try { return JSON.parse(l); } catch { return null; } })
-    .filter(Boolean);
-}
-
-function writeTasks(tasks) {
-  writeFileSync(TASKS_FILE, tasks.map(t => JSON.stringify(t)).join('\n') + '\n', 'utf8');
-}
-
+// ── tasks.jsonl 辅助函数 ──────────────────────────────────────────
 function updateTask(tasks, id, patch) {
   return tasks.map(t => t.id === id ? { ...t, ...patch } : t);
-}
-
-// ── 给 Agent 的执行 prompt ────────────────────────────────────
-function buildExecPrompt(task) {
-  const steps = (task.steps ?? []).map((s, i) => `${i + 1}. ${s}`).join('\n');
-  const accept = task.accept ? `\n验收标准：${task.accept}` : '';
-  return `你是 myteam 的执行 agent，请完成以下任务。
-
-任务标题：${task.title}
-所属目标：${task.goal}
-
-执行步骤：
-${steps || '（无具体步骤，请自行判断）'}
-${accept}
-
-请执行上述任务，给出完整的执行结果和说明。如果是需要生成代码或文档的任务，请直接输出内容。`;
 }
 
 // ── 执行单条任务 ──────────────────────────────────────────────
@@ -104,7 +75,7 @@ for (const task of pending) {
 
   // 标记 in_progress
   tasks = updateTask(tasks, task.id, { status: 'in_progress', started_at: new Date().toISOString() });
-  writeTasks(tasks);
+  writeAllTasks(tasks);
 
   const { success, result, error, agent } = await execTask(task, agentOverride);
 
@@ -128,7 +99,7 @@ for (const task of pending) {
     failed++;
   }
 
-  writeTasks(tasks);
+  writeAllTasks(tasks);
 }
 
 console.log(`\n执行完毕：${done} 成功 / ${failed} 失败`);

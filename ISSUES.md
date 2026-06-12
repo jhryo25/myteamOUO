@@ -75,33 +75,54 @@
 
 ---
 
-## 对比 clowder-ai 发现的改进方向（待实施）
+## Phase 2: 交互对齐改进 (2026-06-12)
 
-### IMP-001: @mention 改行首匹配 [ux]
+### IMP-001: @mention 改行首匹配 [ux] ✅ 已完成
 
 - **参考**: clowder-ai `@catname` 只在新行开头触发路由，inline 提及不触发
-- **现状**: myteamOUO 任意位置 `@mention` 都触发
-- **风险**: 代码/引用中 `@claude` 会误触发路由
+- **问题**: myteamOUO 任意位置 `@mention` 都触发，代码/引用中 `@claude` 会误触发路由
+- **解法**: `parseAtMention` 和 `cleanMessage` 都改为行首匹配正则 `/(?:^|\n)\s*@(claude|codex)\b/i`
+- **教训**: 路由触发条件要严格，避免误触发。参考 clowder-ai 的行首匹配策略。
+- **标签**: `ux`, `lesson:路由触发要严格`
 
-### IMP-002: A2A 链式加 streak 熔断 [arch]
+### IMP-002: A2A 链式加乒乓球熔断 [arch] ✅ 已完成
 
 - **参考**: clowder-ai WorklistRegistry + streak 追踪 + 乒乓球熔断（F167）
-- **现状**: depth ≤ 3 但无 streak 检测，两个 agent 互 @ 会跑满 3 轮
-- **建议**: 连续同内容/同 agent 互 @ 超过 2 次自动熔断
+- **问题**: depth ≤ 3 但无 streak 检测，两个 agent 互 @ 会跑满 3 轮（A→B→A→B）
+- **解法**: 在 `executeTask` 中传递 `chainHistory` 数组，检测最后 4 个 agent 是否形成 A→B→A→B 交替模式，触发熔断并发送 `worklist-circuit-break` 事件
+- **教训**: A2A 链式调用需要防循环机制，depth 限制不够，还要检测交替模式。参考 clowder-ai 的 F167 乒乓球熔断。
+- **标签**: `arch`, `lesson:A2A链式需要防循环`
 
-### IMP-003: chain task 携带上游分析摘要 [ux]
+### IMP-003: chain task 携带上游分析摘要 [ux] ✅ 已完成
 
 - **参考**: clowder-ai 五件套交接（What/Why/Tradeoff/Open/Next）
-- **现状**: A2A chain task 只传 title + goal，上游分析全丢
-- **建议**: chain task 的 steps 中注入上游 agent 的回复摘要
+- **问题**: A2A chain task 只传 title + goal，上游 agent 的分析结果丢失
+- **解法**: 在创建 chain task 时，将上游 agent 的回复截取前 300 字符作为 `upstreamSummary`，注入到 steps 数组第一项
+- **教训**: 多 agent 协作时，上下文传递很重要。参考 clowder-ai 的五件套交接，确保下游 agent 能理解上游的分析。
+- **标签**: `ux`, `lesson:多agent协作要传递上下文`
 
-### IMP-004: 代码去重 + 拆分 [quality]
+### IMP-004: 代码去重 [quality] ✅ 已完成
 
-- **现状**: `PLAN_PROMPT` / `buildExecPrompt` / `readTasks` 在 server.mjs 和 plan.mjs/dispatch.mjs 中重复
-- **建议**: 抽到 `agent-utils.mjs` 导出；`web/app.html` 拆为 CSS + JS + HTML
+- **问题**: `PLAN_PROMPT` / `buildExecPrompt` / `readTasks` / `writeAllTasks` / `appendTask` / `patchTask` 在 server.mjs 和 plan.mjs/dispatch.mjs 中重复定义
+- **解法**: 
+  - 将 `readTasks` / `writeAllTasks` / `appendTask` / `patchTask` 抽到 `agent-utils.mjs` 导出
+  - 将 `PLAN_PROMPT` / `buildExecPrompt` 抽到 `agent-utils.mjs` 导出
+  - server.mjs 和 dispatch.mjs 改为 import 使用
+  - dispatch.mjs 中 `writeTasks` 重命名为 `writeAllTasks` 保持一致
+- **教训**: 重复代码是维护噩梦。参考 DRY 原则，将共享逻辑抽到公共模块。
+- **标签**: `quality`, `lesson:DRY原则`
 
-### IMP-005: extractJson 贪心匹配 [quality]
+### IMP-005: extractJson 贪心匹配 [quality] ⏳ 待实施
 
 - **位置**: `agent-utils.mjs:126`
 - **现状**: `\{[\s\S]+\}` 贪心匹配，多 JSON 对象时匹配超集
 - **建议**: 改非贪心或逐步 parse
+
+---
+
+## 待实施改进
+
+### IMP-006: web/app.html 拆分为 CSS + JS + HTML [quality]
+
+- **现状**: 2350 行单文件，难以维护
+- **建议**: 拆为 `app.css` + `app.js` + `app.html`，通过 `<link>` 和 `<script>` 引入

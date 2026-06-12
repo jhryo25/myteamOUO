@@ -6,7 +6,7 @@ import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, cop
 import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
-import { loadEnv, buildCliConfig, invokeAgent, extractJson, PARSERS, validatePlanResult } from './agent-utils.mjs';
+import { loadEnv, buildCliConfig, invokeAgent, extractJson, PARSERS, validatePlanResult, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt } from './agent-utils.mjs';
 
 const ENV = loadEnv();
 const CLI_CONFIG = buildCliConfig(ENV);
@@ -124,8 +124,8 @@ const MENTION_MAP = {
   codex:  'codex',
 };
 function parseAtMention(text) {
-  // 匹配 @claude 或 @codex（不区分大小写，允许在任意位置）
-  const m = text.match(/@(claude|codex)\b/i);
+  // 行首匹配（允许前导空白），防止代码/引用中 @mention 误触发路由
+  const m = text.match(/(?:^|\n)\s*@(claude|codex)\b/i);
   return m ? MENTION_MAP[m[1].toLowerCase()] : null;
 }
 
@@ -197,58 +197,6 @@ function backupTasks() {
   const dest = `${RUNS_DIR}/tasks-backup-${stamp}.jsonl`;
   copyFileSync(TASKS_FILE, dest);
   return dest;
-}
-function readTasks() {
-  if (!existsSync(TASKS_FILE)) return [];
-  return readFileSync(TASKS_FILE, 'utf8')
-    .split('\n').filter(l => l.trim())
-    .map(l => { try { return JSON.parse(l); } catch { return null; } })
-    .filter(Boolean);
-}
-
-function writeAllTasks(tasks) {
-  writeFileSync(TASKS_FILE, tasks.map(t => JSON.stringify(t)).join('\n') + '\n', 'utf8');
-}
-
-function appendTask(record) {
-  appendFileSync(TASKS_FILE, JSON.stringify(record) + '\n', 'utf8');
-}
-
-function patchTask(id, patch) {
-  const tasks = readTasks();
-  writeAllTasks(tasks.map(t => t.id === id ? { ...t, ...patch } : t));
-}
-
-// ── 系统 prompt（与 plan.mjs 保持一致） ───────────────────────
-const PLAN_PROMPT = `你是 myteam 的任务规划 agent。
-用户会给你一个目标，把它拆成 3-7 个可执行、可验收的小任务。
-
-严格按以下 JSON 格式返回，不要有任何额外解释或 markdown 包裹：
-{
-  "goal": "<原始目标>",
-  "tasks": [
-    {
-      "title": "<任务标题>",
-      "steps": ["<步骤1>", "<步骤2>"],
-      "accept": "<验收标准>",
-      "agent": "<推荐执行者: claude|codex>"
-    }
-  ]
-}`;
-
-function buildExecPrompt(task) {
-  const steps = (task.steps ?? []).map((s, i) => `${i + 1}. ${s}`).join('\n');
-  const accept = task.accept ? `\n验收标准：${task.accept}` : '';
-  return `你是 myteam 的执行 agent，请完成以下任务。
-
-任务标题：${task.title}
-所属目标：${task.goal}
-
-执行步骤：
-${steps || '（无具体步骤，请自行判断）'}
-${accept}
-
-请执行上述任务，给出完整的执行结果和说明。`;
 }
 
 // ── SSE 工具 ──────────────────────────────────────────────────
@@ -501,7 +449,7 @@ async function handle(req, res) {
 
     // 解析 @mention 路由
     const agentKey = parseAtMention(message) || 'codex';
-    const cleanMessage = message.replace(/@(claude|codex)\b/gi, '').trim();
+    const cleanMessage = message.replace(/(?:^|\n)\s*@(claude|codex)\b/gi, '').trim();
 
     // 存入对话历史（按 session）
     session.history.push({ role: 'user', text: message, agent: null });
@@ -727,7 +675,7 @@ async function handle(req, res) {
     let done = 0, failed = 0;
 
     // 执行单个任务并返回结果文本（用于 worklist 链检测）
-    async function executeTask(task, depth = 0) {
+    async function executeTask(task, depth = 0, chainHistory = []) {
       const agentKey = agentOverride || (CLI_CONFIG[task.agent] ? task.agent : 'codex');
       sseSend(res, 'task-start', { id: task.id, title: task.title, agent: agentKey });
       patchTask(task.id, { status: 'in_progress', started_at: new Date().toISOString() });
@@ -749,14 +697,34 @@ async function handle(req, res) {
           const mentions = parseA2AMentions(result);
           for (const nextAgent of mentions) {
             if (nextAgent === agentKey) continue; // 跳过自己，防止死循环
+            
+            // IMP-002: 乒乓球熔断检测（防止 A→B→A→B 无限交替）
+            const newHistory = [...chainHistory, agentKey];
+            const tail = newHistory.slice(-4);
+            const isPingPong = tail.length >= 4
+              && tail[0] === tail[2] && tail[1] === tail[3]
+              && tail[0] !== tail[1];
+            if (isPingPong) {
+              sseSend(res, 'worklist-circuit-break', {
+                reason: `乒乓球熔断：${tail.join(' → ')} 交替循环，终止链式执行`,
+                chain_history: newHistory,
+              });
+              continue;
+            }
+            
             const chainId = randomUUID().slice(0, 8);
+            // IMP-003: 携带上游 agent 的分析摘要（参考 clowder-ai 五件套交接）
+            const upstreamSummary = result.slice(0, 300).replace(/\n+/g, ' ').trim();
             const chainTask = {
               id: `${task.run_id}-w${chainId}`,
               run_id: task.run_id,
               created_at: new Date().toISOString(),
               goal: task.goal,
               title: `[A2A] ${agentKey} → @${nextAgent}: ${task.title}`,
-              steps: [`继续处理「${task.title}」的后续工作`],
+              steps: [
+                `上游 ${agentKey} 的分析：${upstreamSummary}`,
+                `继续处理「${task.title}」的后续工作`,
+              ],
               accept: '',
               agent: nextAgent,
               status: 'pending',
@@ -770,7 +738,7 @@ async function handle(req, res) {
               parent_id: task.id,
               chain_task_id: chainTask.id,
             });
-            await executeTask(chainTask, depth + 1);
+            await executeTask(chainTask, depth + 1, newHistory);
           }
         }
         return result;

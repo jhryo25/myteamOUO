@@ -1,9 +1,9 @@
 // myteam 公共 Agent 调用工具
-// plan.mjs / dispatch.mjs 均 import 此文件
+// plan.mjs / dispatch.mjs / server.mjs 均 import 此文件
 
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'fs';
 
 // ── .env 读取 ─────────────────────────────────────────────────
 export function loadEnv(envPath = '.env') {
@@ -140,4 +140,60 @@ export function validatePlanResult(data) {
     }
   }
   return { ok: true };
+}
+
+// ── tasks.jsonl 读写（IMP-004: 从 server.mjs / dispatch.mjs 抽取） ──
+const TASKS_FILE = '.myteam/tasks.jsonl';
+
+export function readTasks() {
+  if (!existsSync(TASKS_FILE)) return [];
+  return readFileSync(TASKS_FILE, 'utf8')
+    .split('\n').filter(l => l.trim())
+    .map(l => { try { return JSON.parse(l); } catch { return null; } })
+    .filter(Boolean);
+}
+
+export function writeAllTasks(tasks) {
+  writeFileSync(TASKS_FILE, tasks.map(t => JSON.stringify(t)).join('\n') + '\n', 'utf8');
+}
+
+export function appendTask(record) {
+  appendFileSync(TASKS_FILE, JSON.stringify(record) + '\n', 'utf8');
+}
+
+export function patchTask(id, patch) {
+  const tasks = readTasks();
+  writeAllTasks(tasks.map(t => t.id === id ? { ...t, ...patch } : t));
+}
+
+// ── 共享 Prompt（IMP-004: 从 server.mjs / plan.mjs / dispatch.mjs 抽取） ──
+export const PLAN_PROMPT = `你是 myteam 的任务规划 agent。
+用户会给你一个目标，把它拆成 3-7 个可执行、可验收的小任务。
+
+严格按以下 JSON 格式返回，不要有任何额外解释或 markdown 包裹：
+{
+  "goal": "<原始目标>",
+  "tasks": [
+    {
+      "title": "<任务标题>",
+      "steps": ["<步骤1>", "<步骤2>"],
+      "accept": "<验收标准>",
+      "agent": "<推荐执行者: claude|codex>"
+    }
+  ]
+}`;
+
+export function buildExecPrompt(task) {
+  const steps = (task.steps ?? []).map((s, i) => `${i + 1}. ${s}`).join('\n');
+  const accept = task.accept ? `\n验收标准：${task.accept}` : '';
+  return `你是 myteam 的执行 agent，请完成以下任务。
+
+任务标题：${task.title}
+所属目标：${task.goal}
+
+执行步骤：
+${steps || '（无具体步骤，请自行判断）'}
+${accept}
+
+请执行上述任务，给出完整的执行结果和说明。`;
 }

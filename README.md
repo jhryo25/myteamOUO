@@ -4,69 +4,67 @@ myteamOUO 是 myteam 的轻量级 A2A 协作工具 MVP。
 
 它要解决的问题是：如何用低成本的方式，让多个 agent 像一个小团队一样协作，并且能留下任务记录、审查结果和自迭代线索。
 
+## 当前 Agent 阵容
+
+| Agent | 角色 | 定位 |
+|-------|------|------|
+| Agent1 Kimi | 轻量执行 | 接收明确小任务：草稿、命令执行、内容补充 |
+| Agent2 Claude | 主架构 / 深度实现 | 深度分析、架构设计、复杂代码生成 |
+| Agent3 Codex | 总控 / 审查 / 自迭代 | 拆任务、决定派工、审查证据、记录经验 |
+
+## 配置 CLI 路径（重要）
+
+真实路径不会提交到 GitHub，统一通过 `.env` 文件管理。
+
+1. 复制 `.env.example` 为 `.env`
+2. 在 `.env` 中填入本机真实路径，例如：
+
+```env
+KIMI_PATH=C:\path\to\kimi.exe
+CLAUDE_PATH=C:\path\to\claude.cmd
+CODEX_PATH=C:\path\to\codex.cmd
+```
+
+`.gitignore` 已包含 `.env`，本地路径不会被推上去。
+
 ## 当前版本能做什么
 
-第一步只做项目骨架和最小可见演示：
-
-- 创建 `.myteam` 协作目录。
-- 创建 Agent1 Kimi 和 Agent2 Codex 的协作配置。
-- 创建任务记录、踩坑记录和长期记忆文件。
-- 提供 `init`、`status`、`ui` 三个命令。
-- 提供 `index.html` 作为最小 HTML 验收页面。
-
-## 当前 Agent 分工
-
-- Agent1：Kimi，路径是 `C:\Users\Administrator\.kimi-code\bin\kimi.exe`。
-- Agent2：Codex，也就是当前这个开发助手。
-
-当前 HTML 验收页展示的是最小可行流程：
-
-1. 用户提出目标。
-2. Codex 拆任务并写明验收标准。
-3. Kimi 执行适合外部 CLI 的小任务。
-4. Codex 审查结果，记录经验，并生成下一轮迭代建议。
+- 创建 `.myteam` 协作目录
+- 登记 Agent1 Kimi / Agent2 Claude / Agent3 Codex 的协作配置
+- 创建任务记录、踩坑记录和长期记忆文件
+- 提供 `init`、`status`、`ui` 三个命令
+- 提供 `index.html` 最小 HTML 验收页面（路径已脱敏展示）
 
 ## 怎么运行
 
-初始化项目：
-
 ```powershell
-python myteam.py init
+python myteam.py init      # 初始化骨架
+python myteam.py status    # 查看状态（含三 CLI 检测）
+python myteam.py ui        # 重新生成验收页面
+python myteam.py plan "目标描述"              # 调用 Codex 拆任务（默认）
+python myteam.py plan "目标描述" --agent claude  # 指定用 Claude 拆
 ```
 
-查看当前状态：
+也可以直接用 Node.js 调用：
 
 ```powershell
-python myteam.py status
+node plan.mjs "目标描述"
+node plan.mjs "目标描述" --agent claude
 ```
-
-生成 HTML 验收页面：
-
-```powershell
-python myteam.py ui
-```
-
-生成后，打开 `index.html` 就能看到当前 MVP 骨架状态和 Agent1/Agent2 协作功能。
 
 ## `.myteam` 目录是什么
 
-`.myteam` 可以理解成 myteam 的“协作大脑”。
-
-- `.myteam/agents.yaml`：保存 Agent1 Kimi 和 Agent2 Codex 配置。
-- `.myteam/tasks.jsonl`：保存任务记录，目前先为空。
-- `.myteam/lessons.jsonl`：保存踩坑记录，目前先为空。
-- `.myteam/memory.md`：保存长期经验。
-- `.myteam/runs/`：后续保存每一轮自迭代的运行记录。
+- `.myteam/agents.yaml`：登记三个 Agent 的角色与对应环境变量名
+- `.myteam/tasks.jsonl`：任务记录
+- `.myteam/lessons.jsonl`：踩坑记录
+- `.myteam/memory.md`：长期经验
+- `.myteam/runs/`：每轮自迭代运行记录
 
 ## GitHub 版本管控
-
-本项目已经连接到 GitHub 仓库：
 
 ```text
 https://github.com/jhryo25/myteamOUO
 ```
-
-常用命令：
 
 ```powershell
 git status
@@ -77,4 +75,5 @@ git push
 
 ## 下一步
 
-下一步会增加 `plan` 命令，让 Controller Agent 把一个目标拆成可以执行和检查的小任务。
+- 加 `plan` 命令：Controller Agent 把目标拆成可执行小任务
+- 加 `dispatch` 命令：根据任务类型派给 Kimi / Claude / Codex

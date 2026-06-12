@@ -124,7 +124,14 @@
 
 ## 待实施改进
 
-### IMP-006: web/app.html 拆分为 CSS + JS + HTML [quality]
+### IMP-006: web/app.html 拆分为 CSS + JS + HTML [quality] ✅ 已完成
 
-- **现状**: 2350 行单文件，难以维护
-- **建议**: 拆为 `app.css` + `app.js` + `app.html`，通过 `<link>` 和 `<script>` 引入
+- **问题**: `web/app.html` 是 2350 行的单文件，包含 HTML + CSS + JavaScript，难以维护和协作
+- **解法**: 
+  - 提取所有 CSS 到 `web/app.css`（1135 行）
+  - 提取所有 JavaScript 到 `web/app.js`（1087 行）
+  - `web/app.html` 只保留 HTML 结构（135 行）
+  - 在 `server.mjs` 中添加静态文件服务，支持 `/app.css` 和 `/app.js` 路由
+  - 使用 `<link rel="stylesheet">` 和 `<script src>` 引入外部文件
+- **教训**: 关注点分离是前端工程化的基础。HTML/CSS/JS 拆分后，代码更易维护，浏览器缓存更高效，团队协作更顺畅。
+- **标签**: `quality`, `lesson:关注点分离`

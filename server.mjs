@@ -332,6 +332,15 @@ async function handle(req, res) {
     return res.end(html);
   }
 
+  // 静态资源（CSS/JS）
+  if (req.method === 'GET' && (pathname === '/app.css' || pathname === '/app.js')) {
+    const ext = pathname.slice(1); // 'app.css' or 'app.js'
+    const content = readFileSync(`web/${ext}`, 'utf8');
+    const contentType = ext.endsWith('.css') ? 'text/css' : 'application/javascript';
+    res.writeHead(200, { 'Content-Type': `${contentType}; charset=utf-8` });
+    return res.end(content);
+  }
+
   // POST /api/abort — 中断所有正在执行的 agent 子进程
   if (req.method === 'POST' && pathname === '/api/abort') {
     const count = activeChildren.size;

@@ -51,10 +51,18 @@ myteamOUO/
 | GET  | `/api/agents` | 返回原始路径配置（含 available） |
 | POST | `/api/agents` | 修改路径写回 .env，实时重载 CLI_CONFIG |
 | GET  | `/api/tasks` | 返回 tasks.jsonl 全部记录 |
+| DELETE | `/api/tasks/:id` | 删除单个任务 |
+| POST | `/api/tasks/:id/rerun` | 重新执行单个任务（重置状态为 pending） |
 | GET  | `/api/history` | 返回内存对话历史 |
 | POST | `/api/chat` | 多轮对话（SSE），支持 @mention 路由 |
 | POST | `/api/plan` | 拆任务（SSE），结果追加到 tasks.jsonl |
 | POST | `/api/dispatch` | 执行 pending 任务（SSE），结果写回 tasks.jsonl |
+| POST | `/api/abort` | 中断所有正在执行的 agent 子进程 |
+| GET  | `/api/sessions` | 返回所有 session 列表 |
+| POST | `/api/sessions` | 创建新 session |
+| DELETE | `/api/sessions/:id` | 删除 session（移入回收站） |
+| GET  | `/api/sessions/trash` | 查看回收站中的 session |
+| POST | `/api/sessions/restore` | 从回收站恢复 session |
 
 ---
 
@@ -99,38 +107,42 @@ NDJSON 解析：
 
 ## 当前 UI 功能（web/app.html）
 
-- **暖色聊天对话框**：米白底 + 橙棕 accent，用户气泡右/agent 气泡左
+- **三栏布局**：左侧 Session Sidebar (240px，可折叠 48px) | 中间聊天区 | 右侧任务面板 (56px 默认，展开 340px)
+- **暖色聊天对话框**：米白底 + 橙棕 accent，用户气泡右/agent 气泡左，agent 回复支持 Rich Blocks 富文本渲染
 - **💬 对话模式**：走 `/api/chat`，多轮上下文，`@claude` / `@codex` 路由
-- **📋 拆任务模式**：走 `/api/plan`，SSE 实时流，结果写 tasks.jsonl
-- **▶ 执行 pending 任务**：走 `/api/dispatch`，每条任务实时流输出
+- **📋 拆任务模式**：走 `/api/plan`，SSE 实时流，拆完显示结构化任务卡片
+- **▶ 执行 pending 任务**：走 `/api/dispatch`，每条任务实时流输出，支持 ■ 中断
 - **⚙ Agent 管理抽屉**：可视化查看/修改 CLI 路径，一键检测 + 保存
-- **右侧任务面板**：按 run 分组，默认折叠只显示标题+状态点，点击展开详情
+- **左侧 Session Sidebar**：每行显示名称/时间/消息数 + hover 删除；底部「＋ 新建对话」；删除有 5 秒撤销 toast
+- **右侧任务面板**：窄条展开；有搜索框 + 状态 chips；任务按 run 分组可折叠，新 run 在前，pending 数量徽标
 
 ---
 
 ## 已知问题 / 待对齐清单
 
-### 🔴 必须优先修复
+### ✅ 已修复（共 16 项）
 
-1. **agent 管理抽屉「检测」按钮**：用了 CSS `:has()` 选择器（部分旧浏览器不支持），可能找不到 badge 元素，改用 `closest` 或 `data-` 属性引用。
+1. **:has() 兼容**：`btn.closest('.agent-card').querySelector('.agent-status-badge')`
+2. **A2A Worklist 链**：`parseA2AMentions()` 行首匹配，depth ≤ 3，自动创建链式任务
+3. **对话历史持久化**：写 `.myteam/memory.json`，重启自动加载最近 40 条
+4. **plan 结构化渲染**：拆完任务展示结构化卡片（标题 + agent + 验收标准）
+5. **dispatch 摘要气泡**：✓/✗ 状态卡片 + 结果摘要前 200 字
+6. **lessons.jsonl 自动写入**：失败任务自动记录；`GET /api/lessons` 查询
+7. **Rich Blocks**：`:::card` / `:::checklist` / `:::role` + 代码块复制 + inline/heading/list
+8. **Session 隔离**：每 session 独立 `history`；`/api/chat` 和 `/api/history` 支持 `sessionId`；旧 memory.json 自动迁移
+9. **流式中断**：■ 停止按钮 + `AbortController` + 后端 `POST /api/abort` kill 子进程
+10. **Session 新建表单**：行内 UI 替代 `prompt()`，Enter 确认 Escape 取消
+11. **Session 回收站**：删除移入 `trashedSessions`（5 分钟），前端撤销 toast
+12. **按钮状态修复**：切换 session 后 `loadTasks()`；dispatch 用 `try/finally`
+13. **任务过滤搜索**：搜索框 + 状态 chips 实时过滤
+14. **单条重跑/删除**：`POST /api/tasks/:id/rerun`、`DELETE /api/tasks/:id`
+15. **中文输入法保护**：`e.isComposing || e.keyCode === 229` 阻止误发
+16. **三栏布局重构**：sidebar 左侧栏 + tasks 右侧窄条；topbar 简化；run 分组折叠倒序
 
-### 🟡 下一步对齐（参考 clowder-ai）
+### 🟡 下一步（可选）
 
-2. **A2A 自动路由（Worklist 链）**：目前 `/api/dispatch` 是顺序执行，agent 没有能力在回复里 `@` 另一个 agent 触发下一步。需要参考 `clowder-ai` 的 `parseA2AMentions` + worklist 模式实现真正的 A2A 循环。
-
-3. **对话历史持久化**：现在 `chatHistory` 是内存数组，重启服务器清空。需要写入 `.myteam/memory.md` 或 SQLite。
-
-4. **plan 模式的拆任务结果应当在对话区直接渲染**：目前拆完任务只有 raw JSON 流输出，没有结构化展示到对话气泡里（任务列表右侧面板会更新，但主聊天区只显示原始文本）。
-
-5. **dispatch 结果摘要气泡**：执行完成后应在对话区输出「任务 X 执行完毕，结果：…」的结构化气泡，而不是只在日志区显示。
-
-6. **Kimi 接入**：KimiCode CLI 因公司代理无法直接安装，可以尝试手动下载安装包或换其他网络环境。
-
-### 🟢 可选增强
-
-7. **Rich Blocks**：参考 clowder-ai `rich-blocks/` 的卡片/清单/角色卡格式，让 agent 回复支持结构化渲染。
-8. **lessons.jsonl 自动写入**：任务失败时自动提取错误原因写入踩坑记录。
-9. **session 隔离**：多个目标之间的对话历史相互隔离。
+- **Kimi 接入**：KimiCode CLI 需手动安装
+- **P2 优化**：lessons UI、agent pill 执行高亮、session 重命名、历史分页
 
 ---
 
@@ -143,5 +155,5 @@ GitHub: https://github.com/jhryo25/myteamOUO
 交接文档: 见 HANDOVER.md
 
 请先读取 HANDOVER.md 了解当前进度，然后继续下一步对齐工作。
-当前优先级：修复 agent 管理抽屉 :has() 兼容问题 → 实现 A2A Worklist 路由。
 ```
+

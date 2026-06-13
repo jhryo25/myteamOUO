@@ -196,3 +196,11 @@
 - **解法**: 前端调用 `runDispatch({ agentOnly })`，后端 `/api/dispatch` 根据 `agentOnly` 过滤 pending 任务。
 - **教训**: 按钮文案表达的范围必须和后端执行范围一致，尤其是会触发 agent 执行的动作。
 - **标签**: `bug`, `ux`
+
+### ISS-009: Codex 路径存在但 Node spawn EPERM [bug]
+
+- **位置**: `agent-utils.mjs`, `server.mjs`, `web/app.js`
+- **问题**: `/api/status` 只用 `existsSync(path)` 判断 agent 可用，导致 WindowsApps 里的 Codex `codex.exe` 虽然存在，但实际被 Node `spawn` 时会报 `EPERM`。前端误把 Codex 当成可用 agent，拆任务时报“spawn EPERM”。
+- **解法**: 新增 `checkAgentLaunchable()`，用轻量 `--help` 真正尝试启动 CLI；状态 API 返回 `exists / available / error`；前端只把 `available=true` 的 agent 放入拆任务选项，并在配置抽屉显示启动失败原因。
+- **教训**: “文件存在”只能说明路径没写错，不能说明 CLI 能被当前进程启动。agent 可用性必须做启动级检测。
+- **标签**: `bug`, `windows`, `lesson:文件存在不等于可执行`

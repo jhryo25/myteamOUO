@@ -27,18 +27,21 @@ export function buildCliConfig(ENV) {
       path: ENV.CODEX_PATH,
       inputMode: 'stdin',
       args: () => ['exec', '-', '--json', '--skip-git-repo-check'],
+      checkArgs: () => ['--help'],
       spawnOptions: { stdio: ['pipe', 'pipe', 'pipe'] },
     },
     claude: {
       path: ENV.CLAUDE_PATH,
       inputMode: 'stdin',
       args: () => ['-p', '-', '--output-format', 'stream-json', '--verbose'],
+      checkArgs: () => ['--help'],
       spawnOptions: { stdio: ['pipe', 'pipe', 'pipe'] },
     },
     kimi: {
       path: ENV.KIMI_PATH,
       inputMode: 'arg',
       args: (prompt) => ['-p', prompt, '--output-format', 'text'],
+      checkArgs: () => ['--help'],
       spawnOptions: { stdio: ['ignore', 'pipe', 'pipe'] },
     },
   };
@@ -72,6 +75,88 @@ function parseText(line) {
 
 export const PARSERS = { codex: parseCodex, claude: parseClaude, kimi: parseText };
 
+export function buildSpawnCommand(cfg, args) {
+  const isCmd = cfg.path.toLowerCase().endsWith('.cmd');
+  return {
+    spawnPath: isCmd ? 'cmd.exe' : cfg.path,
+    spawnArgs: isCmd ? ['/c', cfg.path, ...args] : args,
+  };
+}
+
+export function formatLaunchError(agentKey, err) {
+  const code = err?.code ? `${err.code}: ` : '';
+  return `${agentKey} 启动失败：${code}${err?.message || '未知错误'}`;
+}
+
+export function checkAgentLaunchable(agentKey, cfg, timeoutMs = 3000) {
+  const path = cfg?.path || '';
+  if (!path) {
+    return Promise.resolve({
+      key: agentKey,
+      path,
+      configured: false,
+      exists: false,
+      available: false,
+      error: '未配置路径',
+    });
+  }
+
+  if (!existsSync(path)) {
+    return Promise.resolve({
+      key: agentKey,
+      path,
+      configured: true,
+      exists: false,
+      available: false,
+      error: '文件不存在',
+    });
+  }
+
+  const args = cfg.checkArgs ? cfg.checkArgs() : ['--help'];
+  const { spawnPath, spawnArgs } = buildSpawnCommand(cfg, args);
+
+  return new Promise((resolve) => {
+    let child;
+    let finished = false;
+
+    const finish = (available, error = '') => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve({
+        key: agentKey,
+        path,
+        configured: true,
+        exists: true,
+        available,
+        error,
+      });
+    };
+
+    const timer = setTimeout(() => {
+      try { child?.kill('SIGTERM'); } catch {}
+      finish(false, '检测超时，CLI 没有及时响应');
+    }, timeoutMs);
+
+    try {
+      // 这里只做很轻的 --help 检测，用来确认“文件能不能被系统启动”。
+      child = spawn(spawnPath, spawnArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (err) {
+      finish(false, formatLaunchError(agentKey, err));
+      return;
+    }
+
+    child.on('error', (err) => {
+      finish(false, formatLaunchError(agentKey, err));
+    });
+
+    child.on('close', (code) => {
+      if (code === 0) finish(true);
+      else finish(false, `检测命令退出码 ${code}`);
+    });
+  });
+}
+
 // ── Agent 调用（stdin pipe，支持 .cmd 自动中转 cmd.exe） ───────
 // 教训1 (02-cli-engineering): readline 接管 stdout 后 child.stdout.on('data') 不再触发。
 //   watchdog 必须在 rl.on('line') 和 stderr.on('data') 里刷新，不能只靠 stdout 流。
@@ -82,17 +167,40 @@ export function invokeAgent(CLI_CONFIG, agentKey, prompt, { silent = false, time
 
   const parser = PARSERS[agentKey];
 
-  const isCmd = cfg.path.toLowerCase().endsWith('.cmd');
-  const spawnPath = isCmd ? 'cmd.exe' : cfg.path;
   const args = cfg.args(prompt);
-  const spawnArgs = isCmd ? ['/c', cfg.path, ...args] : args;
+  const { spawnPath, spawnArgs } = buildSpawnCommand(cfg, args);
 
   return new Promise((resolve, reject) => {
-    const child = spawn(spawnPath, spawnArgs, cfg.spawnOptions);
+    let child;
+    let settled = false;
+    let watchdog = null;
+
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      if (watchdog) clearInterval(watchdog);
+      reject(err);
+    };
+
+    try {
+      child = spawn(spawnPath, spawnArgs, cfg.spawnOptions);
+    } catch (err) {
+      fail(new Error(formatLaunchError(agentKey, err)));
+      return;
+    }
+
+    child.on('error', (err) => {
+      fail(new Error(formatLaunchError(agentKey, err)));
+    });
 
     if (cfg.inputMode !== 'arg') {
-      child.stdin.write(prompt, 'utf8');
-      child.stdin.end();
+      try {
+        child.stdin.write(prompt, 'utf8');
+        child.stdin.end();
+      } catch (err) {
+        fail(new Error(formatLaunchError(agentKey, err)));
+        return;
+      }
     }
 
     let fullText = '';
@@ -100,12 +208,11 @@ export function invokeAgent(CLI_CONFIG, agentKey, prompt, { silent = false, time
     // 教训1: 只靠 stdout 会漏掉 thinking/工具调用期间的 stderr 活跃信号
     const touch = () => { lastActivity = Date.now(); };
 
-    const watchdog = setInterval(() => {
+    watchdog = setInterval(() => {
       if (Date.now() - lastActivity > timeoutMs) {
         child.kill('SIGTERM');
         setTimeout(() => { if (!child.killed) child.kill('SIGKILL'); }, 3000);
-        clearInterval(watchdog);
-        reject(new Error(`timeout after ${timeoutMs / 60000}min`));
+        fail(new Error(`timeout after ${timeoutMs / 60000}min`));
       }
     }, 10_000);
 
@@ -128,6 +235,8 @@ export function invokeAgent(CLI_CONFIG, agentKey, prompt, { silent = false, time
     });
 
     child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
       clearInterval(watchdog);
       if (!silent) process.stdout.write('\n');
       if (code !== 0) reject(new Error(`exit code ${code}`));

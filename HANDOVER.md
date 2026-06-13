@@ -2,7 +2,7 @@
 
 > 用于新对话冷启动。AI 读完此文件即可接续工作，无需重新理解历史。
 > 
-> **最后更新**: 2026-06-13（Kimi 接入 + Review 修复）
+> **最后更新**: 2026-06-13（Kimi 接入 + Codex spawn EPERM 修复）
 
 ---
 
@@ -81,11 +81,11 @@ myteamOUO/
 
 | Key    | CLI 路径（本机）                                    | 角色 |
 |--------|-----------------------------------------------------|------|
-| codex  | `CODEX_PATH`（本机 `.env`） | 总控 / 审查 / 自迭代，plan 默认 agent |
+| codex  | `CODEX_PATH`（本机 `.env`） | 总控 / 审查 / 自迭代；当前 WindowsApps 路径存在但不可被 Node spawn |
 | claude | `CLAUDE_PATH`（本机 `.env`） | 主架构 / 深度实现 |
 | kimi   | `KIMI_PATH`（本机 `.env`，当前为 `C:\Users\Administrator\.kimi-code\bin\kimi.exe`） | 轻量执行 / 快速草稿 |
 
-路径写在本机 `.env`，在界面右上角 ⚙ 可视化修改，无需重启服务器。当前代码支持 `codex` / `claude` / `kimi` 三个 key。
+路径写在本机 `.env`，在界面右上角 ⚙ 可视化修改，无需重启服务器。当前代码支持 `codex` / `claude` / `kimi` 三个 key。前端拆任务只展示真正可启动的 agent；当前本机 Kimi 可用，所以拆任务默认走 Kimi。
 
 ---
 
@@ -98,6 +98,8 @@ kimi -p "<prompt>" --output-format text
 ```
 
 **Windows .cmd 文件必须用 `cmd.exe /c xxx.cmd args` 调用**，不能直接 spawn，也不能用 `shell:true`（会把 prompt 拆散）。
+
+**WindowsApps 里的 Codex `codex.exe` 是一个坑点**：`existsSync(path)` 会返回 true，但 Node `spawn()` 会报 `EPERM`。不要只用“文件存在”判断 agent 可用；必须用 `checkAgentLaunchable()` 做启动级检测。
 
 NDJSON 解析：
 - Codex: `event.type === 'item.completed' && event.item.text`

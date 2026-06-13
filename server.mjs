@@ -6,12 +6,41 @@ import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, cop
 import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
-import { loadEnv, buildCliConfig, invokeAgent, extractJson, PARSERS, validatePlanResult, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, AGENT_KEYS } from './agent-utils.mjs';
+import { loadEnv, buildCliConfig, invokeAgent, extractJson, PARSERS, validatePlanResult, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, AGENT_KEYS, buildSpawnCommand, checkAgentLaunchable, formatLaunchError } from './agent-utils.mjs';
 
 const ENV = loadEnv();
 const CLI_CONFIG = buildCliConfig(ENV);
 const TASKS_FILE = '.myteam/tasks.jsonl';
 const LESSONS_FILE = '.myteam/lessons.jsonl';
+const AGENT_STATUS_TTL_MS = 5000;
+let agentStatusCache = { time: 0, agents: null };
+
+async function getAgentStatuses({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && agentStatusCache.agents && now - agentStatusCache.time < AGENT_STATUS_TTL_MS) {
+    return agentStatusCache.agents;
+  }
+
+  const agents = await Promise.all(
+    AGENT_KEYS.map(k => checkAgentLaunchable(k, CLI_CONFIG[k]))
+  );
+  agentStatusCache = { time: now, agents };
+  return agents;
+}
+
+function clearAgentStatusCache() {
+  agentStatusCache = { time: 0, agents: null };
+}
+
+async function resolveRunnableAgent(preferredAgent) {
+  const statuses = await getAgentStatuses();
+  const preferred = AGENT_KEYS.includes(preferredAgent) ? preferredAgent : '';
+  const chosen = statuses.find(a => a.key === preferred && a.available)
+    || statuses.find(a => a.available)
+    || statuses.find(a => a.key === preferred)
+    || statuses[0];
+  return { agentKey: chosen?.key || preferred || 'codex', status: chosen };
+}
 
 function appendLesson(task, error) {
   const lesson = {
@@ -242,19 +271,44 @@ function streamAgent(agentKey, prompt, res, label = 'chunk') {
   }
 
   const parser = PARSERS[agentKey];
-  const isCmd = cfg.path.toLowerCase().endsWith('.cmd');
-  const spawnPath = isCmd ? 'cmd.exe' : cfg.path;
   const args = cfg.args(prompt);
-  const spawnArgs = isCmd ? ['/c', cfg.path, ...args] : args;
+  const { spawnPath, spawnArgs } = buildSpawnCommand(cfg, args);
 
   return new Promise((resolve, reject) => {
-    const child = spawn(spawnPath, spawnArgs, cfg.spawnOptions);
+    let child;
+    let settled = false;
+    let watchdog = null;
+
+    const fail = (err, cid = null) => {
+      if (settled) return;
+      settled = true;
+      if (watchdog) clearInterval(watchdog);
+      if (cid) activeChildren.delete(cid);
+      reject(err);
+    };
+
+    try {
+      child = spawn(spawnPath, spawnArgs, cfg.spawnOptions);
+    } catch (err) {
+      fail(new Error(formatLaunchError(agentKey, err)));
+      return;
+    }
+
     const cid = ++childIdSeq;
     activeChildren.set(cid, child);
 
+    child.on('error', (err) => {
+      fail(new Error(formatLaunchError(agentKey, err)), cid);
+    });
+
     if (cfg.inputMode !== 'arg') {
-      child.stdin.write(prompt, 'utf8');
-      child.stdin.end();
+      try {
+        child.stdin.write(prompt, 'utf8');
+        child.stdin.end();
+      } catch (err) {
+        fail(new Error(formatLaunchError(agentKey, err)), cid);
+        return;
+      }
     }
 
     let fullText = '';
@@ -262,11 +316,10 @@ function streamAgent(agentKey, prompt, res, label = 'chunk') {
     const touch = () => { lastActivity = Date.now(); };
     const TIMEOUT_MS = 30 * 60 * 1000; // 教训1: 30min
 
-    const watchdog = setInterval(() => {
+    watchdog = setInterval(() => {
       if (Date.now() - lastActivity > TIMEOUT_MS) {
         child.kill('SIGTERM');
-        clearInterval(watchdog);
-        reject(new Error('timeout after 30min'));
+        fail(new Error('timeout after 30min'), cid);
       }
     }, 10_000);
 
@@ -287,6 +340,8 @@ function streamAgent(agentKey, prompt, res, label = 'chunk') {
     });
 
     child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
       clearInterval(watchdog);
       activeChildren.delete(cid);
       if (isAborting) {
@@ -481,8 +536,9 @@ async function handle(req, res) {
     // 客户端指定 sessionId 时同步切换激活
     if (body.sessionId && getSession(body.sessionId)) activeSessionId = body.sessionId;
 
-    // 解析 @mention 路由
-    const agentKey = parseAtMention(message) || 'codex';
+    // 解析 @mention 路由；如果默认 codex 不可启动，就自动选一个可用 agent。
+    const requestedAgent = parseAtMention(message) || 'codex';
+    const { agentKey, status: agentStatus } = await resolveRunnableAgent(requestedAgent);
     const cleanMessage = message.replace(/(?:^|\n)\s*@(claude|codex|kimi)\b/gi, '').trim();
 
     // 存入对话历史（按 session）
@@ -495,6 +551,9 @@ async function handle(req, res) {
 
     let fullReply = '';
     try {
+      if (!agentStatus?.available) {
+        throw new Error(`${agentKey} 不可用：${agentStatus?.error || '没有可启动的 agent'}`);
+      }
       fullReply = await streamAgent(agentKey, prompt, res, 'chunk');
       session.history.push({ role: 'assistant', text: fullReply, agent: agentKey });
       if (session.history.length > 40) session.history.splice(0, session.history.length - 40);
@@ -510,28 +569,14 @@ async function handle(req, res) {
 
   // GET /api/status — agent 配置 + 路径检测
   if (req.method === 'GET' && pathname === '/api/status') {
-    const agents = AGENT_KEYS.map(k => {
-      const p = CLI_CONFIG[k]?.path;
-      return {
-        key: k,
-        configured: Boolean(p),
-        available: p ? existsSync(p) : false,
-      };
-    });
+    const agents = await getAgentStatuses();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ agents }));
   }
 
   // GET /api/agents — 返回当前 agent 路径配置（脱敏显示）
   if (req.method === 'GET' && pathname === '/api/agents') {
-    const result = AGENT_KEYS.map(k => {
-      const p = CLI_CONFIG[k]?.path || '';
-      return {
-        key: k,
-        path: p,
-        available: p ? existsSync(p) : false,
-      };
-    });
+    const result = await getAgentStatuses();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ agents: result }));
   }
@@ -566,11 +611,9 @@ async function handle(req, res) {
     CLI_CONFIG.codex  = newCfg.codex;
     CLI_CONFIG.claude = newCfg.claude;
     CLI_CONFIG.kimi   = newCfg.kimi;
+    clearAgentStatusCache();
 
-    const result = AGENT_KEYS.map(k => {
-      const p = CLI_CONFIG[k]?.path || '';
-      return { key: k, path: p, available: p ? existsSync(p) : false };
-    });
+    const result = await getAgentStatuses({ force: true });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, agents: result }));
   }
@@ -647,6 +690,10 @@ async function handle(req, res) {
     sseSend(res, 'start', { goal, agent: agentKey });
 
     try {
+      const agentStatus = (await getAgentStatuses()).find(a => a.key === agentKey);
+      if (!agentStatus?.available) {
+        throw new Error(`${agentKey} 不可用：${agentStatus?.error || '没有可启动的 agent'}。请在右上角 Agent 配置里换成可启动的 CLI。`);
+      }
       const raw = await streamAgent(agentKey, `${PLAN_PROMPT}\n\n用户目标：${goal}`, res, 'chunk');
       const data = extractJson(raw);
       // 教训2: 严格验证，防止幻觉数据写入 tasks.jsonl

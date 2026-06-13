@@ -385,7 +385,7 @@ async function loadStatus() {
     const { agents } = await fetch('/api/status').then(r => r.json());
     const pillsEl = document.getElementById('agentPills');
     pillsEl.innerHTML = agents.map(a =>
-      `<span class="agent-pill ${a.available ? 'ok' : 'err'}">
+      `<span class="agent-pill ${a.available ? 'ok' : 'err'}" title="${esc(a.error || (a.available ? '可启动' : '不可用'))}">
         <span class="dot"></span>${a.key}
       </span>`
     ).join('');
@@ -965,6 +965,9 @@ async function loadAgentConfig() {
     agentFormEl.innerHTML = '';
     agents.forEach(a => {
       const meta = AGENT_META[a.key] || { label: a.key, emoji: '●', desc: '' };
+      const statusText = a.available
+        ? '✓ 可启动，路径有效'
+        : (a.path ? `✗ ${a.error || '文件不可用'}` : '未配置');
       const card = document.createElement('div');
       card.className = 'agent-card';
       card.innerHTML = `
@@ -975,7 +978,7 @@ async function loadAgentConfig() {
             <div style="font-size:11px;color:var(--muted);">${meta.desc}</div>
           </div>
           <span class="agent-status-badge ${a.available ? 'ok' : 'err'}">
-            ${a.available ? '✓ 已检测' : '✗ 未检测'}
+            ${a.available ? '✓ 已检测' : (a.path ? '✗ 不可启动' : '✗ 未配置')}
           </span>
         </div>
         <div class="path-input-row">
@@ -984,8 +987,8 @@ async function loadAgentConfig() {
           <button class="path-check-btn" data-agent="${a.key}">检测</button>
         </div>
         <div class="path-check-result" data-result="${a.key}"
-          style="font-size:11px;margin-top:5px;color:${a.available ? 'var(--green)' : 'var(--muted)'};">
-          ${a.available ? `✓ 文件存在` : (a.path ? '✗ 文件不存在' : '未配置')}
+          style="font-size:11px;margin-top:5px;color:${a.available ? 'var(--green)' : (a.path ? 'var(--red)' : 'var(--muted)')};">
+          ${esc(statusText)}
         </div>`;
       agentFormEl.appendChild(card);
     });
@@ -1007,12 +1010,12 @@ async function loadAgentConfig() {
           const badge = btn.closest('.agent-card').querySelector('.agent-status-badge');
           if (a?.available) {
             resultEl.style.color = 'var(--green)';
-            resultEl.textContent = '✓ 文件存在，路径有效';
+            resultEl.textContent = '✓ 可启动，路径有效';
             if (badge) { badge.className = 'agent-status-badge ok'; badge.textContent = '✓ 已检测'; }
           } else {
             resultEl.style.color = 'var(--red)';
-            resultEl.textContent = '✗ 找不到文件，请检查路径';
-            if (badge) { badge.className = 'agent-status-badge err'; badge.textContent = '✗ 未检测'; }
+            resultEl.textContent = `✗ ${a?.error || '不可启动，请检查路径'}`;
+            if (badge) { badge.className = 'agent-status-badge err'; badge.textContent = input.value.trim() ? '✗ 不可启动' : '✗ 未配置'; }
           }
         } catch { resultEl.textContent = '检测失败'; }
         btn.textContent = '检测';

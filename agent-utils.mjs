@@ -5,6 +5,8 @@ import { spawn } from 'child_process';
 import { createInterface } from 'readline';
 import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'fs';
 
+export const AGENT_KEYS = ['codex', 'claude', 'kimi'];
+
 // ── .env 读取 ─────────────────────────────────────────────────
 export function loadEnv(envPath = '.env') {
   if (!existsSync(envPath)) return {};
@@ -23,13 +25,21 @@ export function buildCliConfig(ENV) {
   return {
     codex: {
       path: ENV.CODEX_PATH,
+      inputMode: 'stdin',
       args: () => ['exec', '-', '--json', '--skip-git-repo-check'],
       spawnOptions: { stdio: ['pipe', 'pipe', 'pipe'] },
     },
     claude: {
       path: ENV.CLAUDE_PATH,
+      inputMode: 'stdin',
       args: () => ['-p', '-', '--output-format', 'stream-json', '--verbose'],
       spawnOptions: { stdio: ['pipe', 'pipe', 'pipe'] },
+    },
+    kimi: {
+      path: ENV.KIMI_PATH,
+      inputMode: 'arg',
+      args: (prompt) => ['-p', prompt, '--output-format', 'text'],
+      spawnOptions: { stdio: ['ignore', 'pipe', 'pipe'] },
     },
   };
 }
@@ -56,7 +66,11 @@ function parseCodex(line) {
   return null;
 }
 
-export const PARSERS = { codex: parseCodex, claude: parseClaude };
+function parseText(line) {
+  return `${line}\n`;
+}
+
+export const PARSERS = { codex: parseCodex, claude: parseClaude, kimi: parseText };
 
 // ── Agent 调用（stdin pipe，支持 .cmd 自动中转 cmd.exe） ───────
 // 教训1 (02-cli-engineering): readline 接管 stdout 后 child.stdout.on('data') 不再触发。
@@ -70,13 +84,16 @@ export function invokeAgent(CLI_CONFIG, agentKey, prompt, { silent = false, time
 
   const isCmd = cfg.path.toLowerCase().endsWith('.cmd');
   const spawnPath = isCmd ? 'cmd.exe' : cfg.path;
-  const spawnArgs = isCmd ? ['/c', cfg.path, ...cfg.args()] : cfg.args();
+  const args = cfg.args(prompt);
+  const spawnArgs = isCmd ? ['/c', cfg.path, ...args] : args;
 
   return new Promise((resolve, reject) => {
     const child = spawn(spawnPath, spawnArgs, cfg.spawnOptions);
 
-    child.stdin.write(prompt, 'utf8');
-    child.stdin.end();
+    if (cfg.inputMode !== 'arg') {
+      child.stdin.write(prompt, 'utf8');
+      child.stdin.end();
+    }
 
     let fullText = '';
     let lastActivity = Date.now();
@@ -222,7 +239,7 @@ export const PLAN_PROMPT = `你是 myteam 的任务规划 agent。
       "title": "<任务标题>",
       "steps": ["<步骤1>", "<步骤2>"],
       "accept": "<验收标准>",
-      "agent": "<推荐执行者: claude|codex>"
+      "agent": "<推荐执行者: claude|codex|kimi>"
     }
   ]
 }`;

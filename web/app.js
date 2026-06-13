@@ -227,6 +227,7 @@ function startAgentBubble(agentKey) {
   const avatarMap = {
     codex:  { cls: 'codex-av',  emoji: '🤖', name: 'Codex' },
     claude: { cls: 'claude-av', emoji: '✨', name: 'Claude' },
+    kimi:   { cls: 'kimi-av',   emoji: '🌙', name: 'Kimi' },
   };
   const a = avatarMap[agentKey] || { cls: 'system-av', emoji: '●', name: agentKey };
 
@@ -327,7 +328,7 @@ function addPlanCard(goal, tasks) {
   // 按 agent 执行：dispatch 时只跑对应 agent 的 pending
   row.querySelectorAll('.plan-suggest-btn[data-agent]').forEach(btn => {
     btn.onclick = () => {
-      document.getElementById('dispatchBtn').click();
+      runDispatch({ agentOnly: btn.dataset.agent });
     };
   });
   // 手动：展开任务面板
@@ -750,7 +751,7 @@ modeGroup.querySelectorAll('.radio-btn').forEach(btn => {
     planAgentGroupEl.classList.toggle('hidden', !isPlan);
     goalInput.placeholder = isPlan
       ? '输入目标，例如：帮我整理一份本周工作计划…'
-      : '输入消息，或用 @claude / @codex 指定 agent…';
+      : '输入消息，或用 @claude / @codex / @kimi 指定 agent…';
   };
 });
 
@@ -759,7 +760,7 @@ function getMode() {
 }
 
 // ── @mention 实时提示 ─────────────────────────────────────────
-const MENTION_RE = /@(claude|codex)\b/i;
+const MENTION_RE = /(?:^|\n)\s*@(claude|codex|kimi)\b/i;
 
 goalInput.addEventListener('input', () => {
   goalInput.style.height = 'auto';
@@ -812,10 +813,6 @@ async function doChat(message) {
   mentionHint.classList.add('hidden');
 
   addUserBubble(message);
-
-  // 检测 @mention 用于 UI 预期
-  const mentionMatch = message.match(MENTION_RE);
-  const expectedAgent = mentionMatch ? mentionMatch[1].toLowerCase() : null;
 
   let bubble = null;
 
@@ -878,7 +875,9 @@ async function doPlan(goal) {
 }
 
 // ── dispatch ─────────────────────────────────────────────────
-document.getElementById('dispatchBtn').onclick = async () => {
+document.getElementById('dispatchBtn').onclick = () => runDispatch();
+
+async function runDispatch(options = {}) {
   const dispatchBtn = document.getElementById('dispatchBtn');
   const dispatchSpinner = document.getElementById('dispatchSpinner');
 
@@ -886,9 +885,10 @@ document.getElementById('dispatchBtn').onclick = async () => {
   dispatchSpinner.classList.remove('hidden');
 
   try {
-    addSystemMsg('开始执行所有 pending 任务…');
+    const agentOnlyText = options.agentOnly ? `（仅 ${options.agentOnly}）` : '';
+    addSystemMsg(`开始执行 pending 任务${agentOnlyText}…`);
 
-    await ssePost('/api/dispatch', {}, {
+    await ssePost('/api/dispatch', options, {
       start:        ({ count }) => addSystemMsg(`共 ${count} 条任务待执行`),
       'task-start': ({ id, title, agent }) => {
         updateTaskDot(id, 'in_progress');
@@ -927,7 +927,7 @@ document.getElementById('dispatchBtn').onclick = async () => {
     dispatchSpinner.classList.add('hidden');
     await loadTasks();
   }
-};
+}
 
 // ── agent 管理面板 ────────────────────────────────────────────
 const settingsBtn    = document.getElementById('settingsBtn');
@@ -941,6 +941,7 @@ const drawerSaveTip  = document.getElementById('drawerSaveTip');
 const AGENT_META = {
   codex:  { label: 'Agent · Codex',  emoji: '🤖', desc: '总控 / 审查 / 自迭代' },
   claude: { label: 'Agent · Claude', emoji: '✨', desc: '主架构 / 深度实现' },
+  kimi:   { label: 'Agent · Kimi',   emoji: '🌙', desc: '轻量执行 / 快速草稿' },
 };
 
 function openDrawer() {
@@ -1065,7 +1066,7 @@ function clearChatArea() {
   w.innerHTML = `
     <div class="emoji">🤝</div>
     <h2>欢迎来到 myteam</h2>
-    <p>直接发消息和 agent 对话，用 <code style="background:var(--surface2);padding:1px 5px;border-radius:4px;font-size:12px;">@claude</code> 或 <code style="background:var(--surface2);padding:1px 5px;border-radius:4px;font-size:12px;">@codex</code> 指定 agent。<br>切换到「拆任务」模式可以把目标分解成可执行清单。</p>`;
+    <p>直接发消息和 agent 对话，用 <code style="background:var(--surface2);padding:1px 5px;border-radius:4px;font-size:12px;">@claude</code>、<code style="background:var(--surface2);padding:1px 5px;border-radius:4px;font-size:12px;">@codex</code> 或 <code style="background:var(--surface2);padding:1px 5px;border-radius:4px;font-size:12px;">@kimi</code> 指定 agent。<br>切换到「拆任务」模式可以把目标分解成可执行清单。</p>`;
   chatEl.appendChild(w);
   window.welcome = w;
 }
@@ -1309,6 +1310,7 @@ async function loadHistory() {
         const avatarMap = {
           codex:  { cls: 'codex-av',  emoji: '🤖', name: 'Codex' },
           claude: { cls: 'claude-av', emoji: '✨', name: 'Claude' },
+          kimi:   { cls: 'kimi-av',   emoji: '🌙', name: 'Kimi' },
         };
         const a = avatarMap[h.agent] || { cls: 'system-av', emoji: '●', name: h.agent || 'codex' };
         const row = document.createElement('div');

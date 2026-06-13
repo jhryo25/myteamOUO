@@ -350,6 +350,7 @@ body {
 .avatar.user-av  { background: var(--accent); color: #fff; font-size: 14px; }
 .avatar.codex-av { background: #dbeafe; color: #1d4ed8; }
 .avatar.claude-av{ background: #f3e8ff; color: #7c3aed; }
+.avatar.kimi-av  { background: #fef3c7; color: #b45309; }
 .avatar.system-av{ background: var(--surface2); color: var(--muted); font-size: 13px; }
 
 .bubble {

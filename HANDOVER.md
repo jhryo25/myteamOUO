@@ -2,18 +2,18 @@
 
 > 用于新对话冷启动。AI 读完此文件即可接续工作，无需重新理解历史。
 > 
-> **最后更新**: 2026-06-12（IMP-007~010 交互对齐 clowder-ai 完成）
+> **最后更新**: 2026-06-13（Kimi 接入 + Review 修复）
 
 ---
 
 ## 项目定位
 
 myteamOUO 是一个轻量级本地 A2A（Agent-to-Agent）协作工具 MVP。
-参考 [cat-cafe-tutorials](https://github.com/zts212653/cat-cafe-tutorials) 和 [clowder-ai](https://github.com/zts212653/clowder-ai) 的架构思路，用本地两个 CLI（Claude + Codex）实现多轮对话、任务拆解、任务执行的最小可行闭环。
+参考 [cat-cafe-tutorials](https://github.com/zts212653/cat-cafe-tutorials) 和 [clowder-ai](https://github.com/zts212653/clowder-ai) 的架构思路，用本地 CLI（Kimi + Claude + Codex）实现多轮对话、任务拆解、任务执行的最小可行闭环。
 
 **GitHub**: https://github.com/jhryo25/myteamOUO  
-**本地路径**: `F:\py project\myteamOUO`  
-**启动方式**: `cd "F:\py project\myteamOUO" && node server.mjs`  
+**本地路径**: `D:\myteam`  
+**启动方式**: `cd "D:\myteam" && node server.mjs`  
 **访问地址**: http://localhost:7878
 
 ---
@@ -81,11 +81,11 @@ myteamOUO/
 
 | Key    | CLI 路径（本机）                                    | 角色 |
 |--------|-----------------------------------------------------|------|
-| codex  | `C:\Users\N30303\AppData\Roaming\npm\codex.cmd`    | 总控 / 审查 / 自迭代，plan 默认 agent |
-| claude | `C:\Users\N30303\AppData\Roaming\npm\claude.cmd`   | 主架构 / 深度实现 |
-| kimi   | 未配置（代理问题无法安装 KimiCode CLI）              | 轻量执行（预留） |
+| codex  | `CODEX_PATH`（本机 `.env`） | 总控 / 审查 / 自迭代，plan 默认 agent |
+| claude | `CLAUDE_PATH`（本机 `.env`） | 主架构 / 深度实现 |
+| kimi   | `KIMI_PATH`（本机 `.env`，当前为 `C:\Users\Administrator\.kimi-code\bin\kimi.exe`） | 轻量执行 / 快速草稿 |
 
-路径写在本机 `.env`，在界面右上角 ⚙ 可视化修改，无需重启服务器。
+路径写在本机 `.env`，在界面右上角 ⚙ 可视化修改，无需重启服务器。当前代码支持 `codex` / `claude` / `kimi` 三个 key。
 
 ---
 
@@ -94,6 +94,7 @@ myteamOUO/
 ```
 codex exec - --json --skip-git-repo-check  # stdin pipe 传 prompt
 claude -p - --output-format stream-json --verbose
+kimi -p "<prompt>" --output-format text
 ```
 
 **Windows .cmd 文件必须用 `cmd.exe /c xxx.cmd args` 调用**，不能直接 spawn，也不能用 `shell:true`（会把 prompt 拆散）。
@@ -139,7 +140,7 @@ NDJSON 解析：
 
 - **三栏布局**：左侧 Session Sidebar (240px，可折叠 48px) | 中间聊天区 | 右侧任务面板 (56px 默认，展开 340px)
 - **暖色聊天对话框**：米白底 + 橙棕 accent，用户气泡右/agent 气泡左，agent 回复支持 Rich Blocks 富文本渲染
-- **💬 对话模式**：走 `/api/chat`，多轮上下文，行首 `@claude` / `@codex` 路由
+- **💬 对话模式**：走 `/api/chat`，多轮上下文，行首 `@claude` / `@codex` / `@kimi` 路由
 - **📋 拆任务模式**：走 `/api/plan`，SSE 实时流，拆完显示结构化任务卡片
 - **▶ 执行 pending 任务**：走 `/api/dispatch`，每条任务实时流输出，支持 ■ 中断
 - **⚙ Agent 管理抽屉**：可视化查看/修改 CLI 路径，一键检测 + 保存
@@ -200,7 +201,7 @@ NDJSON 解析：
 
 ### 🟡 下一步（可选）
 
-- **Kimi 接入**：KimiCode CLI 需手动安装
+- **Kimi 接入**：已进入后端配置、状态 API、Agent 抽屉、@mention 路由和任务执行链；下一步可针对 Kimi 输出质量微调 prompt
 - **P2 优化**：lessons UI、agent pill 执行高亮、历史分页
 - **消息写入与执行解耦**：参考 clowder-ai ADR-008，POST 立即返回 → WebSocket 推流
 - **InvocationRecord 状态机**：每次 chat/plan/dispatch 创建 invocation record
@@ -214,7 +215,7 @@ NDJSON 解析：
 ```
 项目：myteamOUO（本地 A2A 协作工具 MVP）
 GitHub: https://github.com/jhryo25/myteamOUO
-本地路径: F:\py project\myteamOUO
+本地路径: D:\myteam
 交接文档: 见 HANDOVER.md
 问题追踪: 见 ISSUES.md
 

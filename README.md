@@ -28,6 +28,7 @@ node server.mjs
 
 | Agent | 角色 |
 |-------|------|
+| Kimi | 轻量执行、快速草稿、小任务处理 |
 | Claude | 深度分析、架构设计、复杂生成 |
 | Codex | 拆任务、代码执行、审查 |
 
@@ -37,7 +38,7 @@ node server.mjs
 
 ### 对话模式
 - 直接发消息，自动路由给默认 agent
-- `@claude` / `@codex` 指定 agent
+- `@claude` / `@codex` / `@kimi` 指定 agent
 - 气泡 hover 显示复制 / 删除操作栏
 - 发送按钮状态机：agent 运行中变蓝色排队模式，消息自动入队，完成后依次发送
 - 消息时间戳
@@ -97,7 +98,7 @@ myteamOUO/
 | POST | `/api/plan` | SSE 拆任务流 |
 | POST | `/api/dispatch` | SSE 执行任务流 |
 | GET | `/api/tasks` | 任务列表 |
-| PATCH | `/api/tasks/:id` | 更新任务状态 |
+| POST | `/api/tasks/:id/rerun` | 重跑单个任务 |
 | DELETE | `/api/tasks/:id` | 删除任务 |
 
 ---
@@ -105,6 +106,7 @@ myteamOUO/
 ## 环境变量（`.env`）
 
 ```env
+KIMI_PATH=C:\Users\Administrator\.kimi-code\bin\kimi.exe
 CLAUDE_PATH=C:\path\to\claude.cmd
 CODEX_PATH=C:\path\to\codex.cmd
 ```

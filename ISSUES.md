@@ -168,3 +168,31 @@
   - 使用 `<link rel="stylesheet">` 和 `<script src>` 引入外部文件
 - **教训**: 关注点分离是前端工程化的基础。HTML/CSS/JS 拆分后，代码更易维护，浏览器缓存更高效，团队协作更顺畅。
 - **标签**: `quality`, `lesson:关注点分离`
+
+---
+
+## Phase 4: Kimi 接入与 Review 修复 (2026-06-13)
+
+### IMP-011: Kimi CLI 进入可配置 agent 列表 [ux]
+
+- **位置**: `agent-utils.mjs`, `server.mjs`, `web/app.js`, `web/app.html`
+- **问题**: `.env.example` 预留了 `KIMI_PATH`，但后端状态 API、配置抽屉、@mention 路由、任务执行链都只认 `codex` / `claude`。
+- **解法**: 新增 `AGENT_KEYS = ['codex', 'claude', 'kimi']`，Kimi 使用 `kimi -p "<prompt>" --output-format text` 调用；状态 API、配置 API、前端抽屉、头像、@mention、plan/dispatch 均支持 `kimi`。
+- **教训**: 预留配置不等于完成接入；必须贯通配置、状态、路由、调用、UI 展示和验证。
+- **标签**: `ux`, `arch`
+
+### ISS-007: 前端 @mention 提示与后端路由不一致 [bug]
+
+- **位置**: `web/app.js`
+- **问题**: 后端只在行首识别 `@mention`，但前端提示任意位置的 `@claude` / `@codex` / `@kimi` 都会路由，导致用户被误导。
+- **解法**: 前端 `MENTION_RE` 改为与后端一致的行首匹配。
+- **教训**: 提示逻辑必须和实际执行逻辑一致，否则 UX 会制造假承诺。
+- **标签**: `bug`, `ux`
+
+### ISS-008: plan 建议按钮没有按 agent 过滤执行 [bug]
+
+- **位置**: `web/app.js`, `server.mjs`
+- **问题**: plan card 上的“让某 agent 执行”按钮文案表示只执行该 agent 的任务，但实际点击的是全局 dispatch，执行所有 pending。
+- **解法**: 前端调用 `runDispatch({ agentOnly })`，后端 `/api/dispatch` 根据 `agentOnly` 过滤 pending 任务。
+- **教训**: 按钮文案表达的范围必须和后端执行范围一致，尤其是会触发 agent 执行的动作。
+- **标签**: `bug`, `ux`

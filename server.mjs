@@ -6,7 +6,7 @@ import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, cop
 import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
-import { loadEnv, buildCliConfig, invokeAgent, extractJson, PARSERS, validatePlanResult, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt } from './agent-utils.mjs';
+import { loadEnv, buildCliConfig, invokeAgent, extractJson, PARSERS, validatePlanResult, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, AGENT_KEYS } from './agent-utils.mjs';
 
 const ENV = loadEnv();
 const CLI_CONFIG = buildCliConfig(ENV);
@@ -122,10 +122,11 @@ loadSessions();
 const MENTION_MAP = {
   claude: 'claude',
   codex:  'codex',
+  kimi:   'kimi',
 };
 function parseAtMention(text) {
   // 行首匹配（允许前导空白），防止代码/引用中 @mention 误触发路由
-  const m = text.match(/(?:^|\n)\s*@(claude|codex)\b/i);
+  const m = text.match(/(?:^|\n)\s*@(claude|codex|kimi)\b/i);
   return m ? MENTION_MAP[m[1].toLowerCase()] : null;
 }
 
@@ -133,7 +134,7 @@ function parseAtMention(text) {
 // 行首匹配（允许前导空白），防止代码注释 /  casual 提及误触发
 function parseA2AMentions(text) {
   const mentions = [];
-  const re = /(?:^|\n)\s*@(claude|codex)\b/gi;
+  const re = /(?:^|\n)\s*@(claude|codex|kimi)\b/gi;
   let m;
   while ((m = re.exec(text)) !== null) {
     const key = MENTION_MAP[m[1].toLowerCase()];
@@ -167,6 +168,7 @@ const RICH_BLOCKS_HINT = `
 const CHAT_SYSTEM = {
   codex:  `You are Codex, a helpful AI assistant in the myteam workspace. You help with code, analysis, and task planning. Reply in Chinese.${RICH_BLOCKS_HINT}`,
   claude: `You are Claude, a helpful AI assistant in the myteam workspace. You excel at deep thinking, writing, and architecture. Reply in Chinese.${RICH_BLOCKS_HINT}`,
+  kimi:   `You are Kimi, a helpful AI assistant in the myteam workspace. You handle lightweight execution, drafting, and quick analysis. Reply in Chinese.${RICH_BLOCKS_HINT}`,
 };
 
 function buildChatPrompt(userMessage, agentKey, history) {
@@ -242,15 +244,18 @@ function streamAgent(agentKey, prompt, res, label = 'chunk') {
   const parser = PARSERS[agentKey];
   const isCmd = cfg.path.toLowerCase().endsWith('.cmd');
   const spawnPath = isCmd ? 'cmd.exe' : cfg.path;
-  const spawnArgs = isCmd ? ['/c', cfg.path, ...cfg.args()] : cfg.args();
+  const args = cfg.args(prompt);
+  const spawnArgs = isCmd ? ['/c', cfg.path, ...args] : args;
 
   return new Promise((resolve, reject) => {
     const child = spawn(spawnPath, spawnArgs, cfg.spawnOptions);
     const cid = ++childIdSeq;
     activeChildren.set(cid, child);
 
-    child.stdin.write(prompt, 'utf8');
-    child.stdin.end();
+    if (cfg.inputMode !== 'arg') {
+      child.stdin.write(prompt, 'utf8');
+      child.stdin.end();
+    }
 
     let fullText = '';
     let lastActivity = Date.now();
@@ -478,7 +483,7 @@ async function handle(req, res) {
 
     // 解析 @mention 路由
     const agentKey = parseAtMention(message) || 'codex';
-    const cleanMessage = message.replace(/(?:^|\n)\s*@(claude|codex)\b/gi, '').trim();
+    const cleanMessage = message.replace(/(?:^|\n)\s*@(claude|codex|kimi)\b/gi, '').trim();
 
     // 存入对话历史（按 session）
     session.history.push({ role: 'user', text: message, agent: null });
@@ -505,7 +510,7 @@ async function handle(req, res) {
 
   // GET /api/status — agent 配置 + 路径检测
   if (req.method === 'GET' && pathname === '/api/status') {
-    const agents = ['codex', 'claude'].map(k => {
+    const agents = AGENT_KEYS.map(k => {
       const p = CLI_CONFIG[k]?.path;
       return {
         key: k,
@@ -519,7 +524,7 @@ async function handle(req, res) {
 
   // GET /api/agents — 返回当前 agent 路径配置（脱敏显示）
   if (req.method === 'GET' && pathname === '/api/agents') {
-    const result = ['codex', 'claude'].map(k => {
+    const result = AGENT_KEYS.map(k => {
       const p = CLI_CONFIG[k]?.path || '';
       return {
         key: k,
@@ -531,12 +536,13 @@ async function handle(req, res) {
     return res.end(JSON.stringify({ agents: result }));
   }
 
-  // POST /api/agents { codex?: string, claude?: string } — 写回 .env，实时重载
+  // POST /api/agents { codex?: string, claude?: string, kimi?: string } — 写回 .env，实时重载
   if (req.method === 'POST' && pathname === '/api/agents') {
     const body = await readBody(req);
     const updates = {};
     if (body.codex !== undefined) updates.CODEX_PATH = body.codex.trim();
     if (body.claude !== undefined) updates.CLAUDE_PATH = body.claude.trim();
+    if (body.kimi !== undefined) updates.KIMI_PATH = body.kimi.trim();
 
     if (Object.keys(updates).length === 0) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -559,8 +565,9 @@ async function handle(req, res) {
     const newCfg = buildCliConfig(newEnv);
     CLI_CONFIG.codex  = newCfg.codex;
     CLI_CONFIG.claude = newCfg.claude;
+    CLI_CONFIG.kimi   = newCfg.kimi;
 
-    const result = ['codex', 'claude'].map(k => {
+    const result = AGENT_KEYS.map(k => {
       const p = CLI_CONFIG[k]?.path || '';
       return { key: k, path: p, available: p ? existsSync(p) : false };
     });
@@ -683,14 +690,16 @@ async function handle(req, res) {
     const body = await readBody(req);
     const filterRun = body.runId || '';
     const filterTask = body.taskId || '';
+    const filterAgent = body.agentOnly || '';
     const agentOverride = body.agent || '';
 
     let pending = readTasks().filter(t => t.status === 'pending');
     if (filterRun) pending = pending.filter(t => t.run_id === filterRun);
     if (filterTask) pending = pending.filter(t => t.id === filterTask);
+    if (filterAgent) pending = pending.filter(t => t.agent === filterAgent);
 
     sseInit(res);
-    sseSend(res, 'start', { count: pending.length });
+    sseSend(res, 'start', { count: pending.length, agentOnly: filterAgent || null });
 
     // 教训4: dispatch 前先备份，防止执行过程中数据意外丢失
     const backupPath = backupTasks();

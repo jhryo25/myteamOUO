@@ -1,6 +1,6 @@
 // myteam dispatch 命令
-// 读取 tasks.jsonl 中 pending 任务，按 agent 字段分发给 Claude/Codex 执行，结果写回
-// 用法：node dispatch.mjs [--run-id <id>] [--task-id <id>] [--agent codex|claude]
+// 读取 tasks.jsonl 中 pending 任务，按 agent 字段分发给 Kimi/Claude/Codex 执行，结果写回
+// 用法：node dispatch.mjs [--run-id <id>] [--task-id <id>] [--agent codex|claude|kimi]
 
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { loadEnv, buildCliConfig, invokeAgent, readTasks, writeAllTasks, buildExecPrompt } from './agent-utils.mjs';

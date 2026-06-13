@@ -1,9 +1,9 @@
 // myteam plan 命令
-// 用法：node plan.mjs "目标描述" [--agent codex|claude]
+// 用法：node plan.mjs "目标描述" [--agent codex|claude|kimi]
 
 import { appendFileSync } from 'fs';
 import { randomUUID } from 'crypto';
-import { loadEnv, buildCliConfig, invokeAgent, extractJson, validatePlanResult } from './agent-utils.mjs';
+import { loadEnv, buildCliConfig, invokeAgent, extractJson, validatePlanResult, AGENT_KEYS } from './agent-utils.mjs';
 
 const ENV = loadEnv();
 const CLI_CONFIG = buildCliConfig(ENV);
@@ -19,7 +19,7 @@ const SYSTEM_PROMPT = `你是 myteam 的任务规划 agent。
       "title": "<任务标题>",
       "steps": ["<步骤1>", "<步骤2>"],
       "accept": "<验收标准>",
-      "agent": "<推荐执行者: claude|codex>"
+      "agent": "<推荐执行者: claude|codex|kimi>"
     }
   ]
 }`;
@@ -59,11 +59,11 @@ for (let i = 0; i < args.length; i++) {
 const goal = goalParts.join(' ').trim();
 
 if (!goal) {
-  console.error('用法: node plan.mjs "目标描述" [--agent codex|claude]');
+  console.error(`用法: node plan.mjs "目标描述" [--agent ${AGENT_KEYS.join('|')}]`);
   process.exit(1);
 }
-if (!CLI_CONFIG[agentKey]) {
-  console.error(`未知 agent: ${agentKey}，可选：codex / claude`);
+if (!AGENT_KEYS.includes(agentKey)) {
+  console.error(`未知 agent: ${agentKey}，可选：${AGENT_KEYS.join(' / ')}`);
   process.exit(1);
 }
 

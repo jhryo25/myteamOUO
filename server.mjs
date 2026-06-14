@@ -190,6 +190,7 @@ function summarizeInvocations(invocations) {
 // 数据结构: { sessions: [{ id, name, created_at, history: [...] }], activeId }
 const MEMORY_FILE = '.myteam/memory.json';
 const DEFAULT_SESSION_NAME = '默认对话';
+const DEFAULT_DRAFT_SESSION_NAME = '新对话';
 
 // 内存数据：sessions 数组 + 当前激活的 session id
 let sessions = [];
@@ -200,10 +201,37 @@ const TRASH_RETENTION_MS = 5 * 60 * 1000; // 5 分钟
 function newSession(name) {
   return {
     id: randomUUID().slice(0, 8),
-    name: name || DEFAULT_SESSION_NAME,
+    name: name || DEFAULT_DRAFT_SESSION_NAME,
     created_at: new Date().toISOString(),
     history: [],
   };
+}
+
+function isAutoSessionName(name) {
+  const text = String(name || '').trim();
+  return (
+    !text ||
+    text === DEFAULT_SESSION_NAME ||
+    text === DEFAULT_DRAFT_SESSION_NAME ||
+    /^对话\s*\d+$/.test(text)
+  );
+}
+
+function summarizeSessionTitle(text) {
+  const clean = String(text || '')
+    .replace(/(?:^|\n)\s*@(claude|codex|kimi)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[，。！？,.!?;；：:\s]+|[，。！？,.!?;；：:\s]+$/g, '')
+    .trim();
+  const firstSentence = clean.split(/[。！？!?；;\n]/)[0]?.trim() || clean;
+  if (!firstSentence) return DEFAULT_DRAFT_SESSION_NAME;
+  return firstSentence.length > 22 ? `${firstSentence.slice(0, 22)}…` : firstSentence;
+}
+
+function maybeAutoRenameSession(session, message) {
+  // 新手体验：新建对话时不要求先起名，等第一句话发出后自动生成一个短标题。
+  if (!session || session.history.length || !isAutoSessionName(session.name)) return;
+  session.name = summarizeSessionTitle(message);
 }
 
 function getSession(id) {
@@ -597,7 +625,7 @@ async function handle(req, res) {
       return res.end(JSON.stringify({ ok: true, activeId: activeSessionId }));
     }
     // 新建
-    const s = newSession((body.name || '').trim() || `对话 ${sessions.length + 1}`);
+    const s = newSession((body.name || '').trim());
     sessions.push(s);
     activeSessionId = s.id;
     saveSessions();
@@ -718,8 +746,11 @@ async function handle(req, res) {
     const { agentKey, status: agentStatus } = await resolveRunnableAgent(requestedAgent);
     const cleanMessage = message.replace(/(?:^|\n)\s*@(claude|codex|kimi)\b/gi, '').trim();
 
+    maybeAutoRenameSession(session, cleanMessage || message);
+
     // 存入对话历史（按 session）
     session.history.push({ role: 'user', text: message, agent: null });
+    saveSessions();
 
     const prompt = buildChatPrompt(cleanMessage, agentKey, session.history);
 

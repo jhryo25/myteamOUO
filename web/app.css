@@ -936,6 +936,41 @@ body {
   background: var(--accent-soft);
   color: var(--accent);
   border: 1px solid rgba(201,106,42,.2);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.mention-hint-label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+.mention-option {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.mention-option span {
+  margin-left: 4px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+.mention-option.active,
+.mention-option:hover {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+.mention-option.active span,
+.mention-option:hover span {
+  color: rgba(255,255,255,.78);
 }
 
 /* 结构化任务卡片气泡 */
@@ -1224,50 +1259,6 @@ body {
 .hub-btn:hover {
   background: var(--accent);
   border-color: var(--accent);
-}
-
-/* Session 新建表单（弹层，复用于左侧栏底部按钮触发） */
-.session-new-form {
-  position: fixed;
-  top: 60px;
-  left: 60px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px;
-  box-shadow: 0 4px 12px rgba(0,0,0,.15);
-  z-index: 100;
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-.session-new-form input {
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  font-size: 13px;
-  width: 200px;
-  background: var(--bg);
-  color: var(--text);
-}
-.session-new-form input:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-.session-new-form button {
-  padding: 6px 12px;
-  border: none;
-  border-radius: 6px;
-  font-size: 13px;
-  cursor: pointer;
-}
-.session-new-form .confirm-btn {
-  background: var(--accent);
-  color: white;
-}
-.session-new-form .cancel-btn {
-  background: var(--surface2);
-  color: var(--text);
 }
 
 .undo-toast {

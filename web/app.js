@@ -396,6 +396,11 @@ async function loadStatus() {
     ).join('');
 
     const availableAgents = agents.filter(a => a.available);
+    mentionAgents = agents.map(a => ({
+      key: a.key,
+      label: a.key,
+      available: a.available,
+    }));
     buildRadioGroup('planAgentGroup',
       availableAgents.map(a => ({ key: a.key, label: a.key })),
       availableAgents[0]?.key
@@ -779,6 +784,7 @@ modeGroup.querySelectorAll('.radio-btn').forEach(btn => {
     const isPlan = btn.dataset.value === 'plan';
     planAgentLabel.classList.toggle('hidden', !isPlan);
     planAgentGroupEl.classList.toggle('hidden', !isPlan);
+    renderMentionHint();
     goalInput.placeholder = isPlan
       ? '输入目标，例如：帮我整理一份本周工作计划…'
       : '输入消息，或用 @claude / @codex / @kimi 指定 agent…';
@@ -791,19 +797,87 @@ function getMode() {
 
 // ── @mention 实时提示 ─────────────────────────────────────────
 const MENTION_RE = /(?:^|\n)\s*@(claude|codex|kimi)\b/i;
+let mentionAgents = [
+  { key: 'claude', label: 'claude', available: false },
+  { key: 'codex', label: 'codex', available: false },
+  { key: 'kimi', label: 'kimi', available: false },
+];
+let mentionActiveIndex = 0;
+
+function getMentionQuery() {
+  const caret = goalInput.selectionStart ?? goalInput.value.length;
+  const before = goalInput.value.slice(0, caret);
+  const match = before.match(/(^|[\s\n])@([a-zA-Z]*)$/);
+  if (!match) return null;
+  const start = before.length - match[2].length - 1;
+  return { query: match[2].toLowerCase(), start, end: caret };
+}
+
+function getMentionMatches(query) {
+  return mentionAgents
+    .filter(agent => agent.key.toLowerCase().startsWith(query))
+    .sort((a, b) => Number(b.available) - Number(a.available) || a.key.localeCompare(b.key));
+}
+
+function applyMentionCompletion(agentKey) {
+  const info = getMentionQuery();
+  if (!info) return;
+  const before = goalInput.value.slice(0, info.start);
+  const after = goalInput.value.slice(info.end);
+  const nextValue = `${before}@${agentKey} ${after}`;
+  const caret = before.length + agentKey.length + 2;
+  goalInput.value = nextValue;
+  goalInput.focus();
+  goalInput.setSelectionRange(caret, caret);
+  renderMentionHint();
+  updateSendBtnState();
+}
+
+function renderMentionHint() {
+  const m = goalInput.value.match(MENTION_RE);
+  const info = getMentionQuery();
+
+  if (getMode() !== 'chat') {
+    mentionHint.classList.add('hidden');
+    mentionHint.innerHTML = '';
+    return;
+  }
+
+  if (info) {
+    const matches = getMentionMatches(info.query);
+    if (matches.length) {
+      mentionActiveIndex = Math.min(mentionActiveIndex, matches.length - 1);
+      mentionHint.innerHTML = `
+        <span class="mention-hint-label">@agent</span>
+        ${matches.map((agent, index) => `
+          <button class="mention-option ${index === mentionActiveIndex ? 'active' : ''}" data-agent="${esc(agent.key)}" type="button">
+            @${esc(agent.key)}
+            <span>${agent.available ? '可用' : '未配置'}</span>
+          </button>
+        `).join('')}`;
+      mentionHint.querySelectorAll('.mention-option').forEach(btn => {
+        btn.onclick = () => applyMentionCompletion(btn.dataset.agent);
+      });
+      mentionHint.classList.remove('hidden');
+      return;
+    }
+  }
+
+  if (m) {
+    mentionHint.textContent = `→ 将路由给 ${m[1].toLowerCase()}`;
+    mentionHint.classList.remove('hidden');
+  } else {
+    mentionHint.classList.add('hidden');
+    mentionHint.innerHTML = '';
+  }
+}
 
 goalInput.addEventListener('input', () => {
   goalInput.style.height = 'auto';
   goalInput.style.height = Math.min(goalInput.scrollHeight, 120) + 'px';
   updateSendBtnState();
-
-  const m = goalInput.value.match(MENTION_RE);
-  if (m && getMode() === 'chat') {
-    mentionHint.textContent = `→ 将路由给 ${m[1].toLowerCase()}`;
-    mentionHint.classList.remove('hidden');
-  } else {
-    mentionHint.classList.add('hidden');
-  }
+  mentionActiveIndex = 0;
+  renderMentionHint();
 });
 
 // ── send 入口：按模式分发 ─────────────────────────────────────
@@ -829,6 +903,26 @@ async function doSend() {
 
 sendBtn.onclick = doSend;
 goalInput.addEventListener('keydown', e => {
+  const mentionInfo = getMentionQuery();
+  if (getMode() === 'chat' && mentionInfo && !mentionHint.classList.contains('hidden')) {
+    const matches = getMentionMatches(mentionInfo.query);
+    if (matches.length && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      e.preventDefault();
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      mentionActiveIndex = (mentionActiveIndex + step + matches.length) % matches.length;
+      renderMentionHint();
+      return;
+    }
+    if (matches.length && (e.key === 'Tab' || e.key === 'Enter')) {
+      e.preventDefault();
+      applyMentionCompletion(matches[mentionActiveIndex]?.key || matches[0].key);
+      return;
+    }
+    if (e.key === 'Escape') {
+      mentionHint.classList.add('hidden');
+      return;
+    }
+  }
   // 中文输入法保护：检查 isComposing 或 keyCode 229
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { 
     e.preventDefault(); 
@@ -1685,45 +1779,17 @@ async function switchSession(sessionId) {
 }
 
 async function createSession() {
-  const form = document.getElementById('sessionNewForm');
-  const input = document.getElementById('sessionNameInput');
-  const confirmBtn = document.getElementById('sessionNewConfirm');
-  const cancelBtn = document.getElementById('sessionNewCancel');
-
-  form.classList.remove('hidden');
-  input.value = `对话 ${new Date().toLocaleDateString('zh-CN', {month:'numeric', day:'numeric'})}`;
-  input.focus();
-  input.select();
-
-  return new Promise((resolve) => {
-    const cleanup = () => {
-      form.classList.add('hidden');
-      confirmBtn.onclick = null;
-      cancelBtn.onclick = null;
-      input.onkeydown = null;
-    };
-    confirmBtn.onclick = async () => {
-      const name = input.value.trim();
-      if (!name) return;
-      cleanup();
-      const { session } = await fetch('/api/sessions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
-      }).then(r => r.json());
-      if (session) {
-        currentSessionId = session.id;
-        await loadSessions();
-        clearChatArea();
-      }
-      resolve();
-    };
-    cancelBtn.onclick = () => { cleanup(); resolve(); };
-    input.onkeydown = (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); confirmBtn.click(); }
-      else if (e.key === 'Escape') { e.preventDefault(); cancelBtn.click(); }
-    };
-  });
+  const { session } = await fetch('/api/sessions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  }).then(r => r.json());
+  if (session) {
+    currentSessionId = session.id;
+    await loadSessions();
+    clearChatArea();
+    goalInput.focus();
+  }
 }
 
 async function deleteSession(sessionId) {

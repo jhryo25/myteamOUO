@@ -345,6 +345,36 @@
 
 复用提醒：面向新手的项目，README 先讲用途，再讲命令，再讲结构。
 
+## 课程 18：CLI prompt 占位符不能先替换再按空格拆分
+
+标签：`bug`, `agent`, `kimi`, `image`, `windows`, `splitArgs`, `lesson`
+
+现象：用户上传图片后，Kimi 气泡显示“正在启动”，随后只出现 `exit code 1`。
+
+实际排查到两个连续问题：
+
+1. Kimi 的 sessions 目录不可写，stderr 里是 `EPERM: operation not permitted, mkdir ...`。
+2. 修好权限后，Kimi 又报 `unknown command 'are'`。
+
+原因：
+
+- Kimi 每次 prompt 模式都会创建本地 session。当前由 Codex 启动的 myteam 服务运行身份对 `C:\Users\Administrator\.kimi-code\sessions` 没有写权限。
+- `splitArgs()` 的旧逻辑是先把 `{prompt}` 替换成长文本，再按空格拆分。这样 `-p {prompt}` 会被拆成 `-p`, `You`, `are`, ...，prompt 内容被当成 CLI 参数甚至 command。
+
+解法：
+
+- 给本机 `CodexSandboxUsers` 增加 `.kimi-code` 写权限，让当前服务能创建 Kimi session。
+- `splitArgs()` 改为先拆模板，再把 `{prompt}` 替换成一个完整参数。
+- `streamAgent()` 和 `invokeAgent()` 捕获 stderr，失败时展示真实错误。
+
+验证：
+
+- `/api/chat` 调用 Kimi 能正常流式输出。
+- 使用真实截图作为图片附件时，Kimi 能读取并描述截图内容。
+- 调用记录里失败时会保存 stderr，不再只有 `exit code 1`。
+
+复用提醒：所有 CLI 模板里的大文本占位符都要按“一个参数”处理。任何 agent 失败都要优先展示 stderr，不要只展示退出码。
+
 ## 后续建议
 
 1. 把本文件接入本地 RAG：当用户遇到错误时，先检索本课程文档和 `ISSUES.md`。

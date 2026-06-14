@@ -565,6 +565,7 @@ function streamAgent(agentKey, prompt, res, label = 'chunk') {
     }
 
     let fullText = '';
+    let stderrText = '';
     let lastActivity = Date.now();
     const touch = () => { lastActivity = Date.now(); };
     const thinkingTimer = setTimeout(() => {
@@ -598,6 +599,8 @@ function streamAgent(agentKey, prompt, res, label = 'chunk') {
 
     child.stderr?.on('data', (data) => {
       touch(); // 教训1: stderr 也是活跃信号
+      stderrText += data.toString();
+      if (stderrText.length > 4000) stderrText = stderrText.slice(-4000);
     });
 
     child.on('close', (code) => {
@@ -614,11 +617,12 @@ function streamAgent(agentKey, prompt, res, label = 'chunk') {
         finishInvocation('interrupted', { ...common, error: 'aborted' });
         resolve(fullText);
       } else if (code !== 0) {
-        const err = new Error(`exit code ${code}`);
-        finishInvocation('failed', { ...common, error: err.message });
+        const detail = stderrText.trim();
+        const err = new Error(detail ? `exit code ${code}: ${detail}` : `exit code ${code}`);
+        finishInvocation('failed', { ...common, error: err.message, stderr: detail });
         reject(err);
       } else {
-        finishInvocation('success', common);
+        finishInvocation('success', stderrText.trim() ? { ...common, stderr: stderrText.trim() } : common);
         resolve(fullText);
       }
     });

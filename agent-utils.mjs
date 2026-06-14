@@ -54,10 +54,10 @@ export function sanitizeAgentKey(value) {
 function splitArgs(template, prompt = '') {
   const text = String(template || '').trim();
   if (!text) return [];
+  // 先拆模板再替换 prompt，避免长 prompt 被空格拆成多个 CLI 参数。
   return text
-    .replaceAll('{prompt}', prompt)
     .match(/"([^"]*)"|'([^']*)'|\S+/g)
-    ?.map(part => part.replace(/^["']|["']$/g, '')) || [];
+    ?.map(part => part.replace(/^["']|["']$/g, '').replaceAll('{prompt}', prompt)) || [];
 }
 
 export function readAgentRegistry(ENV = loadEnv(), file = AGENTS_FILE) {
@@ -306,6 +306,7 @@ export function invokeAgent(CLI_CONFIG, agentKey, prompt, { silent = false, time
     }
 
     let fullText = '';
+    let stderrText = '';
     let lastActivity = Date.now();
     // 教训1: 只靠 stdout 会漏掉 thinking/工具调用期间的 stderr 活跃信号
     const touch = () => { lastActivity = Date.now(); };
@@ -332,6 +333,8 @@ export function invokeAgent(CLI_CONFIG, agentKey, prompt, { silent = false, time
     child.stderr?.on('data', (data) => {
       touch(); // 教训1: stderr 也是活跃信号（thinking/工具调用输出在这里）
       const msg = data.toString();
+      stderrText += msg;
+      if (stderrText.length > 4000) stderrText = stderrText.slice(-4000);
       if (msg.includes('Reading additional input')) return;
       if (!silent) process.stderr.write(`[stderr] ${msg}`);
     });
@@ -341,7 +344,10 @@ export function invokeAgent(CLI_CONFIG, agentKey, prompt, { silent = false, time
       settled = true;
       clearInterval(watchdog);
       if (!silent) process.stdout.write('\n');
-      if (code !== 0) reject(new Error(`exit code ${code}`));
+      if (code !== 0) {
+        const detail = stderrText.trim();
+        reject(new Error(detail ? `exit code ${code}: ${detail}` : `exit code ${code}`));
+      }
       else resolve(fullText);
     });
   });

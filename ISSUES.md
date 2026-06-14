@@ -290,3 +290,19 @@
 - **解法**: 不临时安装新依赖；改用 `node --check`、`git diff --check`、真实 `/api/uploads` 上传和 `/uploads/:file` Content-Type 验证替代，并在最终说明中明确浏览器自动化阻塞原因。
 - **教训**: 验证报告要区分代码验证和环境阻塞；不要把“自动化环境不可用”说成“功能已完整浏览器验证”。
 - **标签**: `qa`, `browser`, `lesson:验证失败要说明环境边界`
+
+### ISS-012: Kimi 发送图片后只显示 exit code 1 [bug]
+
+- **位置**: `agent-utils.mjs`, `server.mjs`, 本机 `C:\Users\Administrator\.kimi-code`
+- **问题**: 用户上传图片后，聊天界面显示 Kimi 正在启动，随后只显示 `exit code 1`，没有真实原因。
+- **根因 1**: Kimi 需要写入 `C:\Users\Administrator\.kimi-code\sessions` 创建会话，但 Codex 启动的 myteam 服务运行身份对该目录只有读权限，导致 `EPERM: operation not permitted, mkdir ...`。
+- **根因 2**: `splitArgs()` 先把 `{prompt}` 替换成长文本，再按空格拆参数。Kimi 的 `-p {prompt}` 被拆成很多参数，prompt 里的单词会被当成 CLI command，例如报 `unknown command 'are'`。
+- **解法**:
+  - 给本机 `CodexSandboxUsers` 增加 `.kimi-code` 写权限，让当前 myteam 服务能创建 Kimi session。
+  - `splitArgs()` 改为先拆模板，再把 `{prompt}` 作为一个完整参数替换。
+  - `streamAgent()` 和 CLI `invokeAgent()` 捕获 stderr，失败时展示真实错误，而不是只显示退出码。
+- **验证**:
+  - `/api/chat` 调用 Kimi 不再报 `unknown command 'are'`。
+  - 使用真实截图作为图片附件时，Kimi 能读取图片并描述出截图内容。
+- **教训**: CLI prompt 模板中的 `{prompt}` 必须作为一个完整参数处理；agent 失败时必须记录 stderr，否则用户只能看到无意义的退出码。
+- **标签**: `bug`, `agent`, `image`, `windows`, `lesson:prompt占位符不能先替换再按空格拆分`

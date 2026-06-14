@@ -12,6 +12,7 @@ const ENV = loadEnv();
 const CLI_CONFIG = buildCliConfig(ENV);
 const TASKS_FILE = '.myteam/tasks.jsonl';
 const LESSONS_FILE = '.myteam/lessons.jsonl';
+const SKILLS_FILE = '.myteam/skills.yaml';
 const AGENT_STATUS_TTL_MS = 5000;
 let agentStatusCache = { time: 0, agents: null };
 
@@ -53,6 +54,47 @@ function appendLesson(task, error) {
     timestamp: new Date().toISOString(),
   };
   appendFileSync(LESSONS_FILE, JSON.stringify(lesson) + '\n', 'utf8');
+}
+
+function parseScalar(value) {
+  const v = String(value || '').trim();
+  if (v === 'true') return true;
+  if (v === 'false') return false;
+  return v.replace(/^["']|["']$/g, '');
+}
+
+function readSkills() {
+  if (!existsSync(SKILLS_FILE)) return [];
+  const skills = [];
+  let current = null;
+  let inMounts = false;
+
+  for (const raw of readFileSync(SKILLS_FILE, 'utf8').split('\n')) {
+    const line = raw.replace(/\r$/, '');
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#') || trimmed === 'skills:') continue;
+
+    const item = trimmed.match(/^-\s+name:\s*(.+)$/);
+    if (item) {
+      current = { name: parseScalar(item[1]), mounts: {} };
+      skills.push(current);
+      inMounts = false;
+      continue;
+    }
+
+    if (!current) continue;
+    if (trimmed === 'mounts:') {
+      inMounts = true;
+      continue;
+    }
+
+    const kv = trimmed.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+    if (!kv) continue;
+    if (inMounts) current.mounts[kv[1]] = Boolean(parseScalar(kv[2]));
+    else current[kv[1]] = parseScalar(kv[2]);
+  }
+
+  return skills;
 }
 
 // ── 对话历史 + Session 隔离（持久化到 .myteam/memory.json） ───
@@ -622,6 +664,18 @@ async function handle(req, res) {
   if (req.method === 'GET' && pathname === '/api/tasks') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ tasks: readTasks() }));
+  }
+
+  // GET /api/skills — 返回 MVP 静态技能清单
+  if (req.method === 'GET' && pathname === '/api/skills') {
+    const skills = readSkills();
+    const summary = {
+      total: skills.length,
+      categories: [...new Set(skills.map(s => s.category).filter(Boolean))],
+      agents: ['controller', 'worker', 'reviewer', ...AGENT_KEYS],
+    };
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ skills, summary }));
   }
 
   // POST /api/tasks/:id/rerun — 重新执行单个任务

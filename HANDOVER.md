@@ -2,7 +2,7 @@
 
 > 用于新对话冷启动。AI 读完此文件即可接续工作，无需重新理解历史。
 > 
-> **最后更新**: 2026-06-14（轻量 Hub + clowder-ai HTML 对齐）
+> **最后更新**: 2026-06-14（轻量 Hub + Skills 看板）
 
 ---
 
@@ -43,6 +43,7 @@ myteamOUO/
 │   └── clowder-html-gap.md # clowder-ai 与 myteam HTML/交互差距记录
 ├── .myteam/
 │   ├── agents.yaml       # agent 角色配置（入库，无敏感信息）
+│   ├── skills.yaml       # MVP 技能清单（入库，无敏感信息）
 │   ├── tasks.jsonl       # 运行时任务数据（不入库）
 │   ├── lessons.jsonl     # 踩坑记录（不入库）
 │   ├── memory.json       # 对话历史 + session + 回收站（不入库）
@@ -63,6 +64,7 @@ myteamOUO/
 | GET  | `/api/agents` | 返回原始路径配置（含 available） |
 | POST | `/api/agents` | 修改路径写回 .env，实时重载 CLI_CONFIG |
 | GET  | `/api/tasks` | 返回 tasks.jsonl 全部记录 |
+| GET  | `/api/skills` | 返回 `.myteam/skills.yaml` 静态技能清单 |
 | DELETE | `/api/tasks/:id` | 删除单个任务 |
 | POST | `/api/tasks/:id/rerun` | 重新执行单个任务（重置状态为 pending） |
 | GET  | `/api/history` | 返回内存对话历史 |
@@ -148,7 +150,7 @@ NDJSON 解析：
 - **📋 拆任务模式**：走 `/api/plan`，SSE 实时流，拆完显示结构化任务卡片
 - **▶ 执行 pending 任务**：走 `/api/dispatch`，每条任务实时流输出，支持 ■ 中断
 - **⚙ Agent 管理抽屉**：可视化查看/修改 CLI 路径，一键检测 + 保存
-- **Hub 指挥抽屉**：顶部 `Hub` 按钮打开轻量指挥中心，包含总览、Agent、任务、对比四个 tab
+- **Hub 指挥抽屉**：顶部 `Hub` 按钮打开轻量指挥中心，包含总览、Agent、Skills、任务、对比五个 tab
 - **左侧 Session Sidebar**：每行显示名称/时间/消息数 + hover 删除；底部「＋ 新建对话」；删除有 5 秒撤销 toast + 回收站持久化
 - **右侧任务面板**：窄条展开；有搜索框 + 状态 chips；任务按 run 分组可折叠，新 run 在前，pending 数量徽标
 - **A2A 链式执行**：agent 回复中 @mention 自动触发链式任务，乒乓球熔断保护
@@ -206,13 +208,14 @@ NDJSON 解析：
 17. **Kimi 接入**：贯通配置、状态 API、Agent 抽屉、@mention 路由和任务执行链（IMP-011）
 18. **Codex spawn EPERM 检测**：启动级检测替代 `existsSync`，避免不可执行路径进入拆任务选项（ISS-009）
 19. **轻量 Hub 指挥中心**：对齐 clowder-ai Hub 思路，集中展示状态、任务和 HTML/交互差距（IMP-012）
+20. **静态 Skills 看板**：`.myteam/skills.yaml` + `/api/skills` + Hub Skills tab 展示技能挂载关系（IMP-013）
 
 ### 🟡 下一步（可选）
 
 - **Kimi 输出质量**：Kimi 已接入；下一步可针对拆任务 JSON 稳定性微调 prompt
 - **P2 优化**：lessons UI、agent pill 执行高亮、历史分页
 - **Reviewer Gate**：任务执行后进入 review/test，再允许写长期记忆
-- **静态 Skills 看板**：新增 `.myteam/skills.yaml`，先展示技能到 agent 的挂载关系
+- **Skills 按需加载**：当前已有静态看板；下一步根据任务类型把对应 skill 注入 agent prompt
 - **消息写入与执行解耦**：参考 clowder-ai ADR-008，POST 立即返回 → WebSocket 推流
 - **InvocationRecord 状态机**：每次 chat/plan/dispatch 创建 invocation record
 - **Skills 按需加载机制**：参考 clowder-ai 50+ skills 目录结构

@@ -967,7 +967,7 @@ drawerMask.onclick  = closeDrawer;
 
 // ── Hub 指挥抽屉 ─────────────────────────────────────────────
 let hubActiveTab = 'overview';
-let hubState = { agents: [], tasks: [] };
+let hubState = { agents: [], tasks: [], skills: [], skillsSummary: null };
 
 function openHub() {
   closeDrawer();
@@ -984,13 +984,16 @@ function closeHub() {
 async function loadHub() {
   hubBody.innerHTML = '<div class="hub-loading">正在读取本地状态…</div>';
   try {
-    const [status, taskData] = await Promise.all([
+    const [status, taskData, skillData] = await Promise.all([
       fetch('/api/status').then(r => r.json()),
       fetch('/api/tasks').then(r => r.json()).catch(() => ({ tasks: [] })),
+      fetch('/api/skills').then(r => r.json()).catch(() => ({ skills: [], summary: null })),
     ]);
     hubState = {
       agents: status.agents || [],
       tasks: taskData.tasks || [],
+      skills: skillData.skills || [],
+      skillsSummary: skillData.summary || null,
     };
     renderHub();
   } catch (err) {
@@ -1023,6 +1026,7 @@ function renderHub() {
     btn.classList.toggle('active', btn.dataset.tab === hubActiveTab);
   });
   if (hubActiveTab === 'agents') return renderHubAgents();
+  if (hubActiveTab === 'skills') return renderHubSkills();
   if (hubActiveTab === 'tasks') return renderHubTasks();
   if (hubActiveTab === 'compare') return renderHubCompare();
   return renderHubOverview();
@@ -1034,7 +1038,7 @@ function renderHubOverview() {
   hubBody.innerHTML = `
     <div class="hub-kpi-grid">
       <div class="hub-kpi"><div class="hub-kpi-label">可启动 Agent</div><div class="hub-kpi-value">${available}</div></div>
-      <div class="hub-kpi"><div class="hub-kpi-label">任务总数</div><div class="hub-kpi-value">${stats.total}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">技能数</div><div class="hub-kpi-value">${hubState.skills.length}</div></div>
       <div class="hub-kpi"><div class="hub-kpi-label">待执行</div><div class="hub-kpi-value">${stats.pending}</div></div>
       <div class="hub-kpi"><div class="hub-kpi-label">失败</div><div class="hub-kpi-value">${stats.failed}</div></div>
     </div>
@@ -1086,6 +1090,50 @@ function renderHubAgents() {
   bindHubActions();
 }
 
+function renderHubSkills() {
+  const mountKeys = ['controller', 'worker', 'reviewer', 'codex', 'claude', 'kimi'];
+  const categories = [...new Set(hubState.skills.map(s => s.category).filter(Boolean))];
+  hubBody.innerHTML = `
+    <div class="hub-kpi-grid">
+      <div class="hub-kpi"><div class="hub-kpi-label">技能总数</div><div class="hub-kpi-value">${hubState.skills.length}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">分类</div><div class="hub-kpi-value">${categories.length}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">可挂载角色</div><div class="hub-kpi-value">${mountKeys.length}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">数据源</div><div class="hub-kpi-value">YAML</div></div>
+    </div>
+    <section class="hub-section">
+      <div class="hub-section-title">Skills 看板 <span class="hub-mini-note">来自 .myteam/skills.yaml</span></div>
+      ${hubState.skills.length ? `<div class="hub-table-wrap">
+        <table class="hub-skills-table">
+          <thead>
+            <tr>
+              <th>Skill</th>
+              <th>分类</th>
+              <th>触发条件</th>
+              <th>挂载</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${hubState.skills.map(skill => `<tr>
+              <td><span class="hub-skill-name">${esc(skill.name)}</span></td>
+              <td>${esc(skill.category || '-')}</td>
+              <td>${esc(skill.trigger || skill.description || '-')}</td>
+              <td><div class="hub-mounts">
+                ${mountKeys.map(key => `<span class="hub-mount ${skill.mounts?.[key] ? 'on' : ''}">${esc(key)}</span>`).join('')}
+              </div></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>` : '<div class="hub-empty">还没有技能清单。请检查 .myteam/skills.yaml。</div>'}
+    </section>
+    <section class="hub-section">
+      <div class="hub-section-title">和 clowder-ai 的差距 <span class="hub-mini-note">MVP 版本先只读</span></div>
+      <div class="hub-list">
+        <div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">缺少按需加载</div><div class="hub-row-meta">当前只是技能登记表，后续需要按任务触发加载对应提示词。</div></div><span class="hub-badge warn">下一步</span></div>
+        <div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">缺少依赖检测</div><div class="hub-row-meta">clowder-ai 会显示 MCP 依赖；myteam 后续可加 requires 字段。</div></div><span class="hub-badge info">可扩展</span></div>
+      </div>
+    </section>`;
+}
+
 function renderHubTasks() {
   const stats = taskStats(hubState.tasks);
   const recent = [...hubState.tasks].slice(-6).reverse();
@@ -1119,7 +1167,7 @@ function renderHubCompare() {
     ['Hub 指挥中心', 'Capability / Skills / Quota / 系统配置集中在 Hub tabs', '新增轻量 Hub，先集中状态、任务、对比'],
     ['PlanBoardPanel', '按 agent 分组显示运行/中断/完成，支持继续', '任务面板已有分组，下一步补 reviewer gate 和继续入口统一'],
     ['Mission Hub', '跨项目 backlog、self-claim、线程态势、SOP 面板', 'MVP 先保留本地 tasks，后续扩展 backlog / gate / learn'],
-    ['Skills 框架', '技能按需加载，并展示挂载到哪些 agent', '当前只有提示词规则，后续可加 .myteam/skills.yaml'],
+    ['Skills 框架', '技能按需加载，并展示挂载到哪些 agent', '新增 .myteam/skills.yaml 与 Hub Skills 看板，下一步做按需加载'],
     ['成本可见性', 'Quota Board 轮询模型额度并预警', '当前可先记录调用次数、失败率和超时']
   ];
   hubBody.innerHTML = `

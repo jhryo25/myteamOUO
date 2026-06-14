@@ -212,3 +212,11 @@
 - **解法**: 顶部新增 `Hub` 按钮和 `myteam Hub` 抽屉，提供总览、Agent、任务、对比四个 tab；Hub 从现有 `/api/status` 和 `/api/tasks` 读取数据，不引入新依赖。
 - **教训**: 轻量 MVP 也需要一个“状态集中点”。先做只读 Hub，可以在不增加系统复杂度的前提下提升可理解性，并为后续 Skills / Quota / Reviewer Gate 留入口。
 - **标签**: `ux`, `html`, `lesson:先做只读Hub再扩展治理`
+
+### IMP-013: 新增静态 Skills 看板 [ux]
+
+- **位置**: `.myteam/skills.yaml`, `server.mjs`, `web/app.html`, `web/app.css`, `web/app.js`
+- **问题**: clowder-ai Hub Skills tab 会展示技能、触发条件、依赖和挂载 agent；myteam 目前只有固定 agent 角色，用户看不到“什么能力应该交给谁”。
+- **解法**: 新增 `.myteam/skills.yaml` 作为 MVP 技能清单；后端提供 `GET /api/skills`；Hub 增加 `Skills` tab，展示技能分类、触发条件和 controller/worker/reviewer/codex/claude/kimi 的挂载情况。
+- **教训**: Skills 系统可以先从只读登记表开始，先让能力边界可见，再升级到真正的按需提示词加载。
+- **标签**: `ux`, `skills`, `html`, `lesson:能力先可见再自动化`

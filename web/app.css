@@ -403,6 +403,58 @@ body {
   border: 1px solid var(--border);
   border-bottom-left-radius: 4px;
 }
+.thinking-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.thinking-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse .8s ease-in-out infinite alternate;
+}
+.user-attachments {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.user-attachment-chip {
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(255,255,255,.18);
+  border: 1px solid rgba(255,255,255,.28);
+  font-size: 11px;
+}
+.user-attachment-thumb {
+  width: 126px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(255,255,255,.18);
+  border: 1px solid rgba(255,255,255,.28);
+  color: #fff;
+  text-decoration: none;
+}
+.user-attachment-thumb img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  background: rgba(255,255,255,.1);
+}
+.user-attachment-thumb span {
+  display: block;
+  padding: 5px 7px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
 .bubble.system-bubble {
   background: var(--surface2);
   color: var(--muted);
@@ -973,6 +1025,60 @@ body {
   color: rgba(255,255,255,.78);
 }
 
+.attachment-tray {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 0;
+}
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text);
+}
+.attachment-chip img {
+  width: 34px;
+  height: 34px;
+  border-radius: 6px;
+  object-fit: cover;
+  flex: 0 0 auto;
+  background: var(--surface);
+}
+.attachment-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-remove {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.attach-btn {
+  width: 42px;
+  min-width: 42px;
+  height: 42px;
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 16px;
+}
+.attach-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
 /* 结构化任务卡片气泡 */
 .plan-card {
   background: var(--surface);
@@ -1337,6 +1443,17 @@ body {
   border-radius: var(--radius);
   padding: 14px;
 }
+.agent-remove-btn {
+  margin-top: 8px;
+  padding: 5px 10px;
+  border: 1px solid var(--red);
+  background: var(--red-soft);
+  color: var(--red);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.agent-remove-btn:disabled { display: none; }
 .agent-card-header {
   display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
 }
@@ -1373,17 +1490,41 @@ body {
   display: flex; align-items: center; gap: 10px;
   padding-top: 4px; border-top: 1px solid var(--border);
 }
+.drawer-actions.compact {
+  border-top: none;
+  padding-top: 0;
+  margin: 8px 0 10px;
+}
 .drawer-save-btn {
   padding: 9px 18px; border-radius: var(--radius);
   background: var(--accent); color: #fff;
   border: none; font-size: 13px; font-weight: 700;
   cursor: pointer; transition: opacity .15s;
 }
+.drawer-save-btn.secondary {
+  background: var(--surface2);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
 .drawer-save-btn:hover { opacity: .88; }
 .drawer-save-btn:disabled { opacity: .4; cursor: not-allowed; }
 .drawer-save-tip { font-size: 12px; }
 .drawer-save-tip.ok  { color: var(--green); }
 .drawer-save-tip.err { color: var(--red); }
+.workspace-form {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 10px;
+}
+.workspace-form label {
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 6px;
+  color: var(--text);
+}
 
 /* ── Hub 指挥抽屉 ── */
 .hub-drawer {

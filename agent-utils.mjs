@@ -3,9 +3,122 @@
 
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
-import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'fs';
 
 export const AGENT_KEYS = ['codex', 'claude', 'kimi'];
+export const AGENTS_FILE = '.myteam/agents.json';
+
+const DEFAULT_AGENT_DEFS = [
+  {
+    key: 'codex',
+    label: 'Codex',
+    emoji: '🤖',
+    desc: '总控 / 审查 / 自迭代',
+    envKey: 'CODEX_PATH',
+    inputMode: 'stdin',
+    argsTemplate: 'exec - --json --skip-git-repo-check',
+    checkTemplate: '--help',
+  },
+  {
+    key: 'claude',
+    label: 'Claude',
+    emoji: '✦',
+    desc: '主架构 / 深度实现',
+    envKey: 'CLAUDE_PATH',
+    inputMode: 'stdin',
+    argsTemplate: '-p - --output-format stream-json --verbose',
+    checkTemplate: '--help',
+  },
+  {
+    key: 'kimi',
+    label: 'Kimi',
+    emoji: '🌙',
+    desc: '轻量执行 / 快速草稿',
+    envKey: 'KIMI_PATH',
+    inputMode: 'arg',
+    argsTemplate: '-p {prompt} --output-format text',
+    checkTemplate: '--help',
+  },
+];
+
+export function sanitizeAgentKey(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^@+/, '')
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32);
+}
+
+function splitArgs(template, prompt = '') {
+  const text = String(template || '').trim();
+  if (!text) return [];
+  return text
+    .replaceAll('{prompt}', prompt)
+    .match(/"([^"]*)"|'([^']*)'|\S+/g)
+    ?.map(part => part.replace(/^["']|["']$/g, '')) || [];
+}
+
+export function readAgentRegistry(ENV = loadEnv(), file = AGENTS_FILE) {
+  let saved = [];
+  if (existsSync(file)) {
+    try {
+      const data = JSON.parse(readFileSync(file, 'utf8'));
+      saved = Array.isArray(data.agents) ? data.agents : [];
+    } catch {
+      saved = [];
+    }
+  }
+
+  const byKey = new Map(DEFAULT_AGENT_DEFS.map(agent => [agent.key, { ...agent }]));
+  for (const raw of saved) {
+    const key = sanitizeAgentKey(raw.key);
+    if (!key) continue;
+    const base = byKey.get(key) || {};
+    byKey.set(key, {
+      ...base,
+      ...raw,
+      key,
+      label: raw.label || base.label || key,
+      emoji: raw.emoji || base.emoji || '●',
+      desc: raw.desc || base.desc || '',
+      inputMode: raw.inputMode === 'stdin' ? 'stdin' : 'arg',
+      argsTemplate: raw.argsTemplate || base.argsTemplate || '-p {prompt}',
+      checkTemplate: raw.checkTemplate || base.checkTemplate || '--help',
+      envKey: raw.envKey || base.envKey || `${key.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_PATH`,
+      removable: raw.removable ?? !AGENT_KEYS.includes(key),
+    });
+  }
+
+  return [...byKey.values()].map(agent => ({
+    ...agent,
+    path: agent.path ?? ENV[agent.envKey] ?? '',
+  }));
+}
+
+export function writeAgentRegistry(agents, file = AGENTS_FILE) {
+  mkdirSync('.myteam', { recursive: true });
+  const cleaned = agents
+    .map(agent => {
+      const key = sanitizeAgentKey(agent.key);
+      if (!key) return null;
+      return {
+        key,
+        label: String(agent.label || key).trim() || key,
+        emoji: String(agent.emoji || '●').trim() || '●',
+        desc: String(agent.desc || '').trim(),
+        path: String(agent.path || '').trim(),
+        inputMode: agent.inputMode === 'stdin' ? 'stdin' : 'arg',
+        argsTemplate: String(agent.argsTemplate || '-p {prompt}').trim(),
+        checkTemplate: String(agent.checkTemplate || '--help').trim(),
+        removable: agent.removable ?? !AGENT_KEYS.includes(key),
+      };
+    })
+    .filter(Boolean);
+  writeFileSync(file, JSON.stringify({ agents: cleaned }, null, 2), 'utf8');
+  return cleaned;
+}
 
 // ── .env 读取 ─────────────────────────────────────────────────
 export function loadEnv(envPath = '.env') {
@@ -22,29 +135,18 @@ export function loadEnv(envPath = '.env') {
 
 // ── CLI 配置工厂（接受已解析的 ENV） ─────────────────────────
 export function buildCliConfig(ENV) {
-  return {
-    codex: {
-      path: ENV.CODEX_PATH,
-      inputMode: 'stdin',
-      args: () => ['exec', '-', '--json', '--skip-git-repo-check'],
-      checkArgs: () => ['--help'],
-      spawnOptions: { stdio: ['pipe', 'pipe', 'pipe'] },
-    },
-    claude: {
-      path: ENV.CLAUDE_PATH,
-      inputMode: 'stdin',
-      args: () => ['-p', '-', '--output-format', 'stream-json', '--verbose'],
-      checkArgs: () => ['--help'],
-      spawnOptions: { stdio: ['pipe', 'pipe', 'pipe'] },
-    },
-    kimi: {
-      path: ENV.KIMI_PATH,
-      inputMode: 'arg',
-      args: (prompt) => ['-p', prompt, '--output-format', 'text'],
-      checkArgs: () => ['--help'],
-      spawnOptions: { stdio: ['ignore', 'pipe', 'pipe'] },
-    },
-  };
+  const config = {};
+  for (const agent of readAgentRegistry(ENV)) {
+    config[agent.key] = {
+      ...agent,
+      path: agent.path || '',
+      inputMode: agent.inputMode,
+      args: (prompt) => splitArgs(agent.argsTemplate, prompt),
+      checkArgs: () => splitArgs(agent.checkTemplate || '--help'),
+      spawnOptions: { stdio: [agent.inputMode === 'stdin' ? 'pipe' : 'ignore', 'pipe', 'pipe'] },
+    };
+  }
+  return config;
 }
 
 // ── NDJSON 解析器 ─────────────────────────────────────────────
@@ -165,7 +267,7 @@ export function invokeAgent(CLI_CONFIG, agentKey, prompt, { silent = false, time
   const cfg = CLI_CONFIG[agentKey];
   if (!cfg?.path) throw new Error(`${agentKey} 路径未在 .env 中配置（${agentKey.toUpperCase()}_PATH）`);
 
-  const parser = PARSERS[agentKey];
+  const parser = PARSERS[agentKey] || parseText;
 
   const args = cfg.args(prompt);
   const { spawnPath, spawnArgs } = buildSpawnCommand(cfg, args);

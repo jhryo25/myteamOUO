@@ -203,14 +203,30 @@ function bindBubbleActions(row, text, type) {
   }
 }
 
-function addUserBubble(text, { prepend = false, scroll = true } = {}) {
+function addUserBubble(text, { prepend = false, scroll = true, attachments = [] } = {}) {
   hideWelcome();
   const row = document.createElement('div');
   row.className = 'bubble-row user';
+  const attachmentHtml = attachments.length ? `<div class="user-attachments">
+          ${attachments.map(a => {
+            const name = a.name || 'image';
+            const src = a.url || a.previewUrl || '';
+            if (src) {
+              return `<a class="user-attachment-thumb" href="${esc(src)}" target="_blank" rel="noreferrer" title="${esc(name)}">
+                <img src="${esc(src)}" alt="${esc(name)}">
+                <span>${esc(name)}</span>
+              </a>`;
+            }
+            return `<span class="user-attachment-chip">图片 ${esc(name)}</span>`;
+          }).join('')}
+        </div>` : '';
   row.innerHTML = `
     <div class="bubble-content-wrap">
       <div class="bubble-name">你 <span class="bubble-time">${formatTime()}</span></div>
-      <div class="bubble user-bubble">${esc(text)}</div>
+      <div class="bubble user-bubble">
+        ${esc(text || '（图片消息）')}
+        ${attachmentHtml}
+      </div>
       <div class="bubble-actions">
         <button class="bubble-action-btn" data-action="copy" title="复制">⎘</button>
         <button class="bubble-action-btn danger" data-action="delete" title="删除">✕</button>
@@ -242,7 +258,9 @@ function startAgentBubble(agentKey) {
     <div class="avatar ${a.cls}">${a.emoji}</div>
     <div class="bubble-content-wrap">
       <div class="bubble-name">${a.name} <span class="bubble-time" id="bubbleTime"></span></div>
-      <div class="bubble agent-bubble typing-cursor" id="typingBubble"></div>
+      <div class="bubble agent-bubble typing-cursor" id="typingBubble">
+        <div class="thinking-line"><span class="thinking-dot"></span><span>正在连接 ${esc(agentKey)}...</span></div>
+      </div>
       <div class="bubble-actions">
         <button class="bubble-action-btn" data-action="copy" title="复制">⎘</button>
       </div>
@@ -264,6 +282,12 @@ function appendTyping(text) {
   // 流式阶段保留 textContent，在 finishTyping 时一次性渲染富文本
   agentTypingBubble.dataset.raw = (agentTypingBubble.dataset.raw || '') + text;
   agentTypingBubble.textContent = agentTypingBubble.dataset.raw;
+  scrollChat();
+}
+
+function updateAgentStatus(text) {
+  if (!agentTypingBubble || agentTypingBubble.dataset.raw) return;
+  agentTypingBubble.innerHTML = `<div class="thinking-line"><span class="thinking-dot"></span><span>${esc(text || 'agent 正在处理...')}</span></div>`;
   scrollChat();
 }
 
@@ -388,6 +412,7 @@ function getRadio(containerId) {
 async function loadStatus() {
   try {
     const { agents } = await fetch('/api/status').then(r => r.json());
+    agentConfigList = agents;
     const pillsEl = document.getElementById('agentPills');
     pillsEl.innerHTML = agents.map(a =>
       `<span class="agent-pill ${a.available ? 'ok' : 'err'} ${activeAgentKey === a.key ? 'busy' : ''}" data-agent="${esc(a.key)}" title="${esc(a.error || (a.available ? '可启动' : '不可用'))}">
@@ -398,11 +423,12 @@ async function loadStatus() {
     const availableAgents = agents.filter(a => a.available);
     mentionAgents = agents.map(a => ({
       key: a.key,
-      label: a.key,
+      label: a.label || a.key,
+      emoji: a.emoji || '●',
       available: a.available,
     }));
     buildRadioGroup('planAgentGroup',
-      availableAgents.map(a => ({ key: a.key, label: a.key })),
+      availableAgents.map(a => ({ key: a.key, label: a.label || a.key })),
       availableAgents[0]?.key
     );
     setConnectionStatus(availableAgents.length > 0 ? 'online' : 'degraded');
@@ -691,7 +717,7 @@ function setRunning(running) {
 }
 
 function updateSendBtnState() {
-  const hasText = goalInput.value.trim().length > 0;
+  const hasText = goalInput.value.trim().length > 0 || pendingImages.length > 0;
   if (isRunning) {
     sendBtn.classList.add('queue-mode');
     sendBtn.innerHTML = '⏎';
@@ -775,6 +801,10 @@ const planAgentLabel  = document.getElementById('planAgentLabel');
 const planAgentGroupEl= document.getElementById('planAgentGroup');
 const mentionHint     = document.getElementById('mentionHint');
 const sendBtn         = document.getElementById('sendBtn');
+const attachBtn       = document.getElementById('attachBtn');
+const imageInput      = document.getElementById('imageInput');
+const attachmentTray  = document.getElementById('attachmentTray');
+let pendingImages = [];
 const goalInput       = document.getElementById('goalInput');   // 统一在此声明，避免 TDZ
 
 modeGroup.querySelectorAll('.radio-btn').forEach(btn => {
@@ -796,7 +826,7 @@ function getMode() {
 }
 
 // ── @mention 实时提示 ─────────────────────────────────────────
-const MENTION_RE = /(?:^|\n)\s*@(claude|codex|kimi)\b/i;
+const MENTION_RE = /(?:^|\n)\s*@([a-zA-Z0-9_-]+)\b/i;
 let mentionAgents = [
   { key: 'claude', label: 'claude', available: false },
   { key: 'codex', label: 'codex', available: false },
@@ -863,7 +893,7 @@ function renderMentionHint() {
     }
   }
 
-  if (m) {
+  if (m && mentionAgents.some(agent => agent.key === m[1].toLowerCase())) {
     mentionHint.textContent = `→ 将路由给 ${m[1].toLowerCase()}`;
     mentionHint.classList.remove('hidden');
   } else {
@@ -880,12 +910,90 @@ goalInput.addEventListener('input', () => {
   renderMentionHint();
 });
 
+function renderAttachmentTray() {
+  if (!pendingImages.length) {
+    attachmentTray.classList.add('hidden');
+    attachmentTray.innerHTML = '';
+    return;
+  }
+  attachmentTray.classList.remove('hidden');
+  attachmentTray.innerHTML = pendingImages.map((item, index) => `
+    <div class="attachment-chip">
+      <img src="${esc(item.previewUrl)}" alt="${esc(item.file.name)}">
+      <span>${esc(item.file.name)}</span>
+      <button class="attachment-remove" data-index="${index}" type="button">×</button>
+    </div>
+  `).join('');
+  attachmentTray.querySelectorAll('.attachment-remove').forEach(btn => {
+    btn.onclick = () => {
+      const [removed] = pendingImages.splice(Number(btn.dataset.index), 1);
+      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      renderAttachmentTray();
+      updateSendBtnState();
+    };
+  });
+}
+
+function clearPendingImages() {
+  pendingImages.forEach(item => {
+    if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+  });
+  pendingImages = [];
+  renderAttachmentTray();
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadPendingImages() {
+  if (!pendingImages.length) return [];
+  const files = await Promise.all(pendingImages.map(async item => ({
+    name: item.file.name,
+    type: item.file.type,
+    dataUrl: await fileToDataUrl(item.file),
+  })));
+  const res = await fetch('/api/uploads', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ files }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || '图片上传失败');
+  return (data.uploads || []).map((upload, index) => ({
+    ...upload,
+    previewUrl: upload.url || pendingImages[index]?.previewUrl || '',
+  }));
+}
+
+attachBtn.onclick = () => imageInput.click();
+imageInput.onchange = () => {
+  const next = Array.from(imageInput.files || [])
+    .filter(file => file.type.startsWith('image/'))
+    .map(file => ({ file, previewUrl: URL.createObjectURL(file) }));
+  pendingImages.push(...next);
+  const overflow = pendingImages.splice(5);
+  overflow.forEach(item => URL.revokeObjectURL(item.previewUrl));
+  imageInput.value = '';
+  renderAttachmentTray();
+  updateSendBtnState();
+};
+
 // ── send 入口：按模式分发 ─────────────────────────────────────
 async function doSend() {
   const text = goalInput.value.trim();
-  if (!text) return;
+  if (!text && !pendingImages.length) return;
   // 运行中且 chat 模式 → 入队
   if (isRunning && getMode() === 'chat') {
+    if (pendingImages.length) {
+      addSystemMsg('正在运行时暂不排队图片消息，请等当前 agent 完成后再发送图片。');
+      return;
+    }
     messageQueue.push(text);
     goalInput.value = '';
     goalInput.style.height = '';
@@ -895,6 +1003,10 @@ async function doSend() {
     return;
   }
   if (getMode() === 'plan') {
+    if (pendingImages.length) {
+      addSystemMsg('拆任务模式暂不使用图片，请切回对话模式发送图片。');
+      return;
+    }
     await doPlan(text);
   } else {
     await doChat(text);
@@ -932,20 +1044,30 @@ goalInput.addEventListener('keydown', e => {
 
 // ── chat 模式 ─────────────────────────────────────────────────
 async function doChat(message) {
+  let attachments = [];
+  try {
+    attachments = await uploadPendingImages();
+  } catch (err) {
+    addSystemMsg(`图片发送失败：${err.message}`);
+    return;
+  }
   goalInput.value = '';
   goalInput.style.height = '';
+  clearPendingImages();
   mentionHint.classList.add('hidden');
 
-  addUserBubble(message);
+  addUserBubble(message, { attachments });
 
   let bubble = null;
 
-  await ssePost('/api/chat', { message, sessionId: currentSessionId }, {
+  const agentAttachments = attachments.map(({ previewUrl, ...attachment }) => attachment);
+  await ssePost('/api/chat', { message, sessionId: currentSessionId, attachments: agentAttachments }, {
     start: ({ agent }) => {
       setActiveAgent(agent);
       bubble = startAgentBubble(agent);
     },
     chunk: ({ text }) => appendTyping(text),
+    status: ({ text }) => updateAgentStatus(text),
     error: ({ message: msg }) => {
       finishTyping();
       addSystemMsg(`✗ ${msg}`);
@@ -978,6 +1100,7 @@ async function doPlan(goal) {
 
   await ssePost('/api/plan', { goal, agent }, {
     start: ({ agent }) => setActiveAgent(agent),
+    status: ({ text }) => updateAgentStatus(text),
     chunk: ({ text }) => appendTyping(text),
     error: ({ message }) => {
       finishTyping();
@@ -1024,6 +1147,7 @@ async function runDispatch(options = {}) {
         appendTyping(`[${title}]\n`);
       },
       chunk:        ({ text }) => appendTyping(text),
+      status:       ({ text }) => updateAgentStatus(text),
       'task-done':  ({ id, title, agent, summary }) => {
         finishTyping();
         updateTaskDot(id, 'done');
@@ -1065,6 +1189,10 @@ const drawerClose    = document.getElementById('drawerClose');
 const agentFormEl    = document.getElementById('agentForm');
 const drawerSaveBtn  = document.getElementById('drawerSaveBtn');
 const drawerSaveTip  = document.getElementById('drawerSaveTip');
+const workspaceInput = document.getElementById('workspaceInput');
+const workspaceSaveBtn = document.getElementById('workspaceSaveBtn');
+const workspaceTip = document.getElementById('workspaceTip');
+const agentAddBtn = document.getElementById('agentAddBtn');
 const hubBtn         = document.getElementById('hubBtn');
 const hubMask        = document.getElementById('hubMask');
 const hubDrawer      = document.getElementById('hubDrawer');
@@ -1077,6 +1205,18 @@ const AGENT_META = {
   claude: { label: 'Agent · Claude', emoji: '✨', desc: '主架构 / 深度实现' },
   kimi:   { label: 'Agent · Kimi',   emoji: '🌙', desc: '轻量执行 / 快速草稿' },
 };
+
+let agentConfigList = [];
+
+function agentMeta(agentKey) {
+  const dynamic = agentConfigList.find(a => a.key === agentKey) || mentionAgents.find(a => a.key === agentKey);
+  const fallback = AGENT_META[agentKey] || {};
+  return {
+    label: dynamic?.label || fallback.label || agentKey,
+    emoji: dynamic?.emoji || fallback.emoji || '●',
+    desc: dynamic?.desc || fallback.desc || '',
+  };
+}
 
 function openDrawer() {
   closeHub();
@@ -1235,6 +1375,9 @@ function renderHubOverview() {
         <button class="hub-action-btn" data-hub-action="tasks">展开任务面板</button>
       </div>
     </section>`;
+  hubBody.querySelectorAll('.hub-section').forEach(section => {
+    if (section.textContent.includes('下一步路线')) section.remove();
+  });
   bindHubActions();
 }
 
@@ -1529,13 +1672,30 @@ hubTabs.querySelectorAll('.hub-tab').forEach(btn => {
   };
 });
 
+async function saveAgentList(agents) {
+  const res = await fetch('/api/agents', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agents }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || '保存 agent 失败');
+  agentConfigList = data.agents || agents;
+  await loadStatus();
+  await loadAgentConfig();
+  if (!hubDrawer.classList.contains('hidden')) await loadHub();
+  return data;
+}
+
 async function loadAgentConfig() {
   agentFormEl.innerHTML = '<div style="color:var(--muted);font-size:13px;">加载中…</div>';
   try {
-    const { agents } = await fetch('/api/agents').then(r => r.json());
+    const { agents, workspace } = await fetch('/api/agents').then(r => r.json());
+    agentConfigList = agents;
+    if (workspaceInput) workspaceInput.value = workspace || '';
     agentFormEl.innerHTML = '';
     agents.forEach(a => {
-      const meta = AGENT_META[a.key] || { label: a.key, emoji: '●', desc: '' };
+      const meta = agentMeta(a.key);
       const statusText = a.available
         ? '✓ 可启动，路径有效'
         : (a.path ? `✗ ${a.error || '文件不可用'}` : '未配置');
@@ -1562,6 +1722,16 @@ async function loadAgentConfig() {
           ${esc(statusText)}
         </div>`;
       agentFormEl.appendChild(card);
+      if (a.removable !== false) {
+        const removeBtn = document.createElement('button');
+        removeBtn.className = 'agent-remove-btn';
+        removeBtn.textContent = `删除 @${a.key}`;
+        removeBtn.onclick = async () => {
+          agentConfigList = agentConfigList.filter(agent => agent.key !== a.key);
+          await saveAgentList(agentConfigList);
+        };
+        card.appendChild(removeBtn);
+      }
     });
 
     // 检测按钮：临时保存当前输入路径后调 /api/agents，看返回的 available
@@ -1596,6 +1766,50 @@ async function loadAgentConfig() {
     agentFormEl.innerHTML = '<div style="color:var(--red);font-size:13px;">无法加载配置，请确认服务器正在运行。</div>';
   }
 }
+
+agentAddBtn.onclick = async () => {
+  const rawKey = prompt('请输入新 agent 的 key，例如 qwen 或 gemini：');
+  const key = (rawKey || '').trim().toLowerCase().replace(/^@+/, '').replace(/[^a-z0-9_-]+/g, '-');
+  if (!key) return;
+  if (agentConfigList.some(a => a.key === key)) {
+    drawerSaveTip.textContent = `@${key} 已存在`;
+    drawerSaveTip.className = 'drawer-save-tip err';
+    drawerSaveTip.classList.remove('hidden');
+    return;
+  }
+  const label = prompt('显示名称（可以直接回车使用 key）：') || key;
+  await saveAgentList([...agentConfigList, {
+    key,
+    label,
+    emoji: '●',
+    desc: '自定义 Agent',
+    path: '',
+    inputMode: 'arg',
+    argsTemplate: '-p {prompt}',
+    checkTemplate: '--help',
+    removable: true,
+  }]);
+};
+
+workspaceSaveBtn.onclick = async () => {
+  workspaceSaveBtn.disabled = true;
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspace: workspaceInput.value.trim() }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '保存失败');
+    workspaceInput.value = data.workspace || workspaceInput.value;
+    workspaceTip.style.color = 'var(--green)';
+    workspaceTip.textContent = '已保存，后续 agent 会在这个工作区运行。';
+  } catch (err) {
+    workspaceTip.style.color = 'var(--red)';
+    workspaceTip.textContent = err.message;
+  }
+  workspaceSaveBtn.disabled = false;
+};
 
 drawerSaveBtn.onclick = async () => {
   const inputs = agentFormEl.querySelectorAll('.path-input');
@@ -1854,7 +2068,7 @@ async function loadHistoryLegacy() {
     hideWelcome();
     history.forEach(h => {
       if (h.role === 'user') {
-        addUserBubble(h.text);
+        addUserBubble(h.text, { attachments: h.attachments || [] });
       } else if (h.role === 'assistant') {
         const avatarMap = {
           codex:  { cls: 'codex-av',  emoji: '🤖', name: 'Codex' },
@@ -1902,7 +2116,7 @@ function renderAssistantHistoryBubble(h) {
 
 function renderHistoryEntry(h, prepend = false) {
   if (h.role === 'user') {
-    return addUserBubble(h.text, { prepend, scroll: false });
+    return addUserBubble(h.text, { prepend, scroll: false, attachments: h.attachments || [] });
   }
   if (h.role === 'assistant') {
     hideWelcome();

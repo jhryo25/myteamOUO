@@ -26,7 +26,18 @@
     <button class="drawer-close" id="drawerClose">✕</button>
   </div>
   <div class="drawer-body">
-    <p class="drawer-desc">修改 CLI 可执行文件路径，保存后立即生效（写回本机 .env，不会上传 GitHub）。</p>
+    <p class="drawer-desc">修改工作区和 Agent CLI 配置，保存后只写入本机 `.myteam` 配置，不会上传 GitHub。</p>
+    <div class="workspace-form">
+      <label>工作区路径</label>
+      <div class="path-input-row">
+        <input class="path-input" id="workspaceInput" placeholder="例如 D:\myteam">
+        <button class="path-check-btn" id="workspaceSaveBtn">保存</button>
+      </div>
+      <div class="path-check-result" id="workspaceTip">agent 会在这个目录里运行命令。</div>
+    </div>
+    <div class="drawer-actions compact">
+      <button class="drawer-save-btn secondary" id="agentAddBtn" type="button">＋ 新增 Agent</button>
+    </div>
     <div class="agent-form" id="agentForm"><!-- 动态生成 --></div>
     <div class="drawer-actions">
       <button class="drawer-save-btn" id="drawerSaveBtn">💾 保存配置</button>
@@ -102,7 +113,10 @@
       </div>
       <!-- @mention 提示条 -->
       <div id="mentionHint" class="mention-hint hidden"></div>
+      <input type="file" id="imageInput" accept="image/*" multiple hidden>
+      <div id="attachmentTray" class="attachment-tray hidden"></div>
       <div class="input-row">
+        <button class="attach-btn" id="attachBtn" title="发送图片" type="button">🖼</button>
         <textarea
           class="goal-input"
           id="goalInput"

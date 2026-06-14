@@ -3,19 +3,52 @@
 
 import { createServer } from 'http';
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync } from 'fs';
+import { resolve, basename, extname } from 'path';
 import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
-import { loadEnv, buildCliConfig, invokeAgent, extractJson, PARSERS, validatePlanResult, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, AGENT_KEYS, buildSpawnCommand, checkAgentLaunchable, formatLaunchError } from './agent-utils.mjs';
+import { loadEnv, buildCliConfig, invokeAgent, extractJson, PARSERS, validatePlanResult, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, AGENT_KEYS, buildSpawnCommand, checkAgentLaunchable, formatLaunchError, readAgentRegistry, writeAgentRegistry, sanitizeAgentKey } from './agent-utils.mjs';
 
-const ENV = loadEnv();
-const CLI_CONFIG = buildCliConfig(ENV);
+let ENV = loadEnv();
+let CLI_CONFIG = buildCliConfig(ENV);
 const TASKS_FILE = '.myteam/tasks.jsonl';
 const LESSONS_FILE = '.myteam/lessons.jsonl';
 const SKILLS_FILE = '.myteam/skills.yaml';
 const INVOCATIONS_FILE = '.myteam/invocations.jsonl';
+const SETTINGS_FILE = '.myteam/settings.json';
+const UPLOADS_DIR = '.myteam/uploads';
 const AGENT_STATUS_TTL_MS = 5000;
 let agentStatusCache = { time: 0, agents: null };
+
+function agentKeys() {
+  return Object.keys(CLI_CONFIG);
+}
+
+function loadSettings() {
+  const fallback = { workspace: resolve('.') };
+  if (!existsSync(SETTINGS_FILE)) return fallback;
+  try {
+    const data = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'));
+    return { ...fallback, ...data, workspace: data.workspace || fallback.workspace };
+  } catch {
+    return fallback;
+  }
+}
+
+function saveSettings(settings) {
+  mkdirSync('.myteam', { recursive: true });
+  writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf8');
+}
+
+function currentWorkspace() {
+  return resolve(loadSettings().workspace || '.');
+}
+
+function reloadAgentConfig() {
+  ENV = loadEnv();
+  CLI_CONFIG = buildCliConfig(ENV);
+  clearAgentStatusCache();
+}
 
 async function getAgentStatuses({ force = false } = {}) {
   const now = Date.now();
@@ -23,8 +56,13 @@ async function getAgentStatuses({ force = false } = {}) {
     return agentStatusCache.agents;
   }
 
+  const metaByKey = new Map(readAgentRegistry(ENV).map(agent => [agent.key, agent]));
   const agents = await Promise.all(
-    AGENT_KEYS.map(k => checkAgentLaunchable(k, CLI_CONFIG[k]))
+    agentKeys().map(async (k) => ({
+      ...(await checkAgentLaunchable(k, CLI_CONFIG[k])),
+      ...(metaByKey.get(k) || {}),
+      path: CLI_CONFIG[k]?.path || '',
+    }))
   );
   agentStatusCache = { time: now, agents };
   return agents;
@@ -36,12 +74,12 @@ function clearAgentStatusCache() {
 
 async function resolveRunnableAgent(preferredAgent) {
   const statuses = await getAgentStatuses();
-  const preferred = AGENT_KEYS.includes(preferredAgent) ? preferredAgent : '';
+  const preferred = agentKeys().includes(preferredAgent) ? preferredAgent : '';
   const chosen = statuses.find(a => a.key === preferred && a.available)
     || statuses.find(a => a.available)
     || statuses.find(a => a.key === preferred)
     || statuses[0];
-  return { agentKey: chosen?.key || preferred || 'codex', status: chosen };
+  return { agentKey: chosen?.key || preferred || agentKeys()[0] || 'codex', status: chosen };
 }
 
 function appendLesson(task, error) {
@@ -312,7 +350,7 @@ const MENTION_MAP = {
   codex:  'codex',
   kimi:   'kimi',
 };
-function parseAtMention(text) {
+function parseAtMentionLegacy(text) {
   // 行首匹配（允许前导空白），防止代码/引用中 @mention 误触发路由
   const m = text.match(/(?:^|\n)\s*@(claude|codex|kimi)\b/i);
   return m ? MENTION_MAP[m[1].toLowerCase()] : null;
@@ -320,13 +358,40 @@ function parseAtMention(text) {
 
 // ── A2A Worklist：从 agent 回复中提取 @mention 触发链式执行 ────
 // 行首匹配（允许前导空白），防止代码注释 /  casual 提及误触发
-function parseA2AMentions(text) {
+function parseA2AMentionsLegacy(text) {
   const mentions = [];
   const re = /(?:^|\n)\s*@(claude|codex|kimi)\b/gi;
   let m;
   while ((m = re.exec(text)) !== null) {
     const key = MENTION_MAP[m[1].toLowerCase()];
     if (key && !mentions.includes(key)) mentions.push(key);
+  }
+  return mentions;
+}
+function dynamicMentionPattern() {
+  return /(?:^|\n)\s*@([a-zA-Z0-9_-]+)\b/g;
+}
+
+function parseAtMention(text) {
+  const m = dynamicMentionPattern().exec(text);
+  if (!m) return null;
+  const key = sanitizeAgentKey(m[1]);
+  return agentKeys().includes(key) ? key : null;
+}
+
+function stripAtMentions(text) {
+  return String(text || '').replace(dynamicMentionPattern(), (raw, key) => (
+    agentKeys().includes(sanitizeAgentKey(key)) ? '' : raw
+  )).trim();
+}
+
+function parseA2AMentions(text) {
+  const mentions = [];
+  const re = dynamicMentionPattern();
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const key = sanitizeAgentKey(m[1]);
+    if (key && agentKeys().includes(key) && !mentions.includes(key)) mentions.push(key);
   }
   return mentions;
 }
@@ -370,6 +435,14 @@ function buildChatPrompt(userMessage, agentKey, history) {
   return `${system}
 
 ${historyLines ? `对话历史：\n${historyLines}\n\n` : ''}用户: ${userMessage}`;
+}
+
+function attachmentPrompt(attachments = []) {
+  const list = (Array.isArray(attachments) ? attachments : [])
+    .filter(a => a && a.path)
+    .map((a, i) => `${i + 1}. ${a.name || basename(a.path)}：${a.path}${a.type ? ` (${a.type})` : ''}`)
+    .join('\n');
+  return list ? `\n\n【图片输入】\n用户这次发送了图片。请先观察和分析图片，再回答用户的问题。\n如果你的运行环境无法直接读取图片，请明确说明“当前 agent 无法直接读取图片”，并告诉用户需要补充什么信息，不要假装已经看过图片。\n本地图片路径如下：\n${list}` : '';
 }
 
 const PORT = (() => {
@@ -448,7 +521,7 @@ function streamAgent(agentKey, prompt, res, label = 'chunk') {
     return Promise.reject(new Error('missing path'));
   }
 
-  const parser = PARSERS[agentKey];
+  const parser = PARSERS[agentKey] || ((line) => `${line}\n`);
   const args = cfg.args(prompt);
   const { spawnPath, spawnArgs } = buildSpawnCommand(cfg, args);
 
@@ -467,7 +540,8 @@ function streamAgent(agentKey, prompt, res, label = 'chunk') {
     };
 
     try {
-      child = spawn(spawnPath, spawnArgs, cfg.spawnOptions);
+      sseSend(res, 'status', { agent: agentKey, phase: 'starting', text: `${agentKey} 正在启动` });
+      child = spawn(spawnPath, spawnArgs, { ...cfg.spawnOptions, cwd: currentWorkspace() });
     } catch (err) {
       fail(new Error(formatLaunchError(agentKey, err)));
       return;
@@ -493,6 +567,11 @@ function streamAgent(agentKey, prompt, res, label = 'chunk') {
     let fullText = '';
     let lastActivity = Date.now();
     const touch = () => { lastActivity = Date.now(); };
+    const thinkingTimer = setTimeout(() => {
+      if (!fullText && !settled) {
+        sseSend(res, 'status', { agent: agentKey, phase: 'thinking', text: `${agentKey} 正在思考，还没有输出` });
+      }
+    }, 1500);
     const TIMEOUT_MS = 30 * 60 * 1000; // 教训1: 30min
 
     watchdog = setInterval(() => {
@@ -509,6 +588,9 @@ function streamAgent(agentKey, prompt, res, label = 'chunk') {
       const text = parser(line);
       if (text) {
         fullText += text;
+        if (fullText.length === text.length) {
+          sseSend(res, 'status', { agent: agentKey, phase: 'streaming', text: `${agentKey} 开始输出` });
+        }
         sseSend(res, label, { text });
         if (label !== 'chunk') sseSend(res, 'chunk', { text });
       }
@@ -522,6 +604,7 @@ function streamAgent(agentKey, prompt, res, label = 'chunk') {
       if (settled) return;
       settled = true;
       clearInterval(watchdog);
+      clearTimeout(thinkingTimer);
       activeChildren.delete(cid);
       const common = {
         exit_code: code,
@@ -554,8 +637,36 @@ function readBody(req) {
   });
 }
 
+function saveUploadFromDataUrl({ name = 'image.png', type = '', dataUrl = '' } = {}) {
+  const match = String(dataUrl).match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) throw new Error('图片数据格式不正确');
+  const mime = type || match[1];
+  if (!mime.startsWith('image/')) throw new Error('目前只支持图片附件');
+  const extMap = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif' };
+  const safeName = basename(String(name || 'image')).replace(/[^\w.\-\u4e00-\u9fa5]+/g, '_').slice(0, 80);
+  const ext = extMap[mime] || (safeName.includes('.') ? '' : '.png');
+  const bytes = Buffer.from(match[2], 'base64');
+  if (bytes.length > 8 * 1024 * 1024) throw new Error('单张图片不能超过 8MB');
+  mkdirSync(UPLOADS_DIR, { recursive: true });
+  const id = randomUUID().slice(0, 8);
+  const fileName = `${Date.now()}-${id}-${safeName}${safeName.endsWith(ext) ? '' : ext}`;
+  const filePath = `${UPLOADS_DIR}/${fileName}`;
+  writeFileSync(filePath, bytes);
+  return { id, name: safeName, type: mime, path: resolve(filePath), url: `/uploads/${encodeURIComponent(fileName)}` };
+}
+
 // ── 静态文件 MIME ─────────────────────────────────────────────
-const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'application/javascript', '.svg': 'image/svg+xml' };
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css',
+  '.js': 'application/javascript',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+};
 
 // ── 路由 ──────────────────────────────────────────────────────
 async function handle(req, res) {
@@ -588,7 +699,58 @@ async function handle(req, res) {
     return res.end(content);
   }
 
+  // 图片附件缩略图：只允许读取 .myteam/uploads 目录内的文件。
+  if (req.method === 'GET' && pathname.startsWith('/uploads/')) {
+    try {
+      const fileName = basename(decodeURIComponent(pathname.slice('/uploads/'.length)));
+      const filePath = resolve(UPLOADS_DIR, fileName);
+      const uploadRoot = resolve(UPLOADS_DIR);
+      if (!filePath.startsWith(uploadRoot) || !existsSync(filePath)) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: '图片不存在' }));
+      }
+      const type = MIME[extname(filePath).toLowerCase()] || 'application/octet-stream';
+      res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'private, max-age=3600' });
+      return res.end(readFileSync(filePath));
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: '图片路径不正确' }));
+    }
+  }
+
   // POST /api/abort — 中断所有正在执行的 agent 子进程
+  if (pathname === '/api/settings') {
+    if (req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ settings: loadSettings(), workspace: currentWorkspace() }));
+    }
+    if (req.method === 'POST') {
+      const body = await readBody(req);
+      const workspace = resolve(String(body.workspace || currentWorkspace()).trim() || '.');
+      if (!existsSync(workspace)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: '工作区路径不存在' }));
+      }
+      const settings = { ...loadSettings(), workspace };
+      saveSettings(settings);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, settings, workspace }));
+    }
+  }
+
+  if (req.method === 'POST' && pathname === '/api/uploads') {
+    try {
+      const body = await readBody(req);
+      const files = Array.isArray(body.files) ? body.files : [];
+      const uploads = files.slice(0, 5).map(saveUploadFromDataUrl);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, uploads }));
+    } catch (err) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: err.message }));
+    }
+  }
+
   if (req.method === 'POST' && pathname === '/api/abort') {
     const count = activeChildren.size;
     abortAllChildren();
@@ -732,7 +894,8 @@ async function handle(req, res) {
   if (req.method === 'POST' && pathname === '/api/chat') {
     const body = await readBody(req);
     const message = (body.message || '').trim();
-    if (!message) {
+    const attachments = Array.isArray(body.attachments) ? body.attachments : [];
+    if (!message && !attachments.length) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: 'message 不能为空' }));
     }
@@ -742,14 +905,18 @@ async function handle(req, res) {
     if (body.sessionId && getSession(body.sessionId)) activeSessionId = body.sessionId;
 
     // 解析 @mention 路由；如果默认 codex 不可启动，就自动选一个可用 agent。
-    const requestedAgent = parseAtMention(message) || 'codex';
+    const requestedAgent = parseAtMention(message) || agentKeys()[0] || 'codex';
     const { agentKey, status: agentStatus } = await resolveRunnableAgent(requestedAgent);
-    const cleanMessage = message.replace(/(?:^|\n)\s*@(claude|codex|kimi)\b/gi, '').trim();
+    const textMessage = stripAtMentions(message).trim();
+    const imageOnlyMessage = attachments.length && !textMessage
+      ? '请分析我刚上传的图片，并直接回复你观察到的内容、问题和建议。'
+      : textMessage;
+    const cleanMessage = `${imageOnlyMessage}${attachmentPrompt(attachments)}`.trim();
 
     maybeAutoRenameSession(session, cleanMessage || message);
 
     // 存入对话历史（按 session）
-    session.history.push({ role: 'user', text: message, agent: null });
+    session.history.push({ role: 'user', text: message, agent: null, attachments });
     saveSessions();
 
     const prompt = buildChatPrompt(cleanMessage, agentKey, session.history);
@@ -779,19 +946,33 @@ async function handle(req, res) {
   if (req.method === 'GET' && pathname === '/api/status') {
     const agents = await getAgentStatuses();
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ agents }));
+    return res.end(JSON.stringify({ agents, workspace: currentWorkspace() }));
   }
 
   // GET /api/agents — 返回当前 agent 路径配置（脱敏显示）
   if (req.method === 'GET' && pathname === '/api/agents') {
     const result = await getAgentStatuses();
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ agents: result }));
+    return res.end(JSON.stringify({ agents: result, workspace: currentWorkspace() }));
   }
 
   // POST /api/agents { codex?: string, claude?: string, kimi?: string } — 写回 .env，实时重载
   if (req.method === 'POST' && pathname === '/api/agents') {
     const body = await readBody(req);
+    const current = readAgentRegistry(ENV);
+    const nextAgents = Array.isArray(body.agents)
+      ? body.agents
+      : current.map(agent => ({
+          ...agent,
+          path: body[agent.key] !== undefined ? String(body[agent.key] || '').trim() : agent.path,
+        }));
+
+    writeAgentRegistry(nextAgents);
+    reloadAgentConfig();
+    const updatedAgents = await getAgentStatuses({ force: true });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, agents: updatedAgents, workspace: currentWorkspace() }));
+
     const updates = {};
     if (body.codex !== undefined) updates.CODEX_PATH = body.codex.trim();
     if (body.claude !== undefined) updates.CLAUDE_PATH = body.claude.trim();
@@ -842,7 +1023,7 @@ async function handle(req, res) {
     const summary = {
       total: skills.length,
       categories: [...new Set(skills.map(s => s.category).filter(Boolean))],
-      agents: ['controller', 'worker', 'reviewer', ...AGENT_KEYS],
+      agents: ['controller', 'worker', 'reviewer', ...agentKeys()],
       selected: selected.length,
     };
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -984,7 +1165,7 @@ async function handle(req, res) {
   if (req.method === 'POST' && pathname === '/api/plan') {
     const body = await readBody(req);
     const goal = (body.goal || '').trim();
-    const agentKey = body.agent || 'codex';
+    const agentKey = body.agent || agentKeys()[0] || 'codex';
     if (!goal) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: 'goal 不能为空' }));
@@ -1067,7 +1248,7 @@ async function handle(req, res) {
 
     // 执行单个任务并返回结果文本（用于 worklist 链检测）
     async function executeTask(task, depth = 0, chainHistory = []) {
-      const agentKey = agentOverride || (CLI_CONFIG[task.agent] ? task.agent : 'codex');
+      const agentKey = agentOverride || (CLI_CONFIG[task.agent] ? task.agent : (agentKeys()[0] || 'codex'));
       sseSend(res, 'task-start', { id: task.id, title: task.title, agent: agentKey });
       patchTask(task.id, { status: 'in_progress', started_at: new Date().toISOString() });
 

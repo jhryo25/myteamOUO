@@ -937,6 +937,12 @@ const drawerClose    = document.getElementById('drawerClose');
 const agentFormEl    = document.getElementById('agentForm');
 const drawerSaveBtn  = document.getElementById('drawerSaveBtn');
 const drawerSaveTip  = document.getElementById('drawerSaveTip');
+const hubBtn         = document.getElementById('hubBtn');
+const hubMask        = document.getElementById('hubMask');
+const hubDrawer      = document.getElementById('hubDrawer');
+const hubClose       = document.getElementById('hubClose');
+const hubTabs        = document.getElementById('hubTabs');
+const hubBody        = document.getElementById('hubBody');
 
 const AGENT_META = {
   codex:  { label: 'Agent · Codex',  emoji: '🤖', desc: '总控 / 审查 / 自迭代' },
@@ -945,6 +951,7 @@ const AGENT_META = {
 };
 
 function openDrawer() {
+  closeHub();
   settingsDrawer.classList.remove('hidden');
   drawerMask.classList.remove('hidden');
   loadAgentConfig();
@@ -957,6 +964,203 @@ function closeDrawer() {
 settingsBtn.onclick = openDrawer;
 drawerClose.onclick = closeDrawer;
 drawerMask.onclick  = closeDrawer;
+
+// ── Hub 指挥抽屉 ─────────────────────────────────────────────
+let hubActiveTab = 'overview';
+let hubState = { agents: [], tasks: [] };
+
+function openHub() {
+  closeDrawer();
+  hubDrawer.classList.remove('hidden');
+  hubMask.classList.remove('hidden');
+  loadHub();
+}
+
+function closeHub() {
+  hubDrawer.classList.add('hidden');
+  hubMask.classList.add('hidden');
+}
+
+async function loadHub() {
+  hubBody.innerHTML = '<div class="hub-loading">正在读取本地状态…</div>';
+  try {
+    const [status, taskData] = await Promise.all([
+      fetch('/api/status').then(r => r.json()),
+      fetch('/api/tasks').then(r => r.json()).catch(() => ({ tasks: [] })),
+    ]);
+    hubState = {
+      agents: status.agents || [],
+      tasks: taskData.tasks || [],
+    };
+    renderHub();
+  } catch (err) {
+    hubBody.innerHTML = `<div class="hub-empty">Hub 加载失败：${esc(err.message || err)}</div>`;
+  }
+}
+
+function taskStats(tasks) {
+  const stats = { total: tasks.length, pending: 0, in_progress: 0, done: 0, failed: 0, runs: new Set() };
+  tasks.forEach(t => {
+    if (stats[t.status] !== undefined) stats[t.status]++;
+    if (t.run_id) stats.runs.add(t.run_id);
+  });
+  return { ...stats, runs: stats.runs.size };
+}
+
+function agentTone(agent) {
+  if (agent.available) return 'ok';
+  if (agent.configured || agent.exists) return 'err';
+  return 'warn';
+}
+
+function statusText(agent) {
+  if (agent.available) return '可启动';
+  return agent.error || (agent.configured ? '不可启动' : '未配置');
+}
+
+function renderHub() {
+  hubTabs.querySelectorAll('.hub-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.tab === hubActiveTab);
+  });
+  if (hubActiveTab === 'agents') return renderHubAgents();
+  if (hubActiveTab === 'tasks') return renderHubTasks();
+  if (hubActiveTab === 'compare') return renderHubCompare();
+  return renderHubOverview();
+}
+
+function renderHubOverview() {
+  const stats = taskStats(hubState.tasks);
+  const available = hubState.agents.filter(a => a.available).length;
+  hubBody.innerHTML = `
+    <div class="hub-kpi-grid">
+      <div class="hub-kpi"><div class="hub-kpi-label">可启动 Agent</div><div class="hub-kpi-value">${available}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">任务总数</div><div class="hub-kpi-value">${stats.total}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">待执行</div><div class="hub-kpi-value">${stats.pending}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">失败</div><div class="hub-kpi-value">${stats.failed}</div></div>
+    </div>
+    <section class="hub-section">
+      <div class="hub-section-title">自迭代闭环 <span class="hub-mini-note">myteam MVP 当前骨架</span></div>
+      <div class="hub-flow">
+        <div class="hub-flow-step"><strong>goal / plan</strong><span>用户目标进入拆任务模式，生成可验收任务。</span></div>
+        <div class="hub-flow-step"><strong>assign / run</strong><span>按 agent 字段分发，执行记录写入 tasks。</span></div>
+        <div class="hub-flow-step"><strong>review / test</strong><span>当前靠人工验收和状态检查，后续补 reviewer gate。</span></div>
+        <div class="hub-flow-step"><strong>learn / backlog</strong><span>失败写 lessons，下一步要做长期记忆筛选。</span></div>
+      </div>
+    </section>
+    <section class="hub-section">
+      <div class="hub-section-title">下一批对齐重点 <span class="hub-mini-note">来自 clowder-ai 对照</span></div>
+      <div class="hub-list">
+        <div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">Capability / Skills 看板</div><div class="hub-row-meta">让每个 agent 的能力、工具、上下文预算可见。</div></div><span class="hub-badge info">待做</span></div>
+        <div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">Quota / 成本栏</div><div class="hub-row-meta">MVP 可以先记录每轮调用次数和失败次数。</div></div><span class="hub-badge warn">待做</span></div>
+        <div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">Reviewer Gate</div><div class="hub-row-meta">任务完成后进入 review/test，再允许写入长期记忆。</div></div><span class="hub-badge info">待做</span></div>
+      </div>
+      <div class="hub-actions">
+        <button class="hub-action-btn" data-hub-action="plan">切到拆任务</button>
+        <button class="hub-action-btn" data-hub-action="tasks">展开任务面板</button>
+      </div>
+    </section>`;
+  bindHubActions();
+}
+
+function renderHubAgents() {
+  hubBody.innerHTML = `
+    <section class="hub-section">
+      <div class="hub-section-title">Agent 状态 <span class="hub-mini-note">启动级检测，不只看文件是否存在</span></div>
+      <div class="hub-list">
+        ${hubState.agents.map(a => {
+          const meta = AGENT_META[a.key] || { label: a.key, desc: '' };
+          return `<div class="hub-row">
+            <div class="hub-row-main">
+              <div class="hub-row-title">${esc(meta.label)}</div>
+              <div class="hub-row-meta">${esc(meta.desc)} · ${esc(a.path || '未配置路径')}</div>
+              ${a.available ? '' : `<div class="hub-row-meta">${esc(a.error || '')}</div>`}
+            </div>
+            <span class="hub-badge ${agentTone(a)}">${esc(statusText(a))}</span>
+          </div>`;
+        }).join('')}
+      </div>
+      <div class="hub-actions">
+        <button class="hub-action-btn" data-hub-action="settings">打开 Agent 配置</button>
+      </div>
+    </section>`;
+  bindHubActions();
+}
+
+function renderHubTasks() {
+  const stats = taskStats(hubState.tasks);
+  const recent = [...hubState.tasks].slice(-6).reverse();
+  hubBody.innerHTML = `
+    <div class="hub-kpi-grid">
+      <div class="hub-kpi"><div class="hub-kpi-label">Run 数</div><div class="hub-kpi-value">${stats.runs}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">待执行</div><div class="hub-kpi-value">${stats.pending}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">执行中</div><div class="hub-kpi-value">${stats.in_progress}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">已完成</div><div class="hub-kpi-value">${stats.done}</div></div>
+    </div>
+    <section class="hub-section">
+      <div class="hub-section-title">最近任务 <span class="hub-mini-note">来自 .myteam/tasks.jsonl</span></div>
+      <div class="hub-list">
+        ${recent.length ? recent.map(t => `<div class="hub-row">
+          <div class="hub-row-main">
+            <div class="hub-row-title">${esc(t.title || t.id)}</div>
+            <div class="hub-row-meta">${esc(t.agent || 'unknown')} · ${esc(t.run_id || '无 run')} · ${esc(t.accept || '无验收说明')}</div>
+          </div>
+          <span class="hub-badge ${t.status === 'done' ? 'ok' : t.status === 'failed' ? 'err' : t.status === 'in_progress' ? 'info' : 'warn'}">${esc(t.status || 'pending')}</span>
+        </div>`).join('') : '<div class="hub-empty">暂无任务。切到拆任务模式生成第一批任务。</div>'}
+      </div>
+      <div class="hub-actions">
+        <button class="hub-action-btn" data-hub-action="tasks">展开任务面板</button>
+      </div>
+    </section>`;
+  bindHubActions();
+}
+
+function renderHubCompare() {
+  const rows = [
+    ['Hub 指挥中心', 'Capability / Skills / Quota / 系统配置集中在 Hub tabs', '新增轻量 Hub，先集中状态、任务、对比'],
+    ['PlanBoardPanel', '按 agent 分组显示运行/中断/完成，支持继续', '任务面板已有分组，下一步补 reviewer gate 和继续入口统一'],
+    ['Mission Hub', '跨项目 backlog、self-claim、线程态势、SOP 面板', 'MVP 先保留本地 tasks，后续扩展 backlog / gate / learn'],
+    ['Skills 框架', '技能按需加载，并展示挂载到哪些 agent', '当前只有提示词规则，后续可加 .myteam/skills.yaml'],
+    ['成本可见性', 'Quota Board 轮询模型额度并预警', '当前可先记录调用次数、失败率和超时']
+  ];
+  hubBody.innerHTML = `
+    <section class="hub-section">
+      <div class="hub-section-title">HTML / 交互差距 <span class="hub-mini-note">本轮对照 clowder-ai 源码和 README</span></div>
+      <table class="hub-compare-table">
+        <thead><tr><th>主题</th><th>clowder-ai</th><th>myteam 当前处理</th></tr></thead>
+        <tbody>
+          ${rows.map(r => `<tr><td>${esc(r[0])}</td><td>${esc(r[1])}</td><td>${esc(r[2])}</td></tr>`).join('')}
+        </tbody>
+      </table>
+    </section>`;
+}
+
+function bindHubActions() {
+  hubBody.querySelectorAll('[data-hub-action]').forEach(btn => {
+    btn.onclick = () => {
+      const action = btn.dataset.hubAction;
+      if (action === 'settings') openDrawer();
+      if (action === 'tasks') {
+        closeHub();
+        document.getElementById('tasksExpandBtn').click();
+      }
+      if (action === 'plan') {
+        closeHub();
+        modeGroup.querySelector('.radio-btn[data-value="plan"]').click();
+        goalInput.focus();
+      }
+    };
+  });
+}
+
+hubBtn.onclick = openHub;
+hubClose.onclick = closeHub;
+hubMask.onclick = closeHub;
+hubTabs.querySelectorAll('.hub-tab').forEach(btn => {
+  btn.onclick = () => {
+    hubActiveTab = btn.dataset.tab;
+    renderHub();
+  };
+});
 
 async function loadAgentConfig() {
   agentFormEl.innerHTML = '<div style="color:var(--muted);font-size:13px;">加载中…</div>';

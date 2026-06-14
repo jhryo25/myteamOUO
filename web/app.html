@@ -14,6 +14,7 @@
   <div class="agent-pills" id="agentPills">
     <span class="agent-pill"><span class="dot"></span>连接中…</span>
   </div>
+  <button class="hub-btn" id="hubBtn" title="打开 Hub">Hub</button>
   <button class="settings-btn" id="settingsBtn" title="Agent 配置">⚙</button>
 </div>
 
@@ -38,6 +39,27 @@
       <button class="drawer-save-btn" id="drawerSaveBtn">💾 保存配置</button>
       <span class="drawer-save-tip hidden" id="drawerSaveTip"></span>
     </div>
+  </div>
+</div>
+
+<!-- ── Hub 指挥抽屉 ── -->
+<div class="drawer-mask hidden" id="hubMask"></div>
+<div class="hub-drawer hidden" id="hubDrawer">
+  <div class="drawer-header">
+    <div>
+      <span class="drawer-title">myteam Hub</span>
+      <div class="hub-subtitle">轻量 A2A 指挥中心</div>
+    </div>
+    <button class="drawer-close" id="hubClose">✕</button>
+  </div>
+  <div class="hub-tabs" id="hubTabs">
+    <button class="hub-tab active" data-tab="overview">总览</button>
+    <button class="hub-tab" data-tab="agents">Agent</button>
+    <button class="hub-tab" data-tab="tasks">任务</button>
+    <button class="hub-tab" data-tab="compare">对比</button>
+  </div>
+  <div class="hub-body" id="hubBody">
+    <div class="hub-loading">正在读取本地状态…</div>
   </div>
 </div>
 

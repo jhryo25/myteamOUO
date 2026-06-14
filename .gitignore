@@ -8,6 +8,7 @@ venv/
 .env
 
 # myteam 运行时数据（本地生成，不入库）
+.compare/
 .myteam/runs/
 .myteam/tasks.jsonl
 .myteam/lessons.jsonl

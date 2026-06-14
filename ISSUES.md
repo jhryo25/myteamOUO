@@ -204,3 +204,11 @@
 - **解法**: 新增 `checkAgentLaunchable()`，用轻量 `--help` 真正尝试启动 CLI；状态 API 返回 `exists / available / error`；前端只把 `available=true` 的 agent 放入拆任务选项，并在配置抽屉显示启动失败原因。
 - **教训**: “文件存在”只能说明路径没写错，不能说明 CLI 能被当前进程启动。agent 可用性必须做启动级检测。
 - **标签**: `bug`, `windows`, `lesson:文件存在不等于可执行`
+
+### IMP-012: 对齐 clowder-ai 的 Hub 指挥中心雏形 [ux]
+
+- **位置**: `web/app.html`, `web/app.css`, `web/app.js`, `docs/clowder-html-gap.md`
+- **问题**: myteam 的 HTML 已有聊天、任务栏和 Agent 配置，但缺少 clowder-ai 那种集中查看能力、任务、成本和治理方向的 Hub 入口；用户需要在多个位置猜系统状态。
+- **解法**: 顶部新增 `Hub` 按钮和 `myteam Hub` 抽屉，提供总览、Agent、任务、对比四个 tab；Hub 从现有 `/api/status` 和 `/api/tasks` 读取数据，不引入新依赖。
+- **教训**: 轻量 MVP 也需要一个“状态集中点”。先做只读 Hub，可以在不增加系统复杂度的前提下提升可理解性，并为后续 Skills / Quota / Reviewer Gate 留入口。
+- **标签**: `ux`, `html`, `lesson:先做只读Hub再扩展治理`

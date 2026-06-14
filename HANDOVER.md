@@ -2,7 +2,7 @@
 
 > 用于新对话冷启动。AI 读完此文件即可接续工作，无需重新理解历史。
 > 
-> **最后更新**: 2026-06-13（Kimi 接入 + Codex spawn EPERM 修复）
+> **最后更新**: 2026-06-14（轻量 Hub + clowder-ai HTML 对齐）
 
 ---
 
@@ -39,6 +39,8 @@ myteamOUO/
 ├── package.json          # type=module，无 npm 依赖
 ├── index.html            # 旧静态验收页（保留，myteam.py ui 生成）
 ├── ISSUES.md             # 问题/解法/教训统一管理（与 git commit 对应）
+├── docs/
+│   └── clowder-html-gap.md # clowder-ai 与 myteam HTML/交互差距记录
 ├── .myteam/
 │   ├── agents.yaml       # agent 角色配置（入库，无敏感信息）
 │   ├── tasks.jsonl       # 运行时任务数据（不入库）
@@ -146,6 +148,7 @@ NDJSON 解析：
 - **📋 拆任务模式**：走 `/api/plan`，SSE 实时流，拆完显示结构化任务卡片
 - **▶ 执行 pending 任务**：走 `/api/dispatch`，每条任务实时流输出，支持 ■ 中断
 - **⚙ Agent 管理抽屉**：可视化查看/修改 CLI 路径，一键检测 + 保存
+- **Hub 指挥抽屉**：顶部 `Hub` 按钮打开轻量指挥中心，包含总览、Agent、任务、对比四个 tab
 - **左侧 Session Sidebar**：每行显示名称/时间/消息数 + hover 删除；底部「＋ 新建对话」；删除有 5 秒撤销 toast + 回收站持久化
 - **右侧任务面板**：窄条展开；有搜索框 + 状态 chips；任务按 run 分组可折叠，新 run 在前，pending 数量徽标
 - **A2A 链式执行**：agent 回复中 @mention 自动触发链式任务，乒乓球熔断保护
@@ -200,11 +203,16 @@ NDJSON 解析：
 14. **发送按钮状态机**：运行中变蓝色"排队"模式（⏎），消息入队，完成后自动消费；无文字时 disabled（IMP-010）
 15. **消息时间戳**：用户气泡显示发送时间，agent 气泡显示完成时间（IMP-010）
 16. **连接状态条**：server 离线/agent 不可用时，topbar 下方出现颜色状态条（IMP-010）
+17. **Kimi 接入**：贯通配置、状态 API、Agent 抽屉、@mention 路由和任务执行链（IMP-011）
+18. **Codex spawn EPERM 检测**：启动级检测替代 `existsSync`，避免不可执行路径进入拆任务选项（ISS-009）
+19. **轻量 Hub 指挥中心**：对齐 clowder-ai Hub 思路，集中展示状态、任务和 HTML/交互差距（IMP-012）
 
 ### 🟡 下一步（可选）
 
-- **Kimi 接入**：已进入后端配置、状态 API、Agent 抽屉、@mention 路由和任务执行链；下一步可针对 Kimi 输出质量微调 prompt
+- **Kimi 输出质量**：Kimi 已接入；下一步可针对拆任务 JSON 稳定性微调 prompt
 - **P2 优化**：lessons UI、agent pill 执行高亮、历史分页
+- **Reviewer Gate**：任务执行后进入 review/test，再允许写长期记忆
+- **静态 Skills 看板**：新增 `.myteam/skills.yaml`，先展示技能到 agent 的挂载关系
 - **消息写入与执行解耦**：参考 clowder-ai ADR-008，POST 立即返回 → WebSocket 推流
 - **InvocationRecord 状态机**：每次 chat/plan/dispatch 创建 invocation record
 - **Skills 按需加载机制**：参考 clowder-ai 50+ skills 目录结构

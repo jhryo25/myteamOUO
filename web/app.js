@@ -967,7 +967,7 @@ drawerMask.onclick  = closeDrawer;
 
 // ── Hub 指挥抽屉 ─────────────────────────────────────────────
 let hubActiveTab = 'overview';
-let hubState = { agents: [], tasks: [], skills: [], skillsSummary: null };
+let hubState = { agents: [], tasks: [], skills: [], skillsSummary: null, invocations: [], invocationSummary: null };
 
 function openHub() {
   closeDrawer();
@@ -984,16 +984,19 @@ function closeHub() {
 async function loadHub() {
   hubBody.innerHTML = '<div class="hub-loading">正在读取本地状态…</div>';
   try {
-    const [status, taskData, skillData] = await Promise.all([
+    const [status, taskData, skillData, invocationData] = await Promise.all([
       fetch('/api/status').then(r => r.json()),
       fetch('/api/tasks').then(r => r.json()).catch(() => ({ tasks: [] })),
       fetch('/api/skills').then(r => r.json()).catch(() => ({ skills: [], summary: null })),
+      fetch('/api/invocations').then(r => r.json()).catch(() => ({ invocations: [], summary: null })),
     ]);
     hubState = {
       agents: status.agents || [],
       tasks: taskData.tasks || [],
       skills: skillData.skills || [],
       skillsSummary: skillData.summary || null,
+      invocations: invocationData.invocations || [],
+      invocationSummary: invocationData.summary || null,
     };
     renderHub();
   } catch (err) {
@@ -1008,6 +1011,15 @@ function taskStats(tasks) {
     if (t.run_id) stats.runs.add(t.run_id);
   });
   return { ...stats, runs: stats.runs.size };
+}
+
+function formatDuration(ms) {
+  const n = Number(ms || 0);
+  if (!n) return '-';
+  if (n < 1000) return `${n}ms`;
+  const sec = n / 1000;
+  if (sec < 60) return `${sec.toFixed(sec < 10 ? 1 : 0)}s`;
+  return `${Math.floor(sec / 60)}m ${Math.round(sec % 60)}s`;
 }
 
 function agentTone(agent) {
@@ -1027,6 +1039,7 @@ function renderHub() {
   });
   if (hubActiveTab === 'agents') return renderHubAgents();
   if (hubActiveTab === 'skills') return renderHubSkills();
+  if (hubActiveTab === 'invocations') return renderHubInvocations();
   if (hubActiveTab === 'tasks') return renderHubTasks();
   if (hubActiveTab === 'compare') return renderHubCompare();
   return renderHubOverview();
@@ -1039,7 +1052,7 @@ function renderHubOverview() {
     <div class="hub-kpi-grid">
       <div class="hub-kpi"><div class="hub-kpi-label">可启动 Agent</div><div class="hub-kpi-value">${available}</div></div>
       <div class="hub-kpi"><div class="hub-kpi-label">技能数</div><div class="hub-kpi-value">${hubState.skills.length}</div></div>
-      <div class="hub-kpi"><div class="hub-kpi-label">待执行</div><div class="hub-kpi-value">${stats.pending}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">调用数</div><div class="hub-kpi-value">${hubState.invocationSummary?.total || 0}</div></div>
       <div class="hub-kpi"><div class="hub-kpi-label">失败</div><div class="hub-kpi-value">${stats.failed}</div></div>
     </div>
     <section class="hub-section">
@@ -1134,6 +1147,51 @@ function renderHubSkills() {
     </section>`;
 }
 
+function renderHubInvocations() {
+  const summary = hubState.invocationSummary || { total: 0, success: 0, failed: 0, interrupted: 0, avgDurationMs: 0, byAgent: {} };
+  const recent = hubState.invocations.slice(0, 8);
+  const agentRows = Object.entries(summary.byAgent || {});
+  hubBody.innerHTML = `
+    <div class="hub-kpi-grid">
+      <div class="hub-kpi"><div class="hub-kpi-label">调用总数</div><div class="hub-kpi-value">${summary.total || 0}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">成功</div><div class="hub-kpi-value">${summary.success || 0}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">失败</div><div class="hub-kpi-value">${summary.failed || 0}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">平均耗时</div><div class="hub-kpi-value">${formatDuration(summary.avgDurationMs)}</div></div>
+    </div>
+    <section class="hub-section">
+      <div class="hub-section-title">按 Agent 汇总 <span class="hub-mini-note">轻量成本/稳定性信号</span></div>
+      <div class="hub-list">
+        ${agentRows.length ? agentRows.map(([agent, row]) => `<div class="hub-row">
+          <div class="hub-row-main">
+            <div class="hub-row-title">${esc(agent)}</div>
+            <div class="hub-row-meta">成功 ${row.success || 0} · 失败 ${row.failed || 0} · 中断 ${row.interrupted || 0}</div>
+          </div>
+          <span class="hub-badge ${row.failed ? 'warn' : 'ok'}">${row.total || 0} 次</span>
+        </div>`).join('') : '<div class="hub-empty">还没有 agent 调用记录。下一次对话、拆任务或执行任务后会自动记录。</div>'}
+      </div>
+    </section>
+    <section class="hub-section">
+      <div class="hub-section-title">最近调用 <span class="hub-mini-note">来自 .myteam/invocations.jsonl</span></div>
+      <div class="hub-list">
+        ${recent.length ? recent.map(i => `<div class="hub-row">
+          <div class="hub-row-main">
+            <div class="hub-row-title">${esc(i.agent)} · ${esc(i.label || 'call')}</div>
+            <div class="hub-row-meta">${esc(i.started_at || '')} · ${formatDuration(i.duration_ms)} · prompt ${i.prompt_chars || 0} 字符 · 输出 ${i.output_chars || 0} 字符</div>
+            ${i.error ? `<div class="hub-row-meta">${esc(i.error)}</div>` : ''}
+          </div>
+          <span class="hub-badge ${i.status === 'success' ? 'ok' : i.status === 'interrupted' ? 'warn' : 'err'}">${esc(i.status || 'unknown')}</span>
+        </div>`).join('') : '<div class="hub-empty">暂无调用记录。</div>'}
+      </div>
+    </section>
+    <section class="hub-section">
+      <div class="hub-section-title">和 clowder-ai 的差距 <span class="hub-mini-note">MVP 先做本地调用观测</span></div>
+      <div class="hub-list">
+        <div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">未统计真实 token / 金额</div><div class="hub-row-meta">当前记录调用次数、耗时、失败率；后续再接各 CLI 的 token/usage 输出。</div></div><span class="hub-badge warn">下一步</span></div>
+        <div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">未做额度预警</div><div class="hub-row-meta">clowder-ai Quota Board 会做风险等级；myteam 可先基于失败率和超时预警。</div></div><span class="hub-badge info">可扩展</span></div>
+      </div>
+    </section>`;
+}
+
 function renderHubTasks() {
   const stats = taskStats(hubState.tasks);
   const recent = [...hubState.tasks].slice(-6).reverse();
@@ -1168,7 +1226,7 @@ function renderHubCompare() {
     ['PlanBoardPanel', '按 agent 分组显示运行/中断/完成，支持继续', '任务面板已有分组，下一步补 reviewer gate 和继续入口统一'],
     ['Mission Hub', '跨项目 backlog、self-claim、线程态势、SOP 面板', 'MVP 先保留本地 tasks，后续扩展 backlog / gate / learn'],
     ['Skills 框架', '技能按需加载，并展示挂载到哪些 agent', '新增 .myteam/skills.yaml 与 Hub Skills 看板，下一步做按需加载'],
-    ['成本可见性', 'Quota Board 轮询模型额度并预警', '当前可先记录调用次数、失败率和超时']
+    ['成本可见性', 'Quota Board 轮询模型额度并预警', '新增调用记录和 Hub 调用 tab，下一步接真实 token/额度']
   ];
   hubBody.innerHTML = `
     <section class="hub-section">

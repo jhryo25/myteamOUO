@@ -13,6 +13,7 @@ const CLI_CONFIG = buildCliConfig(ENV);
 const TASKS_FILE = '.myteam/tasks.jsonl';
 const LESSONS_FILE = '.myteam/lessons.jsonl';
 const SKILLS_FILE = '.myteam/skills.yaml';
+const INVOCATIONS_FILE = '.myteam/invocations.jsonl';
 const AGENT_STATUS_TTL_MS = 5000;
 let agentStatusCache = { time: 0, agents: null };
 
@@ -95,6 +96,46 @@ function readSkills() {
   }
 
   return skills;
+}
+
+function appendInvocation(record) {
+  try {
+    appendFileSync(INVOCATIONS_FILE, JSON.stringify(record) + '\n', 'utf8');
+  } catch (err) {
+    console.error('Failed to append invocation:', err.message);
+  }
+}
+
+function readJsonl(file) {
+  if (!existsSync(file)) return [];
+  return readFileSync(file, 'utf8')
+    .split('\n')
+    .filter(l => l.trim())
+    .map(l => { try { return JSON.parse(l); } catch { return null; } })
+    .filter(Boolean);
+}
+
+function readInvocations() {
+  return readJsonl(INVOCATIONS_FILE);
+}
+
+function summarizeInvocations(invocations) {
+  const total = invocations.length;
+  const failed = invocations.filter(i => i.status === 'failed').length;
+  const interrupted = invocations.filter(i => i.status === 'interrupted').length;
+  const success = invocations.filter(i => i.status === 'success').length;
+  const durations = invocations.map(i => Number(i.duration_ms || 0)).filter(n => n > 0);
+  const avgDurationMs = durations.length
+    ? Math.round(durations.reduce((sum, n) => sum + n, 0) / durations.length)
+    : 0;
+  const byAgent = {};
+  invocations.forEach(i => {
+    const key = i.agent || 'unknown';
+    byAgent[key] ||= { total: 0, success: 0, failed: 0, interrupted: 0 };
+    byAgent[key].total++;
+    if (byAgent[key][i.status] !== undefined) byAgent[key][i.status]++;
+  });
+  return { total, success, failed, interrupted, avgDurationMs, byAgent };
 }
 
 // ── 对话历史 + Session 隔离（持久化到 .myteam/memory.json） ───
@@ -306,9 +347,28 @@ function abortAllChildren() {
 // watchdog 必须在 rl.on('line') 和 stderr.on('data') 里刷新。
 // 教训1: 超时 30min，匹配复杂任务实际需要。
 function streamAgent(agentKey, prompt, res, label = 'chunk') {
+  const invocationId = randomUUID().slice(0, 8);
+  const startedAt = Date.now();
+  const startedIso = new Date(startedAt).toISOString();
+
+  const finishInvocation = (status, extra = {}) => {
+    appendInvocation({
+      id: invocationId,
+      agent: agentKey,
+      label,
+      status,
+      started_at: startedIso,
+      finished_at: new Date().toISOString(),
+      duration_ms: Date.now() - startedAt,
+      prompt_chars: prompt.length,
+      ...extra,
+    });
+  };
+
   const cfg = CLI_CONFIG[agentKey];
   if (!cfg?.path) {
     sseSend(res, 'error', { message: `${agentKey} 路径未在 .env 中配置` });
+    finishInvocation('failed', { error: 'missing path' });
     return Promise.reject(new Error('missing path'));
   }
 
@@ -326,6 +386,7 @@ function streamAgent(agentKey, prompt, res, label = 'chunk') {
       settled = true;
       if (watchdog) clearInterval(watchdog);
       if (cid) activeChildren.delete(cid);
+      finishInvocation('failed', { error: err.message });
       reject(err);
     };
 
@@ -386,11 +447,19 @@ function streamAgent(agentKey, prompt, res, label = 'chunk') {
       settled = true;
       clearInterval(watchdog);
       activeChildren.delete(cid);
+      const common = {
+        exit_code: code,
+        output_chars: fullText.length,
+      };
       if (isAborting) {
+        finishInvocation('interrupted', { ...common, error: 'aborted' });
         resolve(fullText);
       } else if (code !== 0) {
-        reject(new Error(`exit code ${code}`));
+        const err = new Error(`exit code ${code}`);
+        finishInvocation('failed', { ...common, error: err.message });
+        reject(err);
       } else {
+        finishInvocation('success', common);
         resolve(fullText);
       }
     });
@@ -676,6 +745,17 @@ async function handle(req, res) {
     };
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ skills, summary }));
+  }
+
+  // GET /api/invocations — 返回 agent 调用记录，用于轻量成本/稳定性看板
+  if (req.method === 'GET' && pathname === '/api/invocations') {
+    const invocations = readInvocations();
+    const recent = invocations.slice(-200).reverse();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({
+      summary: summarizeInvocations(invocations),
+      invocations: recent,
+    }));
   }
 
   // POST /api/tasks/:id/rerun — 重新执行单个任务

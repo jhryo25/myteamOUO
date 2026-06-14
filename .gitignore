@@ -12,6 +12,7 @@ venv/
 .myteam/runs/
 .myteam/tasks.jsonl
 .myteam/lessons.jsonl
+.myteam/invocations.jsonl
 .myteam/memory.json
 
 # 系统文件

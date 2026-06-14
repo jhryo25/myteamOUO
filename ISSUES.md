@@ -220,3 +220,11 @@
 - **解法**: 新增 `.myteam/skills.yaml` 作为 MVP 技能清单；后端提供 `GET /api/skills`；Hub 增加 `Skills` tab，展示技能分类、触发条件和 controller/worker/reviewer/codex/claude/kimi 的挂载情况。
 - **教训**: Skills 系统可以先从只读登记表开始，先让能力边界可见，再升级到真正的按需提示词加载。
 - **标签**: `ux`, `skills`, `html`, `lesson:能力先可见再自动化`
+
+### IMP-014: 新增轻量调用/成本可见性 [ux]
+
+- **位置**: `server.mjs`, `web/app.html`, `web/app.css`, `web/app.js`
+- **问题**: clowder-ai 有 Quota Board 展示模型额度和风险；myteam 之前看不到 agent 调用了多少次、失败率和耗时，排查成本和稳定性都不直观。
+- **解法**: `streamAgent()` 每次调用追加 `.myteam/invocations.jsonl`，记录 agent、label、状态、耗时、退出码、输入/输出字符数和错误；后端新增 `GET /api/invocations`；Hub 新增“调用”tab。
+- **教训**: 在拿不到精确 token/金额前，也可以先记录调用次数、耗时和失败率，形成低成本可观测性。
+- **标签**: `ux`, `observability`, `quota`, `lesson:先记录调用再追精确成本`

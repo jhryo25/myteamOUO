@@ -2,6 +2,8 @@
 
 > 问题、解法、教训统一管理。每条记录对应一次 git commit。
 
+课程化检索版见：`docs/problem-course.md`。后续遇到新问题时，建议先写入本文件作为原始记录，再把可复用经验整理到课程文档。
+
 ---
 
 ## 标签说明
@@ -252,3 +254,39 @@
 - **解法**: Hub 新增 `Lessons` tab，读取 `/api/lessons` 展示失败经验并可跳到相关任务；顶部 agent pill 新增 `busy` 状态，chat/plan/dispatch 生命周期自动高亮当前 agent；`GET /api/history` 支持 `limit/before`，前端顶部按钮按页 prepend 更早消息并保持滚动位置。
 - **教训**: P2 交互优先补“可见状态”和“可追溯入口”，比继续加架构能力更能提升当前 MVP 的日常可用性。
 - **标签**: `ux`, `lessons`, `history`, `status`, `lesson:先让系统状态可见`
+
+---
+
+## Phase 5: 动态 agent、工作区与图片附件 (2026-06-14)
+
+### IMP-018: 动态 agent 注册表与工作区配置 [arch]
+
+- **位置**: `agent-utils.mjs`, `server.mjs`, `web/app.html`, `web/app.js`
+- **问题**: agent 列表长期写死为 `codex / claude / kimi`，用户无法灵活增减；agent 执行目录也固定为项目根目录，不方便切换工作区。
+- **解法**: 新增 `.myteam/agents.json` 保存本地动态 agent 注册表；新增 `.myteam/settings.json` 保存本地工作区；后端从注册表动态构建 CLI_CONFIG；前端设置抽屉支持新增/删除 agent 和修改工作区。
+- **教训**: MVP 可以保留默认 agent，但配置列表不能长期写死。新增运行时配置文件时必须同步 `.gitignore`。
+- **标签**: `arch`, `agent`, `workspace`, `lesson:默认值可以写死但业务列表要可配置`
+
+### ISS-010: 动态 @mention 后端仍走旧三 agent 规则 [bug]
+
+- **位置**: `server.mjs`
+- **问题**: 前端 mention 已经从动态 agent 列表生成，但后端 `parseAtMention()` 仍只识别 `codex / claude / kimi`，新增 agent 后无法真正路由。
+- **解法**: 后端 mention 解析改为读取 `agentKeys()`，`stripAtMentions()` 与 `parseAtMention()` 使用同一套动态规则。
+- **教训**: 前端提示和后端执行必须共用同一类数据源，否则新增配置会出现“看起来支持，实际不生效”的假能力。
+- **标签**: `bug`, `agent`, `ux`, `lesson:提示逻辑和执行逻辑必须同源`
+
+### IMP-019: 图片附件上传与缩略图展示 [image]
+
+- **位置**: `server.mjs`, `web/app.html`, `web/app.css`, `web/app.js`
+- **问题**: 用户希望给 agent 发送图片，但最初只显示文件名，且只发图片会被 `/api/chat` 的 `message 不能为空` 拦截。
+- **解法**: 新增 `/api/uploads` 保存图片；新增 `/uploads/:file` 只读静态路由；前端发送前和发送后都显示缩略图；只发图时自动补默认问题；prompt 中明确要求 agent 先分析图片路径。
+- **教训**: 多模态 MVP 至少要同时处理“用户可见的缩略图”和“agent 可理解的图片路径”。真正视觉能力仍取决于具体 agent CLI。
+- **标签**: `image`, `bug`, `ux`, `agent`, `lesson:图片输入要同时解决展示和理解`
+
+### ISS-011: 浏览器自动化验证受环境限制 [qa]
+
+- **位置**: 本地 QA 环境
+- **问题**: Playwright 包存在但浏览器二进制缺失；Chrome Codex 扩展未安装或 native host 未注册，导致无法自动点击当前页面验证图片流程。
+- **解法**: 不临时安装新依赖；改用 `node --check`、`git diff --check`、真实 `/api/uploads` 上传和 `/uploads/:file` Content-Type 验证替代，并在最终说明中明确浏览器自动化阻塞原因。
+- **教训**: 验证报告要区分代码验证和环境阻塞；不要把“自动化环境不可用”说成“功能已完整浏览器验证”。
+- **标签**: `qa`, `browser`, `lesson:验证失败要说明环境边界`

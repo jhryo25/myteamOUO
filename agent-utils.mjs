@@ -356,6 +356,10 @@ export const PLAN_PROMPT = `你是 myteam 的任务规划 agent。
 export function buildExecPrompt(task) {
   const steps = (task.steps ?? []).map((s, i) => `${i + 1}. ${s}`).join('\n');
   const accept = task.accept ? `\n验收标准：${task.accept}` : '';
+  const reworkNote = task.review_note ? `\n返工说明：${task.review_note}` : '';
+  const previousResult = task.previous_result
+    ? `\n上一次结果摘要：${String(task.previous_result).slice(0, 600)}`
+    : '';
   return `你是 myteam 的执行 agent，请完成以下任务。
 
 任务标题：${task.title}
@@ -364,6 +368,8 @@ export function buildExecPrompt(task) {
 执行步骤：
 ${steps || '（无具体步骤，请自行判断）'}
 ${accept}
+${reworkNote}
+${previousResult}
 
 请执行上述任务，给出完整的执行结果和说明。`;
 }

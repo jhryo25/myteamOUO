@@ -1013,6 +1013,25 @@ function taskStats(tasks) {
   return { ...stats, runs: stats.runs.size };
 }
 
+function gateStats(tasks) {
+  const stats = { needsReview: 0, passed: 0, rework: 0, blocked: 0 };
+  tasks.forEach(t => {
+    if (t.gate_status === 'passed') stats.passed++;
+    else if (t.gate_status === 'rework') stats.rework++;
+    else if (t.status === 'failed') stats.blocked++;
+    else if (t.status === 'done') stats.needsReview++;
+  });
+  return stats;
+}
+
+function gateBadge(task) {
+  if (task.gate_status === 'passed') return { tone: 'ok', text: '已通过' };
+  if (task.gate_status === 'rework') return { tone: 'warn', text: '需返工' };
+  if (task.status === 'failed') return { tone: 'err', text: '失败阻塞' };
+  if (task.status === 'done') return { tone: 'info', text: '待审核' };
+  return { tone: 'warn', text: task.status || 'pending' };
+}
+
 function formatDuration(ms) {
   const n = Number(ms || 0);
   if (!n) return '-';
@@ -1037,9 +1056,11 @@ function renderHub() {
   hubTabs.querySelectorAll('.hub-tab').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.tab === hubActiveTab);
   });
+  hubBody.scrollTop = 0;
   if (hubActiveTab === 'agents') return renderHubAgents();
   if (hubActiveTab === 'skills') return renderHubSkills();
   if (hubActiveTab === 'invocations') return renderHubInvocations();
+  if (hubActiveTab === 'gate') return renderHubGate();
   if (hubActiveTab === 'tasks') return renderHubTasks();
   if (hubActiveTab === 'compare') return renderHubCompare();
   return renderHubOverview();
@@ -1047,6 +1068,7 @@ function renderHub() {
 
 function renderHubOverview() {
   const stats = taskStats(hubState.tasks);
+  const gates = gateStats(hubState.tasks);
   const available = hubState.agents.filter(a => a.available).length;
   hubBody.innerHTML = `
     <div class="hub-kpi-grid">
@@ -1058,22 +1080,68 @@ function renderHubOverview() {
     <section class="hub-section">
       <div class="hub-section-title">自迭代闭环 <span class="hub-mini-note">myteam MVP 当前骨架</span></div>
       <div class="hub-flow">
-        <div class="hub-flow-step"><strong>goal / plan</strong><span>用户目标进入拆任务模式，生成可验收任务。</span></div>
-        <div class="hub-flow-step"><strong>assign / run</strong><span>按 agent 字段分发，执行记录写入 tasks。</span></div>
-        <div class="hub-flow-step"><strong>review / test</strong><span>当前靠人工验收和状态检查，后续补 reviewer gate。</span></div>
-        <div class="hub-flow-step"><strong>learn / backlog</strong><span>失败写 lessons，下一步要做长期记忆筛选。</span></div>
+      <div class="hub-flow-step"><strong>goal / plan</strong><span>用户目标进入拆任务模式，生成可验收任务。</span></div>
+      <div class="hub-flow-step"><strong>assign / run</strong><span>按 agent 字段分发，执行记录写入 tasks。</span></div>
+      <div class="hub-flow-step"><strong>review / test</strong><span>Hub Gate 已能人工通过或要求返工，待审核 ${gates.needsReview} 条。</span></div>
+      <div class="hub-flow-step"><strong>learn / backlog</strong><span>失败写 lessons，通过 Gate 后再沉淀长期经验。</span></div>
       </div>
     </section>
     <section class="hub-section">
       <div class="hub-section-title">下一批对齐重点 <span class="hub-mini-note">来自 clowder-ai 对照</span></div>
       <div class="hub-list">
-        <div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">Capability / Skills 看板</div><div class="hub-row-meta">让每个 agent 的能力、工具、上下文预算可见。</div></div><span class="hub-badge info">待做</span></div>
-        <div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">Quota / 成本栏</div><div class="hub-row-meta">MVP 可以先记录每轮调用次数和失败次数。</div></div><span class="hub-badge warn">待做</span></div>
-        <div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">Reviewer Gate</div><div class="hub-row-meta">任务完成后进入 review/test，再允许写入长期记忆。</div></div><span class="hub-badge info">待做</span></div>
+        <div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">Reviewer Agent 自动审</div><div class="hub-row-meta">当前是人工 Gate；下一步让 reviewer agent 读取验收标准自动给结论。</div></div><span class="hub-badge info">下一步</span></div>
+        <div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">真实成本统计</div><div class="hub-row-meta">当前已有调用次数和耗时；下一步接 token/usage。</div></div><span class="hub-badge warn">待做</span></div>
+        <div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">Backlog 视图</div><div class="hub-row-meta">把返工、失败和下一轮建议沉淀成任务生命周期。</div></div><span class="hub-badge info">可扩展</span></div>
       </div>
       <div class="hub-actions">
         <button class="hub-action-btn" data-hub-action="plan">切到拆任务</button>
         <button class="hub-action-btn" data-hub-action="tasks">展开任务面板</button>
+      </div>
+    </section>`;
+  bindHubActions();
+}
+
+function renderHubGate() {
+  const stats = gateStats(hubState.tasks);
+  const gateTasks = [...hubState.tasks]
+    .filter(t => t.status === 'done' || t.status === 'failed' || t.gate_status === 'rework' || t.gate_status === 'passed')
+    .slice(-10)
+    .reverse();
+  hubBody.innerHTML = `
+    <div class="hub-kpi-grid">
+      <div class="hub-kpi"><div class="hub-kpi-label">待审核</div><div class="hub-kpi-value">${stats.needsReview}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">已通过</div><div class="hub-kpi-value">${stats.passed}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">需返工</div><div class="hub-kpi-value">${stats.rework}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">失败阻塞</div><div class="hub-kpi-value">${stats.blocked}</div></div>
+    </div>
+    <section class="hub-section">
+      <div class="hub-section-title">Reviewer Gate <span class="hub-mini-note">MVP 先人工确认，后续接 reviewer agent</span></div>
+      <div class="hub-list">
+        ${gateTasks.length ? gateTasks.map(t => {
+          const badge = gateBadge(t);
+          const canReview = t.status === 'done' && t.gate_status !== 'passed';
+          return `<div class="hub-row">
+            <div class="hub-row-main">
+              <div class="hub-row-title">${esc(t.title || t.id)}</div>
+              <div class="hub-row-meta">${esc(t.agent || 'unknown')} · ${esc(t.run_id || '无 run')} · ${esc(t.accept || '无验收说明')}</div>
+              ${t.review_note ? `<div class="hub-row-meta">Gate 说明：${esc(t.review_note)}</div>` : ''}
+            </div>
+            <div class="hub-row-side">
+              <span class="hub-badge ${badge.tone}">${badge.text}</span>
+              ${canReview ? `<div class="hub-row-actions">
+                <button class="hub-mini-btn" data-hub-action="gate-pass" data-task-id="${esc(t.id)}">通过</button>
+                <button class="hub-mini-btn danger" data-hub-action="gate-rework" data-task-id="${esc(t.id)}">返工</button>
+              </div>` : ''}
+            </div>
+          </div>`;
+        }).join('') : '<div class="hub-empty">暂无可审核任务。执行任务完成后，这里会出现 Gate 操作。</div>'}
+      </div>
+    </section>
+    <section class="hub-section">
+      <div class="hub-section-title">规则 <span class="hub-mini-note">防止自迭代失控</span></div>
+      <div class="hub-list">
+        <div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">通过 Gate</div><div class="hub-row-meta">任务保持 done，并写入 review_status=passed / test_status=manual_passed。</div></div><span class="hub-badge ok">可沉淀</span></div>
+        <div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">要求返工</div><div class="hub-row-meta">任务回到 pending，下一次执行会带上返工说明和上一次结果摘要。</div></div><span class="hub-badge warn">再执行</span></div>
       </div>
     </section>`;
   bindHubActions();
@@ -1194,13 +1262,14 @@ function renderHubInvocations() {
 
 function renderHubTasks() {
   const stats = taskStats(hubState.tasks);
+  const gates = gateStats(hubState.tasks);
   const recent = [...hubState.tasks].slice(-6).reverse();
   hubBody.innerHTML = `
     <div class="hub-kpi-grid">
       <div class="hub-kpi"><div class="hub-kpi-label">Run 数</div><div class="hub-kpi-value">${stats.runs}</div></div>
       <div class="hub-kpi"><div class="hub-kpi-label">待执行</div><div class="hub-kpi-value">${stats.pending}</div></div>
       <div class="hub-kpi"><div class="hub-kpi-label">执行中</div><div class="hub-kpi-value">${stats.in_progress}</div></div>
-      <div class="hub-kpi"><div class="hub-kpi-label">已完成</div><div class="hub-kpi-value">${stats.done}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">待审核</div><div class="hub-kpi-value">${gates.needsReview}</div></div>
     </div>
     <section class="hub-section">
       <div class="hub-section-title">最近任务 <span class="hub-mini-note">来自 .myteam/tasks.jsonl</span></div>
@@ -1210,7 +1279,7 @@ function renderHubTasks() {
             <div class="hub-row-title">${esc(t.title || t.id)}</div>
             <div class="hub-row-meta">${esc(t.agent || 'unknown')} · ${esc(t.run_id || '无 run')} · ${esc(t.accept || '无验收说明')}</div>
           </div>
-          <span class="hub-badge ${t.status === 'done' ? 'ok' : t.status === 'failed' ? 'err' : t.status === 'in_progress' ? 'info' : 'warn'}">${esc(t.status || 'pending')}</span>
+          <span class="hub-badge ${t.status === 'done' ? (t.gate_status === 'passed' ? 'ok' : 'info') : t.status === 'failed' ? 'err' : t.status === 'in_progress' ? 'info' : 'warn'}">${esc(t.gate_status === 'passed' ? 'done+gate' : t.status || 'pending')}</span>
         </div>`).join('') : '<div class="hub-empty">暂无任务。切到拆任务模式生成第一批任务。</div>'}
       </div>
       <div class="hub-actions">
@@ -1223,8 +1292,8 @@ function renderHubTasks() {
 function renderHubCompare() {
   const rows = [
     ['Hub 指挥中心', 'Capability / Skills / Quota / 系统配置集中在 Hub tabs', '新增轻量 Hub，先集中状态、任务、对比'],
-    ['PlanBoardPanel', '按 agent 分组显示运行/中断/完成，支持继续', '任务面板已有分组，下一步补 reviewer gate 和继续入口统一'],
-    ['Mission Hub', '跨项目 backlog、self-claim、线程态势、SOP 面板', 'MVP 先保留本地 tasks，后续扩展 backlog / gate / learn'],
+    ['PlanBoardPanel', '按 agent 分组显示运行/中断/完成，支持继续', '任务面板已有分组，Hub Gate 支持通过/返工'],
+    ['Mission Hub', '跨项目 backlog、self-claim、线程态势、SOP 面板', 'MVP 已补人工 reviewer gate，下一步扩展 backlog / learn'],
     ['Skills 框架', '技能按需加载，并展示挂载到哪些 agent', '新增 .myteam/skills.yaml 与 Hub Skills 看板，下一步做按需加载'],
     ['成本可见性', 'Quota Board 轮询模型额度并预警', '新增调用记录和 Hub 调用 tab，下一步接真实 token/额度']
   ];
@@ -1242,7 +1311,7 @@ function renderHubCompare() {
 
 function bindHubActions() {
   hubBody.querySelectorAll('[data-hub-action]').forEach(btn => {
-    btn.onclick = () => {
+    btn.onclick = async () => {
       const action = btn.dataset.hubAction;
       if (action === 'settings') openDrawer();
       if (action === 'tasks') {
@@ -1254,8 +1323,33 @@ function bindHubActions() {
         modeGroup.querySelector('.radio-btn[data-value="plan"]').click();
         goalInput.focus();
       }
+      if (action === 'gate-pass' || action === 'gate-rework') {
+        await submitGateDecision(btn.dataset.taskId, action === 'gate-pass' ? 'pass' : 'rework', btn);
+      }
     };
   });
+}
+
+async function submitGateDecision(taskId, decision, btn) {
+  if (!taskId) return;
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/gate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Gate 操作失败');
+    addSystemMsg(decision === 'pass'
+      ? `任务 ${taskId} 已通过 Reviewer Gate。`
+      : `任务 ${taskId} 已要求返工，已回到 pending。`);
+    await loadTasks();
+    await loadHub();
+  } catch (err) {
+    addSystemMsg(`Gate 操作失败：${err.message}`);
+    btn.disabled = false;
+  }
 }
 
 hubBtn.onclick = openHub;

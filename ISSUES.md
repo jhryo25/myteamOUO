@@ -228,3 +228,11 @@
 - **解法**: `streamAgent()` 每次调用追加 `.myteam/invocations.jsonl`，记录 agent、label、状态、耗时、退出码、输入/输出字符数和错误；后端新增 `GET /api/invocations`；Hub 新增“调用”tab。
 - **教训**: 在拿不到精确 token/金额前，也可以先记录调用次数、耗时和失败率，形成低成本可观测性。
 - **标签**: `ux`, `observability`, `quota`, `lesson:先记录调用再追精确成本`
+
+### IMP-015: 新增人工 Reviewer Gate [self-iteration]
+
+- **位置**: `server.mjs`, `agent-utils.mjs`, `web/app.html`, `web/app.css`, `web/app.js`
+- **问题**: myteam 的任务执行完就进入 `done`，缺少 review/test gate；如果直接写长期记忆或继续自迭代，容易把未验收结果当成事实。
+- **解法**: 新增 Hub `Gate` tab，展示待审核、已通过、需返工、失败阻塞；新增 `POST /api/tasks/:id/gate`，支持人工通过或返工。返工会把任务放回 `pending`，并把返工说明和上一次结果摘要注入下一次执行 prompt。
+- **教训**: 自迭代先不要追求全自动，先让“通过/返工”成为结构化状态，再把 reviewer agent 接上去。
+- **标签**: `ux`, `gate`, `reviewer`, `self-iteration`, `lesson:先有闸门再自动化`

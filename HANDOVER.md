@@ -2,7 +2,7 @@
 
 > 用于新对话冷启动。AI 读完此文件即可接续工作，无需重新理解历史。
 > 
-> **最后更新**: 2026-06-14（轻量 Hub + Skills + 调用观测）
+> **最后更新**: 2026-06-14（轻量 Hub + Skills + 调用观测 + 人工 Gate）
 
 ---
 
@@ -67,6 +67,7 @@ myteamOUO/
 | GET  | `/api/tasks` | 返回 tasks.jsonl 全部记录 |
 | GET  | `/api/skills` | 返回 `.myteam/skills.yaml` 静态技能清单 |
 | GET  | `/api/invocations` | 返回 `.myteam/invocations.jsonl` 调用记录和汇总 |
+| POST | `/api/tasks/:id/gate` | 人工 Reviewer Gate：通过任务或要求返工 |
 | DELETE | `/api/tasks/:id` | 删除单个任务 |
 | POST | `/api/tasks/:id/rerun` | 重新执行单个任务（重置状态为 pending） |
 | GET  | `/api/history` | 返回内存对话历史 |
@@ -152,7 +153,7 @@ NDJSON 解析：
 - **📋 拆任务模式**：走 `/api/plan`，SSE 实时流，拆完显示结构化任务卡片
 - **▶ 执行 pending 任务**：走 `/api/dispatch`，每条任务实时流输出，支持 ■ 中断
 - **⚙ Agent 管理抽屉**：可视化查看/修改 CLI 路径，一键检测 + 保存
-- **Hub 指挥抽屉**：顶部 `Hub` 按钮打开轻量指挥中心，包含总览、Agent、Skills、调用、任务、对比六个 tab
+- **Hub 指挥抽屉**：顶部 `Hub` 按钮打开轻量指挥中心，包含总览、Agent、Skills、调用、Gate、任务、对比七个 tab
 - **左侧 Session Sidebar**：每行显示名称/时间/消息数 + hover 删除；底部「＋ 新建对话」；删除有 5 秒撤销 toast + 回收站持久化
 - **右侧任务面板**：窄条展开；有搜索框 + 状态 chips；任务按 run 分组可折叠，新 run 在前，pending 数量徽标
 - **A2A 链式执行**：agent 回复中 @mention 自动触发链式任务，乒乓球熔断保护
@@ -212,12 +213,13 @@ NDJSON 解析：
 19. **轻量 Hub 指挥中心**：对齐 clowder-ai Hub 思路，集中展示状态、任务和 HTML/交互差距（IMP-012）
 20. **静态 Skills 看板**：`.myteam/skills.yaml` + `/api/skills` + Hub Skills tab 展示技能挂载关系（IMP-013）
 21. **轻量调用/成本可见性**：`.myteam/invocations.jsonl` + `/api/invocations` + Hub 调用 tab 展示调用次数、成功失败和平均耗时（IMP-014）
+22. **人工 Reviewer Gate**：Hub Gate tab + `POST /api/tasks/:id/gate`，可通过已完成任务或要求返工；返工任务重新进入 pending（IMP-015）
 
 ### 🟡 下一步（可选）
 
 - **Kimi 输出质量**：Kimi 已接入；下一步可针对拆任务 JSON 稳定性微调 prompt
 - **P2 优化**：lessons UI、agent pill 执行高亮、历史分页
-- **Reviewer Gate**：任务执行后进入 review/test，再允许写长期记忆
+- **Reviewer Agent 自动审**：当前已有人工 Gate；下一步让 reviewer agent 按验收标准自动给 Gate 建议
 - **Skills 按需加载**：当前已有静态看板；下一步根据任务类型把对应 skill 注入 agent prompt
 - **消息写入与执行解耦**：参考 clowder-ai ADR-008，POST 立即返回 → WebSocket 推流
 - **真实成本统计**：当前已有轻量 invocation record；下一步从 CLI 输出或模型 provider 获取 token/usage，再做额度预警

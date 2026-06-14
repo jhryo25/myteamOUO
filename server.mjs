@@ -775,8 +775,71 @@ async function handle(req, res) {
     task.error = null;
     task.started_at = null;
     task.finished_at = null;
+    task.gate_status = null;
+    task.review_status = null;
+    task.review_note = null;
+    task.reviewed_at = null;
+    task.reviewer = null;
+    task.test_status = null;
+    task.previous_result = null;
     writeAllTasks(tasks);
     
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, task }));
+  }
+
+  // POST /api/tasks/:id/gate — 人工 Reviewer Gate：通过或要求返工
+  const gateMatch = pathname.match(/^\/api\/tasks\/([^\/]+)\/gate$/);
+  if (req.method === 'POST' && gateMatch) {
+    const taskId = decodeURIComponent(gateMatch[1]);
+    const body = await readBody(req);
+    const decision = body.decision;
+    const note = (body.note || '').trim();
+    const tasks = readTasks();
+    const task = tasks.find(t => t.id === taskId);
+    if (!task) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: '任务不存在' }));
+    }
+
+    if (!['pass', 'rework'].includes(decision)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'decision 必须是 pass 或 rework' }));
+    }
+
+    if (decision === 'pass' && task.status !== 'done') {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: '只有已完成任务才能通过 Gate' }));
+    }
+
+    const now = new Date().toISOString();
+    if (decision === 'pass') {
+      Object.assign(task, {
+        gate_status: 'passed',
+        review_status: 'passed',
+        review_note: note || '人工确认通过',
+        reviewed_at: now,
+        reviewer: 'human',
+        test_status: 'manual_passed',
+      });
+    } else {
+      Object.assign(task, {
+        status: 'pending',
+        gate_status: 'rework',
+        review_status: 'rework',
+        review_note: note || '人工要求返工，请按验收标准补齐结果',
+        reviewed_at: now,
+        reviewer: 'human',
+        test_status: 'manual_rework',
+        previous_result: task.result || task.previous_result || null,
+        result: null,
+        error: null,
+        started_at: null,
+        finished_at: null,
+      });
+    }
+
+    writeAllTasks(tasks);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, task }));
   }

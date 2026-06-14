@@ -98,6 +98,54 @@ function readSkills() {
   return skills;
 }
 
+function skillRoleForPhase(phase) {
+  if (phase === 'plan') return 'controller';
+  if (phase === 'review') return 'reviewer';
+  return 'worker';
+}
+
+function splitSkillText(skill) {
+  return [
+    skill.name,
+    skill.category,
+    skill.trigger,
+    skill.description,
+    skill.prompt,
+    skill.load,
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function selectSkills({ text = '', agent = '', phase = 'run' } = {}) {
+  const skills = readSkills();
+  const role = skillRoleForPhase(phase);
+  const haystack = String(text || '').toLowerCase();
+
+  const scored = skills.map(skill => {
+    let score = 0;
+    const skillText = splitSkillText(skill);
+    if (skill.mounts?.[role]) score += 3;
+    if (agent && skill.mounts?.[agent]) score += 2;
+    if (skill.category && haystack.includes(String(skill.category).toLowerCase())) score += 2;
+    for (const token of skillText.split(/[\s,，。；;、/|]+/).filter(t => t.length >= 2)) {
+      if (haystack.includes(token)) score += 1;
+    }
+    return { ...skill, score };
+  });
+
+  return scored
+    .filter(skill => skill.score > 0)
+    .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
+    .slice(0, 3);
+}
+
+function buildSkillContext(selected) {
+  if (!selected.length) return '';
+  return selected.map((skill, index) => {
+    const prompt = skill.prompt || skill.description || skill.trigger || '按该技能边界完成任务';
+    return `${index + 1}. ${skill.name}（${skill.category || 'general'}）：${prompt}`;
+  }).join('\n');
+}
+
 function appendInvocation(record) {
   try {
     appendFileSync(INVOCATIONS_FILE, JSON.stringify(record) + '\n', 'utf8');
@@ -738,13 +786,23 @@ async function handle(req, res) {
   // GET /api/skills — 返回 MVP 静态技能清单
   if (req.method === 'GET' && pathname === '/api/skills') {
     const skills = readSkills();
+    const text = url.searchParams.get('text') || '';
+    const agent = url.searchParams.get('agent') || '';
+    const phase = url.searchParams.get('phase') || 'run';
+    const selected = selectSkills({ text, agent, phase });
     const summary = {
       total: skills.length,
       categories: [...new Set(skills.map(s => s.category).filter(Boolean))],
       agents: ['controller', 'worker', 'reviewer', ...AGENT_KEYS],
+      selected: selected.length,
     };
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ skills, summary }));
+    return res.end(JSON.stringify({
+      skills,
+      selected,
+      summary,
+      contextPreview: buildSkillContext(selected),
+    }));
   }
 
   // GET /api/invocations — 返回 agent 调用记录，用于轻量成本/稳定性看板
@@ -891,7 +949,9 @@ async function handle(req, res) {
       if (!agentStatus?.available) {
         throw new Error(`${agentKey} 不可用：${agentStatus?.error || '没有可启动的 agent'}。请在右上角 Agent 配置里换成可启动的 CLI。`);
       }
-      const raw = await streamAgent(agentKey, `${PLAN_PROMPT}\n\n用户目标：${goal}`, res, 'chunk');
+      const skillContext = buildSkillContext(selectSkills({ text: goal, agent: agentKey, phase: 'plan' }));
+      const prompt = `${PLAN_PROMPT}${skillContext ? `\n\n本次按需加载的 Skills：\n${skillContext}` : ''}\n\n用户目标：${goal}`;
+      const raw = await streamAgent(agentKey, prompt, res, 'chunk');
       const data = extractJson(raw);
       // 教训2: 严格验证，防止幻觉数据写入 tasks.jsonl
       const validation = validatePlanResult(data);
@@ -963,7 +1023,9 @@ async function handle(req, res) {
       patchTask(task.id, { status: 'in_progress', started_at: new Date().toISOString() });
 
       try {
-        const result = await streamAgent(agentKey, buildExecPrompt(task), res, `task-chunk:${task.id}`);
+        const skillText = [task.goal, task.title, task.accept, ...(task.steps || [])].join('\n');
+        const skillContext = buildSkillContext(selectSkills({ text: skillText, agent: agentKey, phase: 'run' }));
+        const result = await streamAgent(agentKey, buildExecPrompt(task, skillContext), res, `task-chunk:${task.id}`);
         patchTask(task.id, {
           status: 'done',
           finished_at: new Date().toISOString(),

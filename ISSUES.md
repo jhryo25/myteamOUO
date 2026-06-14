@@ -236,3 +236,11 @@
 - **解法**: 新增 Hub `Gate` tab，展示待审核、已通过、需返工、失败阻塞；新增 `POST /api/tasks/:id/gate`，支持人工通过或返工。返工会把任务放回 `pending`，并把返工说明和上一次结果摘要注入下一次执行 prompt。
 - **教训**: 自迭代先不要追求全自动，先让“通过/返工”成为结构化状态，再把 reviewer agent 接上去。
 - **标签**: `ux`, `gate`, `reviewer`, `self-iteration`, `lesson:先有闸门再自动化`
+
+### IMP-016: Skills 按需加载与页面去对比化 [skills]
+
+- **位置**: `.myteam/skills.yaml`, `server.mjs`, `agent-utils.mjs`, `web/app.html`, `web/app.css`, `web/app.js`, `docs/architecture-evaluation.md`
+- **问题**: Hub 里展示“差距对比”会把开发决策塞进产品界面；Skills 也只是静态表，没有真正影响 plan/dispatch。
+- **解法**: 移除 Hub `对比` tab 和页面内差距说明；差距只保留在 docs。`GET /api/skills` 支持 `text/agent/phase` 参数，返回命中的 skill 和 prompt preview；plan/dispatch 时只注入命中的 skill 摘要。
+- **教训**: 产品界面只放可操作状态，架构差距和技术评估放文档；Skills 先做轻量按需注入，再升级成完整文件级渐进加载。
+- **标签**: `skills`, `ux`, `progressive-loading`, `lesson:对比进文档能力进流程`

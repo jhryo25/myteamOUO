@@ -967,7 +967,7 @@ drawerMask.onclick  = closeDrawer;
 
 // ── Hub 指挥抽屉 ─────────────────────────────────────────────
 let hubActiveTab = 'overview';
-let hubState = { agents: [], tasks: [], skills: [], skillsSummary: null, invocations: [], invocationSummary: null };
+let hubState = { agents: [], tasks: [], skills: [], selectedSkills: [], skillsSummary: null, skillContextPreview: '', invocations: [], invocationSummary: null };
 
 function openHub() {
   closeDrawer();
@@ -984,17 +984,24 @@ function closeHub() {
 async function loadHub() {
   hubBody.innerHTML = '<div class="hub-loading">正在读取本地状态…</div>';
   try {
+    const skillText = goalInput?.value?.trim() || '';
+    // 根据当前输入框、模式和拆任务 agent，按需选择本次真正需要注入的 skill。
+    const skillPhase = getMode() === 'plan' ? 'plan' : 'run';
+    const skillAgent = planAgentGroupEl.querySelector('.radio-btn.active')?.dataset.value || '';
+    const skillUrl = `/api/skills?phase=${encodeURIComponent(skillPhase)}&agent=${encodeURIComponent(skillAgent)}&text=${encodeURIComponent(skillText)}`;
     const [status, taskData, skillData, invocationData] = await Promise.all([
       fetch('/api/status').then(r => r.json()),
       fetch('/api/tasks').then(r => r.json()).catch(() => ({ tasks: [] })),
-      fetch('/api/skills').then(r => r.json()).catch(() => ({ skills: [], summary: null })),
+      fetch(skillUrl).then(r => r.json()).catch(() => ({ skills: [], selected: [], summary: null, contextPreview: '' })),
       fetch('/api/invocations').then(r => r.json()).catch(() => ({ invocations: [], summary: null })),
     ]);
     hubState = {
       agents: status.agents || [],
       tasks: taskData.tasks || [],
       skills: skillData.skills || [],
+      selectedSkills: skillData.selected || [],
       skillsSummary: skillData.summary || null,
+      skillContextPreview: skillData.contextPreview || '',
       invocations: invocationData.invocations || [],
       invocationSummary: invocationData.summary || null,
     };
@@ -1062,7 +1069,6 @@ function renderHub() {
   if (hubActiveTab === 'invocations') return renderHubInvocations();
   if (hubActiveTab === 'gate') return renderHubGate();
   if (hubActiveTab === 'tasks') return renderHubTasks();
-  if (hubActiveTab === 'compare') return renderHubCompare();
   return renderHubOverview();
 }
 
@@ -1087,7 +1093,7 @@ function renderHubOverview() {
       </div>
     </section>
     <section class="hub-section">
-      <div class="hub-section-title">下一批对齐重点 <span class="hub-mini-note">来自 clowder-ai 对照</span></div>
+      <div class="hub-section-title">下一步路线 <span class="hub-mini-note">只展示可执行方向</span></div>
       <div class="hub-list">
         <div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">Reviewer Agent 自动审</div><div class="hub-row-meta">当前是人工 Gate；下一步让 reviewer agent 读取验收标准自动给结论。</div></div><span class="hub-badge info">下一步</span></div>
         <div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">真实成本统计</div><div class="hub-row-meta">当前已有调用次数和耗时；下一步接 token/usage。</div></div><span class="hub-badge warn">待做</span></div>
@@ -1174,15 +1180,28 @@ function renderHubAgents() {
 function renderHubSkills() {
   const mountKeys = ['controller', 'worker', 'reviewer', 'codex', 'claude', 'kimi'];
   const categories = [...new Set(hubState.skills.map(s => s.category).filter(Boolean))];
+  const selectedNames = new Set(hubState.selectedSkills.map(s => s.name));
   hubBody.innerHTML = `
     <div class="hub-kpi-grid">
       <div class="hub-kpi"><div class="hub-kpi-label">技能总数</div><div class="hub-kpi-value">${hubState.skills.length}</div></div>
       <div class="hub-kpi"><div class="hub-kpi-label">分类</div><div class="hub-kpi-value">${categories.length}</div></div>
-      <div class="hub-kpi"><div class="hub-kpi-label">可挂载角色</div><div class="hub-kpi-value">${mountKeys.length}</div></div>
-      <div class="hub-kpi"><div class="hub-kpi-label">数据源</div><div class="hub-kpi-value">YAML</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">本次加载</div><div class="hub-kpi-value">${hubState.selectedSkills.length}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">加载方式</div><div class="hub-kpi-value">按需</div></div>
     </div>
     <section class="hub-section">
-      <div class="hub-section-title">Skills 看板 <span class="hub-mini-note">来自 .myteam/skills.yaml</span></div>
+      <div class="hub-section-title">本次按需加载 <span class="hub-mini-note">根据当前输入、模式和 agent 选择</span></div>
+      <div class="hub-list">
+        ${hubState.selectedSkills.length ? hubState.selectedSkills.map(skill => `<div class="hub-row">
+          <div class="hub-row-main">
+            <div class="hub-row-title">${esc(skill.name)}</div>
+            <div class="hub-row-meta">${esc(skill.category || '-')} · score ${skill.score || 0} · ${esc(skill.prompt || skill.description || '')}</div>
+          </div>
+          <span class="hub-badge ok">${esc(skill.load || 'progressive')}</span>
+        </div>`).join('') : '<div class="hub-empty">当前输入还没有匹配到 skill。输入目标后再打开 Hub，或切到拆任务模式查看。</div>'}
+      </div>
+    </section>
+    <section class="hub-section">
+      <div class="hub-section-title">Skills Registry <span class="hub-mini-note">来自 .myteam/skills.yaml，执行时只注入命中的部分</span></div>
       ${hubState.skills.length ? `<div class="hub-table-wrap">
         <table class="hub-skills-table">
           <thead>
@@ -1190,14 +1209,16 @@ function renderHubSkills() {
               <th>Skill</th>
               <th>分类</th>
               <th>触发条件</th>
+              <th>加载</th>
               <th>挂载</th>
             </tr>
           </thead>
           <tbody>
             ${hubState.skills.map(skill => `<tr>
-              <td><span class="hub-skill-name">${esc(skill.name)}</span></td>
+              <td><span class="hub-skill-name ${selectedNames.has(skill.name) ? 'active' : ''}">${esc(skill.name)}</span></td>
               <td>${esc(skill.category || '-')}</td>
               <td>${esc(skill.trigger || skill.description || '-')}</td>
+              <td>${esc(skill.load || 'manual')}</td>
               <td><div class="hub-mounts">
                 ${mountKeys.map(key => `<span class="hub-mount ${skill.mounts?.[key] ? 'on' : ''}">${esc(key)}</span>`).join('')}
               </div></td>
@@ -1207,11 +1228,8 @@ function renderHubSkills() {
       </div>` : '<div class="hub-empty">还没有技能清单。请检查 .myteam/skills.yaml。</div>'}
     </section>
     <section class="hub-section">
-      <div class="hub-section-title">和 clowder-ai 的差距 <span class="hub-mini-note">MVP 版本先只读</span></div>
-      <div class="hub-list">
-        <div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">缺少按需加载</div><div class="hub-row-meta">当前只是技能登记表，后续需要按任务触发加载对应提示词。</div></div><span class="hub-badge warn">下一步</span></div>
-        <div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">缺少依赖检测</div><div class="hub-row-meta">clowder-ai 会显示 MCP 依赖；myteam 后续可加 requires 字段。</div></div><span class="hub-badge info">可扩展</span></div>
-      </div>
+      <div class="hub-section-title">Prompt Preview <span class="hub-mini-note">真实执行时注入给 agent 的 skill 摘要</span></div>
+      <pre class="hub-code-block">${esc(hubState.skillContextPreview || '暂无匹配 skill。')}</pre>
     </section>`;
 }
 
@@ -1251,13 +1269,7 @@ function renderHubInvocations() {
         </div>`).join('') : '<div class="hub-empty">暂无调用记录。</div>'}
       </div>
     </section>
-    <section class="hub-section">
-      <div class="hub-section-title">和 clowder-ai 的差距 <span class="hub-mini-note">MVP 先做本地调用观测</span></div>
-      <div class="hub-list">
-        <div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">未统计真实 token / 金额</div><div class="hub-row-meta">当前记录调用次数、耗时、失败率；后续再接各 CLI 的 token/usage 输出。</div></div><span class="hub-badge warn">下一步</span></div>
-        <div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">未做额度预警</div><div class="hub-row-meta">clowder-ai Quota Board 会做风险等级；myteam 可先基于失败率和超时预警。</div></div><span class="hub-badge info">可扩展</span></div>
-      </div>
-    </section>`;
+    `;
 }
 
 function renderHubTasks() {
@@ -1287,26 +1299,6 @@ function renderHubTasks() {
       </div>
     </section>`;
   bindHubActions();
-}
-
-function renderHubCompare() {
-  const rows = [
-    ['Hub 指挥中心', 'Capability / Skills / Quota / 系统配置集中在 Hub tabs', '新增轻量 Hub，先集中状态、任务、对比'],
-    ['PlanBoardPanel', '按 agent 分组显示运行/中断/完成，支持继续', '任务面板已有分组，Hub Gate 支持通过/返工'],
-    ['Mission Hub', '跨项目 backlog、self-claim、线程态势、SOP 面板', 'MVP 已补人工 reviewer gate，下一步扩展 backlog / learn'],
-    ['Skills 框架', '技能按需加载，并展示挂载到哪些 agent', '新增 .myteam/skills.yaml 与 Hub Skills 看板，下一步做按需加载'],
-    ['成本可见性', 'Quota Board 轮询模型额度并预警', '新增调用记录和 Hub 调用 tab，下一步接真实 token/额度']
-  ];
-  hubBody.innerHTML = `
-    <section class="hub-section">
-      <div class="hub-section-title">HTML / 交互差距 <span class="hub-mini-note">本轮对照 clowder-ai 源码和 README</span></div>
-      <table class="hub-compare-table">
-        <thead><tr><th>主题</th><th>clowder-ai</th><th>myteam 当前处理</th></tr></thead>
-        <tbody>
-          ${rows.map(r => `<tr><td>${esc(r[0])}</td><td>${esc(r[1])}</td><td>${esc(r[2])}</td></tr>`).join('')}
-        </tbody>
-      </table>
-    </section>`;
 }
 
 function bindHubActions() {

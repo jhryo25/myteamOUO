@@ -70,6 +70,15 @@ body {
 }
 .agent-pill.ok  { color: var(--green); border-color: var(--green); background: var(--green-soft); }
 .agent-pill.err { color: var(--red);   border-color: var(--red);   background: var(--red-soft); }
+.agent-pill.busy {
+  color: var(--blue);
+  border-color: var(--blue);
+  background: var(--blue-soft);
+  box-shadow: 0 0 0 2px rgba(64,112,180,.14);
+}
+.agent-pill.busy .dot {
+  animation: pulse .75s ease-in-out infinite alternate;
+}
 .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 
 /* ── connection status bar ── */
@@ -314,6 +323,27 @@ body {
   flex-direction: column;
   gap: 14px;
   scroll-behavior: smooth;
+}
+
+.history-pager {
+  align-self: center;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.history-pager:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.history-pager:disabled {
+  opacity: .55;
+  cursor: wait;
 }
 
 /* 欢迎状态 */

@@ -678,8 +678,26 @@ async function handle(req, res) {
   if (req.method === 'GET' && pathname === '/api/history') {
     const sid = url.searchParams.get('sessionId') || activeSessionId;
     const s = getSession(sid) || getActiveSession();
+    const allHistory = s?.history || [];
+    const requestedLimit = Number.parseInt(url.searchParams.get('limit') || '40', 10);
+    const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 40, 1), 100);
+    const requestedBefore = Number.parseInt(url.searchParams.get('before') || String(allHistory.length), 10);
+    const before = Math.min(Math.max(Number.isFinite(requestedBefore) ? requestedBefore : allHistory.length, 0), allHistory.length);
+    const start = Math.max(0, before - limit);
+    const history = allHistory.slice(start, before);
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ sessionId: s?.id, history: s?.history || [] }));
+    return res.end(JSON.stringify({
+      sessionId: s?.id,
+      history,
+      page: {
+        start,
+        end: before,
+        limit,
+        total: allHistory.length,
+        hasMore: start > 0,
+        nextBefore: start > 0 ? start : null,
+      },
+    }));
   }
 
   // POST /api/chat { message, sessionId? } — SSE 流式对话，支持 @mention 路由

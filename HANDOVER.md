@@ -218,11 +218,11 @@ NDJSON 解析：
 23. **Skills 按需加载**：`.myteam/skills.yaml` 增加 `load/prompt`；`GET /api/skills?text=&agent=&phase=` 返回命中技能；plan/dispatch 只注入命中的 skill 摘要（IMP-016）
 24. **Hub 去对比化**：移除 HTML 里的 `对比` tab 和页面内差距说明，差距记录只保留在 `docs/clowder-html-gap.md`（IMP-016）
 25. **架构评估文档**：新增 `docs/architecture-evaluation.md`，评估 LangChain / LangGraph / RAG 接入位置和推荐路线（IMP-016）
+26. **P2 交互包**：Hub 新增 Lessons tab；顶部 agent pill 在 chat/plan/dispatch 执行时高亮；`/api/history` 支持分页，聊天区可加载更早记录（IMP-017）
 
 ### 🟡 下一步（可选）
 
 - **Kimi 输出质量**：Kimi 已接入；下一步可针对拆任务 JSON 稳定性微调 prompt
-- **P2 优化**：lessons UI、agent pill 执行高亮、历史分页
 - **Reviewer Agent 自动审**：当前已有人工 Gate；下一步让 reviewer agent 按验收标准自动给 Gate 建议
 - **本地 RAG MVP**：从 HANDOVER / ISSUES / docs / lessons / tasks 做关键词检索，把相关上下文注入 plan/run/review
 - **消息写入与执行解耦**：参考 clowder-ai ADR-008，POST 立即返回 → WebSocket 推流

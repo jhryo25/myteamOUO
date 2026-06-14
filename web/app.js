@@ -203,7 +203,7 @@ function bindBubbleActions(row, text, type) {
   }
 }
 
-function addUserBubble(text) {
+function addUserBubble(text, { prepend = false, scroll = true } = {}) {
   hideWelcome();
   const row = document.createElement('div');
   row.className = 'bubble-row user';
@@ -218,8 +218,13 @@ function addUserBubble(text) {
     </div>
     <div class="avatar user-av">我</div>`;
   bindBubbleActions(row, text, 'user');
-  chatEl.appendChild(row);
-  scrollChat();
+  if (prepend) {
+    const pager = document.getElementById('historyPager');
+    chatEl.insertBefore(row, pager ? pager.nextSibling : chatEl.firstElementChild);
+  }
+  else chatEl.appendChild(row);
+  if (scroll) scrollChat();
+  return row;
 }
 
 function startAgentBubble(agentKey) {
@@ -385,7 +390,7 @@ async function loadStatus() {
     const { agents } = await fetch('/api/status').then(r => r.json());
     const pillsEl = document.getElementById('agentPills');
     pillsEl.innerHTML = agents.map(a =>
-      `<span class="agent-pill ${a.available ? 'ok' : 'err'}" title="${esc(a.error || (a.available ? '可启动' : '不可用'))}">
+      `<span class="agent-pill ${a.available ? 'ok' : 'err'} ${activeAgentKey === a.key ? 'busy' : ''}" data-agent="${esc(a.key)}" title="${esc(a.error || (a.available ? '可启动' : '不可用'))}">
         <span class="dot"></span>${a.key}
       </span>`
     ).join('');
@@ -401,6 +406,15 @@ async function loadStatus() {
       '<span class="agent-pill err"><span class="dot"></span>离线</span>';
     setConnectionStatus('offline');
   }
+}
+
+let activeAgentKey = null;
+
+function setActiveAgent(agentKey) {
+  activeAgentKey = agentKey || null;
+  document.querySelectorAll('.agent-pill').forEach(pill => {
+    pill.classList.toggle('busy', Boolean(activeAgentKey && pill.dataset.agent === activeAgentKey));
+  });
 }
 
 function setConnectionStatus(level) {
@@ -460,6 +474,7 @@ function filterAndRenderTasks() {
   if (currentSearch) {
     const term = currentSearch.toLowerCase();
     filtered = filtered.filter(t => 
+      (t.id && t.id.toLowerCase().includes(term)) ||
       t.title.toLowerCase().includes(term) ||
       (t.goal && t.goal.toLowerCase().includes(term)) ||
       (t.agent && t.agent.toLowerCase().includes(term))
@@ -484,6 +499,20 @@ document.getElementById('tasksSearch').oninput = (e) => {
   currentSearch = e.target.value;
   filterAndRenderTasks();
 };
+
+async function focusTasks(term = '') {
+  closeHub();
+  layout.classList.add('tasks-expanded');
+  const search = document.getElementById('tasksSearch');
+  currentFilter = 'all';
+  document.querySelectorAll('.filter-chip').forEach(chip => {
+    chip.classList.toggle('active', chip.dataset.filter === 'all');
+  });
+  currentSearch = term;
+  search.value = term;
+  await loadTasks();
+  search.focus();
+}
 
 // Task action handlers
 async function rerunTask(taskId) {
@@ -716,6 +745,7 @@ function ssePost(url, body, handlers) {
     }).finally(() => {
       stopBtn.classList.add('hidden');
       currentAbortController = null;
+      setActiveAgent(null);
       setRunning(false);
       // 消费排队消息
       if (messageQueue.length && getMode() === 'chat') {
@@ -818,6 +848,7 @@ async function doChat(message) {
 
   await ssePost('/api/chat', { message, sessionId: currentSessionId }, {
     start: ({ agent }) => {
+      setActiveAgent(agent);
       bubble = startAgentBubble(agent);
     },
     chunk: ({ text }) => appendTyping(text),
@@ -848,9 +879,11 @@ async function doPlan(goal) {
 
   addUserBubble(`📋 ${goal}`);
   addSystemMsg(`正在让 ${agent} 拆解任务…`);
+  setActiveAgent(agent);
   startAgentBubble(agent);
 
   await ssePost('/api/plan', { goal, agent }, {
+    start: ({ agent }) => setActiveAgent(agent),
     chunk: ({ text }) => appendTyping(text),
     error: ({ message }) => {
       finishTyping();
@@ -891,6 +924,7 @@ async function runDispatch(options = {}) {
     await ssePost('/api/dispatch', options, {
       start:        ({ count }) => addSystemMsg(`共 ${count} 条任务待执行`),
       'task-start': ({ id, title, agent }) => {
+        setActiveAgent(agent);
         updateTaskDot(id, 'in_progress');
         startAgentBubble(agent);
         appendTyping(`[${title}]\n`);
@@ -967,7 +1001,7 @@ drawerMask.onclick  = closeDrawer;
 
 // ── Hub 指挥抽屉 ─────────────────────────────────────────────
 let hubActiveTab = 'overview';
-let hubState = { agents: [], tasks: [], skills: [], selectedSkills: [], skillsSummary: null, skillContextPreview: '', invocations: [], invocationSummary: null };
+let hubState = { agents: [], tasks: [], skills: [], selectedSkills: [], skillsSummary: null, skillContextPreview: '', invocations: [], invocationSummary: null, lessons: [] };
 
 function openHub() {
   closeDrawer();
@@ -989,11 +1023,12 @@ async function loadHub() {
     const skillPhase = getMode() === 'plan' ? 'plan' : 'run';
     const skillAgent = planAgentGroupEl.querySelector('.radio-btn.active')?.dataset.value || '';
     const skillUrl = `/api/skills?phase=${encodeURIComponent(skillPhase)}&agent=${encodeURIComponent(skillAgent)}&text=${encodeURIComponent(skillText)}`;
-    const [status, taskData, skillData, invocationData] = await Promise.all([
+    const [status, taskData, skillData, invocationData, lessonData] = await Promise.all([
       fetch('/api/status').then(r => r.json()),
       fetch('/api/tasks').then(r => r.json()).catch(() => ({ tasks: [] })),
       fetch(skillUrl).then(r => r.json()).catch(() => ({ skills: [], selected: [], summary: null, contextPreview: '' })),
       fetch('/api/invocations').then(r => r.json()).catch(() => ({ invocations: [], summary: null })),
+      fetch('/api/lessons').then(r => r.json()).catch(() => ({ lessons: [] })),
     ]);
     hubState = {
       agents: status.agents || [],
@@ -1004,6 +1039,7 @@ async function loadHub() {
       skillContextPreview: skillData.contextPreview || '',
       invocations: invocationData.invocations || [],
       invocationSummary: invocationData.summary || null,
+      lessons: lessonData.lessons || [],
     };
     renderHub();
   } catch (err) {
@@ -1066,6 +1102,7 @@ function renderHub() {
   hubBody.scrollTop = 0;
   if (hubActiveTab === 'agents') return renderHubAgents();
   if (hubActiveTab === 'skills') return renderHubSkills();
+  if (hubActiveTab === 'lessons') return renderHubLessons();
   if (hubActiveTab === 'invocations') return renderHubInvocations();
   if (hubActiveTab === 'gate') return renderHubGate();
   if (hubActiveTab === 'tasks') return renderHubTasks();
@@ -1233,6 +1270,48 @@ function renderHubSkills() {
     </section>`;
 }
 
+function renderHubLessons() {
+  const lessons = [...(hubState.lessons || [])].reverse();
+  const recent = lessons.slice(0, 12);
+  const byAgent = lessons.reduce((acc, lesson) => {
+    const key = lesson.agent || 'unknown';
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+  const topAgent = Object.entries(byAgent).sort((a, b) => b[1] - a[1])[0];
+  hubBody.innerHTML = `
+    <div class="hub-kpi-grid">
+      <div class="hub-kpi"><div class="hub-kpi-label">Lessons</div><div class="hub-kpi-value">${lessons.length}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">最近记录</div><div class="hub-kpi-value">${recent.length}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">主要 Agent</div><div class="hub-kpi-value">${esc(topAgent?.[0] || '-')}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">来源</div><div class="hub-kpi-value">失败</div></div>
+    </div>
+    <section class="hub-section">
+      <div class="hub-section-title">踩坑记录 <span class="hub-mini-note">来自 .myteam/lessons.jsonl</span></div>
+      <div class="hub-list">
+        ${recent.length ? recent.map(lesson => {
+          const when = lesson.timestamp ? formatTime(lesson.timestamp) : '-';
+          const taskKey = lesson.task_id || lesson.task_title || '';
+          const error = String(lesson.error || '无错误摘要');
+          return `<div class="hub-row">
+            <div class="hub-row-main">
+              <div class="hub-row-title">${esc(lesson.task_title || lesson.task_id || '未命名任务')}</div>
+              <div class="hub-row-meta">${esc(lesson.agent || 'unknown')} · ${esc(when)} · ${esc(lesson.task_id || '无 task_id')}</div>
+              <div class="hub-row-meta">${esc(error.length > 150 ? `${error.slice(0, 150)}...` : error)}</div>
+            </div>
+            <div class="hub-row-side">
+              <span class="hub-badge err">lesson</span>
+              ${taskKey ? `<div class="hub-row-actions">
+                <button class="hub-mini-btn" data-hub-action="lesson-task" data-task-query="${esc(taskKey)}">查看任务</button>
+              </div>` : ''}
+            </div>
+          </div>`;
+        }).join('') : '<div class="hub-empty">暂无踩坑记录。任务失败时会自动写入 lessons。</div>'}
+      </div>
+    </section>`;
+  bindHubActions();
+}
+
 function renderHubInvocations() {
   const summary = hubState.invocationSummary || { total: 0, success: 0, failed: 0, interrupted: 0, avgDurationMs: 0, byAgent: {} };
   const recent = hubState.invocations.slice(0, 8);
@@ -1307,8 +1386,7 @@ function bindHubActions() {
       const action = btn.dataset.hubAction;
       if (action === 'settings') openDrawer();
       if (action === 'tasks') {
-        closeHub();
-        document.getElementById('tasksExpandBtn').click();
+        await focusTasks('');
       }
       if (action === 'plan') {
         closeHub();
@@ -1317,6 +1395,9 @@ function bindHubActions() {
       }
       if (action === 'gate-pass' || action === 'gate-rework') {
         await submitGateDecision(btn.dataset.taskId, action === 'gate-pass' ? 'pass' : 'rework', btn);
+      }
+      if (action === 'lesson-task') {
+        await focusTasks(btn.dataset.taskQuery || '');
       }
     };
   });
@@ -1455,10 +1536,13 @@ drawerSaveBtn.onclick = async () => {
 
 // ── Session 管理 ──────────────────────────────────────────────
 let currentSessionId = null;
+const HISTORY_PAGE_SIZE = 20;
+let historyPage = { hasMore: false, nextBefore: null, loading: false };
 
 function clearChatArea() {
   chatEl.innerHTML = '';
   agentTypingBubble = null;
+  historyPage = { hasMore: false, nextBefore: null, loading: false };
   const w = document.createElement('div');
   w.className = 'chat-welcome';
   w.id = 'chatWelcome';
@@ -1693,7 +1777,7 @@ document.getElementById('tasksCollapseBtn').onclick = () => {
 };
 
 // ── 加载历史对话 ──────────────────────────────────────────────
-async function loadHistory() {
+async function loadHistoryLegacy() {
   try {
     const url = currentSessionId
       ? `/api/history?sessionId=${currentSessionId}`
@@ -1728,6 +1812,94 @@ async function loadHistory() {
 }
 
 // ── 初始化 ────────────────────────────────────────────────────
+function renderAssistantHistoryBubble(h) {
+  const avatarMap = {
+    codex:  { cls: 'codex-av',  emoji: '🤖', name: 'Codex' },
+    claude: { cls: 'claude-av', emoji: '✦', name: 'Claude' },
+    kimi:   { cls: 'kimi-av',   emoji: '🌙', name: 'Kimi' },
+  };
+  const a = avatarMap[h.agent] || { cls: 'system-av', emoji: '●', name: h.agent || 'codex' };
+  const row = document.createElement('div');
+  row.className = 'bubble-row';
+  row.innerHTML = `
+    <div class="avatar ${a.cls}">${a.emoji}</div>
+    <div class="bubble-content-wrap">
+      <div class="bubble-name">${a.name}</div>
+      <div class="bubble agent-bubble">${renderRichText(h.text)}</div>
+      <div class="bubble-actions">
+        <button class="bubble-action-btn" data-action="copy" title="复制">⧉</button>
+      </div>
+    </div>`;
+  bindBubbleActions(row, h.text || '', 'assistant');
+  return row;
+}
+
+function renderHistoryEntry(h, prepend = false) {
+  if (h.role === 'user') {
+    return addUserBubble(h.text, { prepend, scroll: false });
+  }
+  if (h.role === 'assistant') {
+    hideWelcome();
+    const row = renderAssistantHistoryBubble(h);
+    if (prepend) {
+      const pager = document.getElementById('historyPager');
+      chatEl.insertBefore(row, pager ? pager.nextSibling : chatEl.firstElementChild);
+    } else {
+      chatEl.appendChild(row);
+    }
+    return row;
+  }
+  return null;
+}
+
+function updateHistoryPager() {
+  let pager = document.getElementById('historyPager');
+  if (!historyPage.hasMore) {
+    if (pager) pager.remove();
+    return;
+  }
+  if (!pager) {
+    pager = document.createElement('button');
+    pager.id = 'historyPager';
+    pager.className = 'history-pager';
+    pager.onclick = () => loadHistory({ older: true });
+    chatEl.insertBefore(pager, chatEl.firstElementChild);
+  }
+  pager.textContent = historyPage.loading ? '加载中...' : '加载更早记录';
+  pager.disabled = historyPage.loading;
+}
+
+async function loadHistory({ older = false } = {}) {
+  if (historyPage.loading) return;
+  historyPage.loading = true;
+  updateHistoryPager();
+  const prevHeight = chatEl.scrollHeight;
+  const prevTop = chatEl.scrollTop;
+  try {
+    const params = new URLSearchParams({ limit: String(HISTORY_PAGE_SIZE) });
+    if (currentSessionId) params.set('sessionId', currentSessionId);
+    if (older && historyPage.nextBefore !== null) params.set('before', String(historyPage.nextBefore));
+    const { history, sessionId, page } = await fetch(`/api/history?${params.toString()}`).then(r => r.json());
+    if (sessionId) currentSessionId = sessionId;
+    if (history && history.length) {
+      if (older) {
+        history.slice().reverse().forEach(h => renderHistoryEntry(h, true));
+        chatEl.scrollTop = prevTop + (chatEl.scrollHeight - prevHeight);
+      } else {
+        history.forEach(h => renderHistoryEntry(h, false));
+        scrollChat();
+      }
+    }
+    historyPage.hasMore = Boolean(page?.hasMore);
+    historyPage.nextBefore = page?.nextBefore ?? null;
+  } catch {
+    // Chat still works if history cannot be loaded.
+  } finally {
+    historyPage.loading = false;
+    updateHistoryPager();
+  }
+}
+
 (async function init() {
   loadStatus();
   loadTasks();

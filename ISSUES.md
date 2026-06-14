@@ -244,3 +244,11 @@
 - **解法**: 移除 Hub `对比` tab 和页面内差距说明；差距只保留在 docs。`GET /api/skills` 支持 `text/agent/phase` 参数，返回命中的 skill 和 prompt preview；plan/dispatch 时只注入命中的 skill 摘要。
 - **教训**: 产品界面只放可操作状态，架构差距和技术评估放文档；Skills 先做轻量按需注入，再升级成完整文件级渐进加载。
 - **标签**: `skills`, `ux`, `progressive-loading`, `lesson:对比进文档能力进流程`
+
+### IMP-017: P2 交互包 - Lessons / agent 执行态 / 历史分页 [ux]
+
+- **位置**: `server.mjs`, `web/app.html`, `web/app.css`, `web/app.js`
+- **问题**: lessons 只有 API 没有可视化入口；顶部 agent pill 只能显示可用性，无法感知当前谁在执行；聊天历史一次性加载最近记录，缺少“更早记录”的渐进入口。
+- **解法**: Hub 新增 `Lessons` tab，读取 `/api/lessons` 展示失败经验并可跳到相关任务；顶部 agent pill 新增 `busy` 状态，chat/plan/dispatch 生命周期自动高亮当前 agent；`GET /api/history` 支持 `limit/before`，前端顶部按钮按页 prepend 更早消息并保持滚动位置。
+- **教训**: P2 交互优先补“可见状态”和“可追溯入口”，比继续加架构能力更能提升当前 MVP 的日常可用性。
+- **标签**: `ux`, `lessons`, `history`, `status`, `lesson:先让系统状态可见`

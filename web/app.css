@@ -400,6 +400,58 @@ body {
 .avatar.kimi-av  { background: #fef3c7; color: #b45309; }
 .avatar.system-av{ background: var(--surface2); color: var(--muted); font-size: 13px; }
 
+/* Agent avatar with image support */
+.agent-avatar {
+  width: 32px; height: 32px; border-radius: 50%;
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: 2px solid #888;
+  overflow: hidden;
+  background: var(--surface2);
+}
+.agent-avatar img {
+  width: 100%; height: 100%;
+  object-fit: cover;
+}
+
+/* Avatar upload UI */
+.avatar-upload-area {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
+}
+.avatar-preview {
+  width: 48px; height: 48px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--surface2);
+  font-size: 20px;
+}
+.avatar-preview img {
+  width: 100%; height: 100%;
+  object-fit: cover;
+}
+.avatar-upload-btn {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.avatar-upload-btn:hover {
+  background: var(--surface2);
+  border-color: var(--accent);
+}
+.avatar-upload-btn:active {
+  transform: scale(0.97);
+}
+
 .bubble {
   max-width: 100%;
   padding: 10px 14px;
@@ -1836,18 +1888,27 @@ body {
   background: var(--surface2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 14px;
+  padding: 16px;
+  margin-bottom: 16px;
+  box-shadow: 0 1px 3px rgba(100,60,20,.04);
 }
+.agent-card:last-child { margin-bottom: 0; }
+.agent-card + .agent-card { margin-top: 4px; }
 .agent-remove-btn {
-  margin-top: 8px;
-  padding: 5px 10px;
+  margin-top: 12px;
+  padding: 6px 12px;
   border: 1px solid var(--red);
   background: var(--red-soft);
   color: var(--red);
   border-radius: 6px;
   cursor: pointer;
   font-size: 12px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+.agent-remove-btn:hover { background: var(--red); color: #fff; }
 .agent-remove-btn:disabled { display: none; }
 
 /* 角色卡 */
@@ -2299,5 +2360,131 @@ details[open] .role-card-summary::before { transform: rotate(90deg); }
     align-items: flex-start;
   }
 }
+
+/* ── 对话框样式 ── */
+.dialog-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+}
+
+.dialog-box {
+  background: var(--bg);
+  border-radius: 12px;
+  padding: 24px;
+  min-width: 320px;
+  max-width: 480px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+}
+
+.dialog-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 16px;
+  color: var(--text);
+}
+
+.dialog-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.dialog-choice-btn {
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+  text-align: left;
+}
+
+.dialog-choice-btn:hover {
+  background: var(--surface2);
+  border-color: var(--accent);
+}
+
+.dialog-cancel-btn {
+  width: 100%;
+  padding: 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.dialog-cancel-btn:hover {
+  background: var(--surface2);
+  color: var(--text);
+}
+
+/* 表单式对话框 */
+.dialog-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+.dialog-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+}
+.dialog-field > span {
+  font-weight: 500;
+}
+.dialog-input {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color .15s;
+}
+.dialog-input:focus { border-color: var(--accent); }
+.dialog-hint {
+  font-size: 11px;
+  color: var(--muted);
+}
+.dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.dialog-actions .dialog-cancel-btn {
+  width: auto;
+  padding: 8px 16px;
+}
+.dialog-confirm-btn {
+  padding: 8px 18px;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity .15s;
+}
+.dialog-confirm-btn:hover { opacity: .88; }
 
 .hidden { display: none !important; }

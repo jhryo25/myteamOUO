@@ -1,6 +1,6 @@
 # myteam MVP 技能清单
-# 这个文件只描述“什么技能适合交给哪些 agent”，不包含密钥。
-# 后续可以把这里升级成真正的按需提示词加载系统。
+# 这个文件只描述”什么技能适合交给哪些 agent”，不包含密钥。
+# next 字段对齐 clowder-ai manifest.yaml 的 skill-to-skill 流转链
 
 skills:
   - name: task-planning
@@ -9,6 +9,7 @@ skills:
     trigger: 用户输入目标，需要拆成可验收任务
     description: 把目标拆成 3-7 个小任务，并写清步骤、验收标准和建议 agent。
     prompt: 只输出可验证的小任务，优先包含步骤、验收标准、建议 agent 和失败时的下一步。
+    next: [cli-execution]
     mounts:
       controller: true
       worker: false
@@ -23,6 +24,7 @@ skills:
     trigger: 需要调用本机 CLI、执行任务或保存运行记录
     description: 调用可启动的 agent CLI，记录 stdout、stderr、状态和失败原因。
     prompt: 执行时必须说明改了什么、产出在哪里、如何验证；失败时必须给出原因。
+    next: [review-gate]
     mounts:
       controller: false
       worker: true
@@ -36,7 +38,8 @@ skills:
     load: progressive
     trigger: worker 输出完成后，需要判断是否真的通过验收
     description: 检查任务输出、证据、风险和缺口；不通过时生成返工建议。
-    prompt: 对照验收标准检查输出证据；证据不足时要求返工，不把“完成了”当成完成。
+    prompt: 对照验收标准检查输出证据；证据不足时要求返工，不把”完成了”当成完成。
+    next: [lesson-capture]
     mounts:
       controller: true
       worker: false
@@ -51,6 +54,7 @@ skills:
     trigger: 任务失败、返工或出现新的踩坑经验
     description: 把失败原因转成结构化 lessons，只把确认过的经验写入长期记忆。
     prompt: 只记录已经验证的失败原因和改进经验，不记录猜测或未确认结论。
+    next: [task-planning]
     mounts:
       controller: true
       worker: false
@@ -65,6 +69,7 @@ skills:
     trigger: 对比 clowder-ai 和 myteam 的 HTML、交互或信息架构
     description: 识别 Hub、任务面板、消息操作、状态提示等 UI 差距，并提出 MVP 可落地改动。
     prompt: 只提出能在 MVP 内落地的 UI 改动；差距结论写入文档，不塞进主界面。
+    next: [cli-execution, review-gate]
     mounts:
       controller: true
       worker: true

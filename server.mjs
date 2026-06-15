@@ -7,7 +7,7 @@ import { resolve, basename, extname } from 'path';
 import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
-import { loadEnv, buildCliConfig, invokeAgent, extractJson, PARSERS, validatePlanResult, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, AGENT_KEYS, buildSpawnCommand, checkAgentLaunchable, formatLaunchError, readAgentRegistry, writeAgentRegistry, sanitizeAgentKey, buildRoleCard } from './agent-utils.mjs';
+import { loadEnv, buildCliConfig, invokeAgent, extractJson, PARSERS, validatePlanResult, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, buildReviewPrompt, AGENT_KEYS, buildSpawnCommand, checkAgentLaunchable, formatLaunchError, readAgentRegistry, writeAgentRegistry, sanitizeAgentKey, buildRoleCard, validatePhaseTransition, getNextPhase } from './agent-utils.mjs';
 
 let ENV = loadEnv();
 let CLI_CONFIG = buildCliConfig(ENV);
@@ -83,16 +83,69 @@ async function resolveRunnableAgent(preferredAgent) {
 }
 
 function appendLesson(task, error) {
+  // 自动 pattern 分类（对齐 clowder-ai self-evolution Mode B）
+  const errMsg = String(error?.message || error || '');
+  let pattern = 'unknown';
+  if (/missing path|未配置/i.test(errMsg)) pattern = 'agent-not-configured';
+  else if (/exit code/i.test(errMsg)) pattern = 'cli-exit-error';
+  else if (/timeout/i.test(errMsg)) pattern = 'timeout';
+  else if (/ECONNREFUSED|ECONNRESET|stream disconnected/i.test(errMsg)) pattern = 'connection-lost';
+  else if (/context length|token/i.test(errMsg)) pattern = 'context-overflow';
+  else if (/Reconnecting/i.test(errMsg)) pattern = 'stream-disconnect';
+  else if (/EPERM|EACCES/i.test(errMsg)) pattern = 'permission-denied';
+  else if (/parse_failed|JSON/i.test(errMsg)) pattern = 'output-parse-failed';
+
   const lesson = {
     id: randomUUID().slice(0, 8),
     task_id: task.id,
     task_title: task.title,
     goal: task.goal,
     agent: task.agent,
-    error: error.message,
+    error: errMsg.slice(0, 500),
+    pattern,
     timestamp: new Date().toISOString(),
   };
   appendFileSync(LESSONS_FILE, JSON.stringify(lesson) + '\n', 'utf8');
+  return lesson;
+}
+
+// 检测重复 pattern（对齐 clowder-ai self-evolution：同类错误 ≥2 次触发改进提案）
+function detectPatterns() {
+  const lessons = readJsonl(LESSONS_FILE);
+  const byPattern = {};
+  for (const l of lessons) {
+    const p = l.pattern || 'unknown';
+    if (!byPattern[p]) byPattern[p] = [];
+    byPattern[p].push(l);
+  }
+
+  const patterns = Object.entries(byPattern)
+    .map(([pattern, items]) => ({
+      pattern,
+      count: items.length,
+      agents: [...new Set(items.map(i => i.agent))],
+      first: items[0]?.timestamp,
+      last: items[items.length - 1]?.timestamp,
+      sample: items[0]?.error?.slice(0, 200) || '',
+      needsProposal: items.length >= 2,
+    }))
+    .sort((a, b) => b.count - a.count);
+
+  return patterns;
+}
+
+// 生成改进提案（对齐 clowder-ai Evolution Proposal 5 槽模板）
+function generateProposal(pattern) {
+  const lessons = readJsonl(LESSONS_FILE).filter(l => l.pattern === pattern.pattern);
+  return {
+    id: `EP-${randomUUID().slice(0, 6)}`,
+    trigger: `同类错误 "${pattern.pattern}" 出现 ${pattern.count} 次`,
+    evidence: lessons.slice(0, 5).map(l => `${l.timestamp} [${l.agent}] ${l.task_title}: ${l.error?.slice(0, 100)}`),
+    root_cause: `pattern=${pattern.pattern}，涉及 agent: ${pattern.agents.join(', ')}`,
+    lever: `最小杠杆：检查 ${pattern.agents.join('/')} 的配置和连接稳定性`,
+    verify: `修复后同类错误不再出现`,
+    created_at: new Date().toISOString(),
+  };
 }
 
 function parseScalar(value) {
@@ -107,6 +160,7 @@ function readSkills() {
   const skills = [];
   let current = null;
   let inMounts = false;
+  let inNext = false;
 
   for (const raw of readFileSync(SKILLS_FILE, 'utf8').split('\n')) {
     const line = raw.replace(/\r$/, '');
@@ -115,20 +169,40 @@ function readSkills() {
 
     const item = trimmed.match(/^-\s+name:\s*(.+)$/);
     if (item) {
-      current = { name: parseScalar(item[1]), mounts: {} };
+      current = { name: parseScalar(item[1]), mounts: {}, next: [] };
       skills.push(current);
       inMounts = false;
+      inNext = false;
       continue;
     }
 
     if (!current) continue;
     if (trimmed === 'mounts:') {
       inMounts = true;
+      inNext = false;
+      continue;
+    }
+    if (trimmed === 'next:') {
+      inNext = true;
+      inMounts = false;
+      continue;
+    }
+
+    // 处理 next 数组项
+    if (inNext && trimmed.startsWith('- ')) {
+      const val = trimmed.slice(2).trim();
+      current.next.push(parseScalar(val));
       continue;
     }
 
     const kv = trimmed.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
     if (!kv) continue;
+    
+    // 如果进入新字段，退出 next 模式
+    if (inNext && !trimmed.startsWith('- ')) {
+      inNext = false;
+    }
+    
     if (inMounts) current.mounts[kv[1]] = Boolean(parseScalar(kv[2]));
     else current[kv[1]] = parseScalar(kv[2]);
   }
@@ -182,6 +256,17 @@ function buildSkillContext(selected) {
     const prompt = skill.prompt || skill.description || skill.trigger || '按该技能边界完成任务';
     return `${index + 1}. ${skill.name}（${skill.category || 'general'}）：${prompt}`;
   }).join('\n');
+}
+
+// 获取指定 skill 的下一阶段推荐 skill（对齐 clowder-ai manifest.yaml 的 next 链）
+function getNextSkills(currentSkillName) {
+  const skills = readSkills();
+  const current = skills.find(s => s.name === currentSkillName);
+  if (!current || !current.next || !current.next.length) return [];
+  
+  return current.next
+    .map(name => skills.find(s => s.name === name))
+    .filter(Boolean);
 }
 
 function appendInvocation(record) {
@@ -493,8 +578,8 @@ function sseSend(res, event, data) {
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-// ── 活跃子进程追踪（用于 abort） ──────────────────────────────
-const activeChildren = new Map(); // id → { child, sessionId, clientRunId, aborted }
+// ── 活跃子进程追踪（用于 abort + 刷新恢复） ──────────────────────────────
+const activeChildren = new Map(); // id → { child, sessionId, clientRunId, aborted, agentKey, mode, taskTitle, startedAt }
 let childIdSeq = 0;
 
 function abortChildren({ sessionId = '', clientRunId = '' } = {}) {
@@ -572,7 +657,16 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', { skipRoleCard = fa
     }
 
     const cid = ++childIdSeq;
-    const childRecord = { child, sessionId, clientRunId, aborted: false };
+    const childRecord = { 
+      child, 
+      sessionId, 
+      clientRunId, 
+      aborted: false,
+      agentKey,
+      mode: label.startsWith('task-chunk:') ? 'dispatch' : (label === 'chunk' ? 'chat' : label),
+      taskTitle: label.startsWith('task-chunk:') ? label.slice('task-chunk:'.length) : null,
+      startedAt: new Date().toISOString(),
+    };
     activeChildren.set(cid, childRecord);
 
     child.on('error', (err) => {
@@ -759,6 +853,26 @@ async function handle(req, res) {
     } catch {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: '图片路径不正确' }));
+    }
+  }
+
+  // 头像静态文件服务：/avatars/:filename → .myteam/avatars/:filename
+  if (req.method === 'GET' && pathname.startsWith('/avatars/')) {
+    try {
+      const fileName = basename(decodeURIComponent(pathname.slice('/avatars/'.length)));
+      const avatarsDir = '.myteam/avatars';
+      const filePath = resolve(avatarsDir, fileName);
+      const avatarRoot = resolve(avatarsDir);
+      if (!filePath.startsWith(avatarRoot) || !existsSync(filePath)) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: '头像不存在' }));
+      }
+      const type = MIME[extname(filePath).toLowerCase()] || 'application/octet-stream';
+      res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'private, max-age=86400' });
+      return res.end(readFileSync(filePath));
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: '头像路径不正确' }));
     }
   }
 
@@ -1005,6 +1119,26 @@ async function handle(req, res) {
     return res.end(JSON.stringify({ agents, workspace: currentWorkspace() }));
   }
 
+  // GET /api/running — 返回当前活跃的子进程信息（用于刷新后恢复状态）
+  if (req.method === 'GET' && pathname === '/api/running') {
+    const running = [];
+    for (const [cid, record] of activeChildren) {
+      if (!record.aborted) {
+        running.push({
+          cid,
+          sessionId: record.sessionId,
+          clientRunId: record.clientRunId,
+          agentKey: record.agentKey,
+          mode: record.mode,
+          taskTitle: record.taskTitle,
+          startedAt: record.startedAt,
+        });
+      }
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ running }));
+  }
+
   // GET /api/agents — 返回当前 agent 路径配置（脱敏显示）
   if (req.method === 'GET' && pathname === '/api/agents') {
     const result = await getAgentStatuses();
@@ -1024,7 +1158,7 @@ async function handle(req, res) {
       return res.end(JSON.stringify({ error: `agent ${agentKey} 不存在` }));
     }
     // 只允许更新角色卡字段和基础展示字段
-    const allowed = ['label', 'emoji', 'desc', 'baseUrl', 'apiKey', 'model', 'roleDescription', 'personality', 'strengths', 'restrictions'];
+    const allowed = ['label', 'emoji', 'desc', 'baseUrl', 'apiKey', 'model', 'roleDescription', 'personality', 'strengths', 'restrictions', 'nickname', 'avatar', 'color'];
     for (const field of allowed) {
       if (body[field] !== undefined) current[idx][field] = body[field];
     }
@@ -1032,6 +1166,53 @@ async function handle(req, res) {
     reloadAgentConfig();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, agent: current[idx] }));
+  }
+
+  // POST /api/agents/:key/avatar — 上传头像
+  const avatarUploadMatch = pathname.match(/^\/api\/agents\/([^\/]+)\/avatar$/);
+  if (req.method === 'POST' && avatarUploadMatch) {
+    const agentKey = decodeURIComponent(avatarUploadMatch[1]);
+    const current = readAgentRegistry(ENV);
+    const idx = current.findIndex(a => a.key === agentKey);
+    if (idx === -1) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: `agent ${agentKey} 不存在` }));
+    }
+
+    const body = await readBody(req);
+    const { data, ext } = body;
+    if (!data || typeof data !== 'string') {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: '缺少 data 字段（base64 编码的图片）' }));
+    }
+
+    // 解析 base64
+    const match = data.match(/^data:image\/(png|jpe?g|gif|webp);base64,(.+)$/);
+    if (!match) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'data 必须是 data:image/xxx;base64,... 格式' }));
+    }
+    const [, imgType, base64Data] = match;
+    const buffer = Buffer.from(base64Data, 'base64');
+    if (buffer.length > 2 * 1024 * 1024) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: '图片大小不能超过 2MB' }));
+    }
+
+    // 保存到 .myteam/avatars/:key.ext
+    const avatarsDir = '.myteam/avatars';
+    mkdirSync(avatarsDir, { recursive: true });
+    const fileName = `${agentKey}.${imgType === 'jpeg' ? 'jpg' : imgType}`;
+    const filePath = resolve(avatarsDir, fileName);
+    writeFileSync(filePath, buffer);
+
+    // 更新 agent.avatar
+    current[idx].avatar = `/avatars/${fileName}`;
+    writeAgentRegistry(current);
+    reloadAgentConfig();
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, avatar: current[idx].avatar, agent: current[idx] }));
   }
 
   // POST /api/agents { codex?: string, claude?: string, kimi?: string } — 写回 .env，实时重载
@@ -1132,17 +1313,24 @@ async function handle(req, res) {
     const text = url.searchParams.get('text') || '';
     const agent = url.searchParams.get('agent') || '';
     const phase = url.searchParams.get('phase') || 'run';
+    const currentSkill = url.searchParams.get('current') || '';
     const selected = selectSkills({ text, agent, phase });
+    
+    // 如果指定了 current skill，返回推荐的下一阶段 skills
+    const nextSkills = currentSkill ? getNextSkills(currentSkill) : [];
+    
     const summary = {
       total: skills.length,
       categories: [...new Set(skills.map(s => s.category).filter(Boolean))],
       agents: ['controller', 'worker', 'reviewer', ...agentKeys()],
       selected: selected.length,
+      nextRecommended: nextSkills.length,
     };
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({
       skills,
       selected,
+      nextSkills,
       summary,
       contextPreview: buildSkillContext(selected),
     }));
@@ -1283,6 +1471,7 @@ async function handle(req, res) {
         reviewed_at: now,
         reviewer: 'human',
         test_status: 'manual_passed',
+        phase: 'done', // SOP: gate → done (最终完成)
       });
     } else {
       Object.assign(task, {
@@ -1298,9 +1487,36 @@ async function handle(req, res) {
         error: null,
         started_at: null,
         finished_at: null,
+        phase: 'impl', // SOP: rework 回退到 impl
       });
     }
 
+    writeAllTasks(tasks);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, task }));
+  }
+
+  // POST /api/tasks/:id/phase — 手动推进 SOP 阶段（用于自动流程未覆盖的场景）
+  const phaseMatch = pathname.match(/^\/api\/tasks\/([^\/]+)\/phase$/);
+  if (req.method === 'POST' && phaseMatch) {
+    const taskId = decodeURIComponent(phaseMatch[1]);
+    const body = await readBody(req);
+    const targetPhase = body.phase;
+    const tasks = readTasks();
+    const task = tasks.find(t => t.id === taskId);
+    if (!task) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: '任务不存在' }));
+    }
+
+    const validation = validatePhaseTransition(task, targetPhase);
+    if (!validation.ok) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: validation.reason }));
+    }
+
+    task.phase = targetPhase;
+    task.phase_updated_at = new Date().toISOString();
     writeAllTasks(tasks);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, task }));
@@ -1333,6 +1549,49 @@ async function handle(req, res) {
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ lessons }));
+  }
+
+  // GET /api/lessons/patterns — 返回 pattern 分析和改进提案（对齐 clowder-ai self-evolution）
+  if (req.method === 'GET' && pathname === '/api/lessons/patterns') {
+    const patterns = detectPatterns();
+    const proposals = patterns
+      .filter(p => p.needsProposal)
+      .map(p => generateProposal(p));
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ patterns, proposals }));
+  }
+
+  // POST /api/lessons/promote — 晋升有效经验到 memory.md（对齐 clowder-ai 知识成熟度阶梯）
+  if (req.method === 'POST' && pathname === '/api/lessons/promote') {
+    const body = await readBody(req);
+    const lessonId = body.lessonId;
+    const insight = (body.insight || '').trim();
+    
+    if (!lessonId || !insight) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'lessonId 和 insight 必填' }));
+    }
+
+    const lessons = readJsonl(LESSONS_FILE);
+    const lesson = lessons.find(l => l.id === lessonId);
+    if (!lesson) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'lesson 不存在' }));
+    }
+
+    // 追加到 memory.md
+    const memoryFile = '.myteam/memory.md';
+    const entry = `\n## ${lesson.task_title} (${lesson.pattern})\n\n${insight}\n\n- 来源: ${lesson.timestamp}\n- Agent: ${lesson.agent}\n- 原始错误: ${lesson.error?.slice(0, 200)}\n`;
+    appendFileSync(memoryFile, entry, 'utf8');
+
+    // 标记 lesson 为已晋升
+    lesson.promoted = true;
+    lesson.promoted_at = new Date().toISOString();
+    lesson.promoted_insight = insight;
+    writeFileSync(LESSONS_FILE, lessons.map(l => JSON.stringify(l)).join('\n') + '\n', 'utf8');
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, lesson }));
   }
 
   // POST /api/plan { goal, agent, sessionId?, attachments? } — SSE 流式返回
@@ -1394,10 +1653,15 @@ async function handle(req, res) {
           session_id: session.id, // 关联 session
           goal: data.goal || goal,
           title: t.title ?? `任务 ${i + 1}`,
+          // 五件套（对齐 clowder-ai cross-cat-handoff）
+          why: t.why ?? '',
+          tradeoff: t.tradeoff ?? '',
+          open_questions: Array.isArray(t.open_questions) ? t.open_questions : [],
           steps: t.steps ?? [],
           accept: t.accept ?? '',
           agent: t.agent ?? agentKey,
           status: 'pending',
+          phase: 'pending', // SOP 状态机初始阶段
         });
       });
       const taskSummaries = data.tasks.map((t, i) => ({
@@ -1406,6 +1670,9 @@ async function handle(req, res) {
         agent: t.agent ?? agentKey,
         accept: t.accept ?? '',
         steps: t.steps ?? [],
+        why: t.why ?? '',
+        tradeoff: t.tradeoff ?? '',
+        open_questions: Array.isArray(t.open_questions) ? t.open_questions : [],
       }));
       // 把 plan 结果写入 session 历史，刷新后能复现
       session.history.push({
@@ -1463,6 +1730,69 @@ async function handle(req, res) {
 
     let done = 0, failed = 0;
 
+    // 自动 reviewer：对齐 clowder-ai cross-model review 铁律
+    // 选一个 != executor 的可用 agent 做静默调用，解析 JSON 写回 task。
+    // 失败/无可用 reviewer 时降级为 review_status=skipped，不影响主流程。
+    async function runAutoReview(task, executorAgent, executionResult) {
+      try {
+        const statuses = await getAgentStatuses();
+        const reviewer = statuses.find(a => a.available && a.key !== executorAgent);
+        if (!reviewer) {
+          patchTask(task.id, {
+            review_status: 'skipped',
+            review_note: '没有可用的 != executor 的 reviewer agent',
+            reviewer: null,
+            reviewed_at: new Date().toISOString(),
+          });
+          sseSend(res, 'task-review-skip', { id: task.id, reason: 'no-reviewer' });
+          return;
+        }
+        sseSend(res, 'task-review-start', { id: task.id, reviewer: reviewer.key });
+        const reviewPrompt = buildReviewPrompt(task, executorAgent, executionResult);
+        // 静默调用：reviewer 不流式发到前端，避免和 executor 输出混在一起
+        const raw = await invokeAgent(CLI_CONFIG, reviewer.key, reviewPrompt, { silent: true, timeoutMs: 5 * 60 * 1000 });
+        const data = extractJson(raw || '');
+        if (!data || typeof data !== 'object' || !['pass', 'rework'].includes(data.verdict)) {
+          patchTask(task.id, {
+            review_status: 'parse_failed',
+            review_note: 'reviewer 输出无法解析为有效 JSON',
+            reviewer: reviewer.key,
+            reviewed_at: new Date().toISOString(),
+            review_raw: String(raw || '').slice(0, 600),
+          });
+          sseSend(res, 'task-review-failed', { id: task.id, reviewer: reviewer.key, reason: 'parse_failed' });
+          return;
+        }
+        const findings = Array.isArray(data.findings) ? data.findings.map(String).filter(Boolean) : [];
+        patchTask(task.id, {
+          review_status: data.verdict,        // 'pass' | 'rework'
+          review_severity: data.severity || 'none',
+          review_score: Number.isFinite(Number(data.score)) ? Number(data.score) : null,
+          review_findings: findings,
+          review_note: String(data.suggestion || '').slice(0, 500),
+          reviewer: reviewer.key,
+          reviewed_at: new Date().toISOString(),
+          phase: data.verdict === 'pass' ? 'review' : 'impl', // SOP: impl → review (pass) or back to impl (rework)
+        });
+        sseSend(res, 'task-review-done', {
+          id: task.id,
+          reviewer: reviewer.key,
+          verdict: data.verdict,
+          severity: data.severity || 'none',
+          score: data.score ?? null,
+          findings,
+          suggestion: data.suggestion || '',
+        });
+      } catch (err) {
+        patchTask(task.id, {
+          review_status: 'failed',
+          review_note: `reviewer 调用失败：${err.message}`,
+          reviewed_at: new Date().toISOString(),
+        });
+        sseSend(res, 'task-review-failed', { id: task.id, error: err.message });
+      }
+    }
+
     // 执行单个任务并返回结果文本（用于 worklist 链检测）
     async function executeTask(task, depth = 0, chainHistory = []) {
       // 优先用 agentOverride（全局覆盖），其次用任务分配的 agent（需可用），最后 fallback 到第一个可用 agent
@@ -1491,10 +1821,30 @@ async function handle(req, res) {
           finished_at: new Date().toISOString(),
           executed_by: agentKey,
           result: result?.slice(0, 2000),
+          phase: 'impl', // SOP: pending → impl
         });
         const summary = result ? result.slice(0, 200) : '';
         sseSend(res, 'task-done', { id: task.id, title: task.title, agent: agentKey, summary });
         done++;
+
+        // 推荐下一阶段 skill（对齐 clowder-ai manifest.yaml 的 next 链）
+        const currentSkills = selectSkills({ text: skillText, agent: agentKey, phase: 'run' });
+        if (currentSkills.length > 0) {
+          const nextSkills = getNextSkills(currentSkills[0].name);
+          if (nextSkills.length > 0) {
+            sseSend(res, 'skill-next-recommend', {
+              id: task.id,
+              currentSkill: currentSkills[0].name,
+              nextSkills: nextSkills.map(s => ({ name: s.name, category: s.category, prompt: s.prompt })),
+            });
+          }
+        }
+
+        // 跨 agent 自动 review（对齐 clowder-ai cross-model review 铁律）
+        // 链式 worklist 任务（chain_depth > 0）跳过 review，避免审查链爆炸
+        if (depth === 0) {
+          await runAutoReview({ ...task, ...readTasks().find(t => t.id === task.id) }, agentKey, result);
+        }
 
         // A2A Worklist：扫描回复中的 @mention，自动创建并执行链式任务
         if (result && depth < WORKLIST_MAX_DEPTH) {

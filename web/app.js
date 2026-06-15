@@ -308,12 +308,8 @@ function addUserBubble(text, { prepend = false, scroll = true, attachments = [] 
 
 function startAgentBubble(agentKey, sessionId = currentSessionId) {
   hideWelcome();
-  const avatarMap = {
-    codex:  { cls: 'codex-av',  emoji: '🤖', name: 'Codex' },
-    claude: { cls: 'claude-av', emoji: '✨', name: 'Claude' },
-    kimi:   { cls: 'kimi-av',   emoji: '🌙', name: 'Kimi' },
-  };
-  const a = avatarMap[agentKey] || { cls: 'system-av', emoji: '●', name: agentKey };
+  const meta = agentMeta(agentKey);
+  const displayName = meta.nickname || meta.label;
 
   const uid = `bubble-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const thinkUid = `think-${uid}`;
@@ -323,9 +319,9 @@ function startAgentBubble(agentKey, sessionId = currentSessionId) {
   row.className = 'bubble-row';
   row.dataset.sessionId = sessionId || '';
   row.innerHTML = `
-    <div class="avatar ${a.cls}">${a.emoji}</div>
+    ${renderAgentAvatar(agentKey)}
     <div class="bubble-content-wrap">
-      <div class="bubble-name">${a.name} <span class="bubble-time" id="${timeUid}"></span></div>
+      <div class="bubble-name">${esc(displayName)} <span class="bubble-time" id="${timeUid}"></span></div>
       <div class="thinking-panel hidden" id="${thinkUid}">
         <button class="thinking-toggle" type="button" aria-expanded="false">
           <span class="thinking-chevron">›</span>
@@ -1766,7 +1762,24 @@ function agentMeta(agentKey) {
     label: dynamic?.label || fallback.label || agentKey,
     emoji: dynamic?.emoji || fallback.emoji || '●',
     desc: dynamic?.desc || fallback.desc || '',
+    nickname: dynamic?.nickname || '',
+    avatar: dynamic?.avatar || '',
+    color: dynamic?.color || { primary: '#888', secondary: '#ddd' },
   };
+}
+
+function renderAgentAvatar(agentKey) {
+  const meta = agentMeta(agentKey);
+  const hasImage = meta.avatar && meta.avatar.startsWith('/avatars/');
+  const ringColor = meta.color?.primary || '#888';
+  const displayName = meta.nickname || meta.label;
+  
+  if (hasImage) {
+    return `<div class="agent-avatar" style="border-color:${ringColor}">
+      <img src="${meta.avatar}" alt="${esc(displayName)}" />
+    </div>`;
+  }
+  return `<div class="avatar ${agentKey}-av" style="border-color:${ringColor}">${meta.emoji}</div>`;
 }
 
 function openDrawer() {
@@ -2280,7 +2293,7 @@ hubTabs.querySelectorAll('.hub-tab').forEach(btn => {
   };
 });
 
-async function saveAgentList(agents) {
+async function saveAgentList(agents, { scrollToKey = null } = {}) {
   const res = await fetch('/api/agents', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -2290,12 +2303,15 @@ async function saveAgentList(agents) {
   if (!res.ok) throw new Error(data.error || '保存 agent 失败');
   agentConfigList = data.agents || agents;
   await loadStatus();
-  await loadAgentConfig();
+  await loadAgentConfig({ scrollToKey });
   if (!hubDrawer.classList.contains('hidden')) await loadHub();
   return data;
 }
 
-async function loadAgentConfig() {
+async function loadAgentConfig({ scrollToKey = null } = {}) {
+  // 记住当前滚动位置，重渲染后恢复
+  const drawerBody = agentFormEl.closest('.drawer-body');
+  const prevScroll = drawerBody?.scrollTop || 0;
   agentFormEl.innerHTML = '<div style="color:var(--muted);font-size:13px;">加载中…</div>';
   try {
     const { agents, workspace } = await fetch('/api/agents').then(r => r.json());
@@ -2372,6 +2388,30 @@ async function loadAgentConfig() {
                 ${ROLE_TEMPLATES.map(t => `<option value="${esc(t.key)}">${esc(t.label)}</option>`).join('')}
               </select>
             </div>
+            <label>昵称 <span style="font-size:11px;color:var(--muted);">（不填则使用显示名称）</span>
+              <input class="role-input" data-agent="${a.key}" data-field="nickname"
+                value="${esc(a.nickname || '')}" placeholder="${esc(a.label || a.key)}">
+            </label>
+            <label>头像
+              <div class="avatar-upload-area">
+                <div class="avatar-preview" data-agent="${a.key}">
+                  ${a.avatar ? `<img src="${esc(a.avatar)}" alt="avatar">` : meta.emoji}
+                </div>
+                <input type="file" class="avatar-upload-input" data-agent="${a.key}" accept="image/*" style="display:none;">
+                <button type="button" class="avatar-upload-btn" data-agent="${a.key}">上传图片</button>
+                ${a.avatar ? `<button type="button" class="avatar-remove-btn" data-agent="${a.key}" style="font-size:11px;color:var(--red);">移除</button>` : ''}
+              </div>
+            </label>
+            <label>主题色
+              <div style="display:flex;gap:8px;align-items:center;">
+                <input type="color" class="color-input" data-agent="${a.key}" data-field="color.primary"
+                  value="${a.color?.primary || '#888888'}" style="width:50px;height:32px;border:1px solid var(--border);border-radius:4px;">
+                <span style="font-size:11px;color:var(--muted);">主色</span>
+                <input type="color" class="color-input" data-agent="${a.key}" data-field="color.secondary"
+                  value="${a.color?.secondary || '#dddddd'}" style="width:50px;height:32px;border:1px solid var(--border);border-radius:4px;">
+                <span style="font-size:11px;color:var(--muted);">辅色</span>
+              </div>
+            </label>
             <label>角色描述
               <input class="role-input" data-agent="${a.key}" data-field="roleDescription"
                 value="${esc(a.roleDescription || '')}" placeholder="例如：任务规划、代码审查、自迭代协调者">
@@ -2415,8 +2455,11 @@ async function loadAgentConfig() {
       if (a.removable !== false) {
         const removeBtn = document.createElement('button');
         removeBtn.className = 'agent-remove-btn';
-        removeBtn.textContent = `删除 @${a.key}`;
+        const displayName = a.nickname || a.label || a.key;
+        removeBtn.textContent = `删除 ${displayName}`;
+        removeBtn.title = `key: @${a.key}`;
         removeBtn.onclick = async () => {
+          if (!confirm(`确定删除 ${displayName} (@${a.key})？`)) return;
           agentConfigList = agentConfigList.filter(agent => agent.key !== a.key);
           await saveAgentList(agentConfigList);
         };
@@ -2520,18 +2563,26 @@ async function loadAgentConfig() {
           const el = agentFormEl.querySelector(`.role-input[data-agent="${key}"][data-field="${field}"]`);
           return el ? el.value.trim() : '';
         };
+        const getColor = (field) => {
+          const el = agentFormEl.querySelector(`.color-input[data-agent="${key}"][data-field="${field}"]`);
+          return el ? el.value : '';
+        };
         const strengths = getField('strengths').split(/[,，]/).map(s => s.trim()).filter(Boolean);
         const restrictions = getField('restrictions').split(/[,，]/).map(s => s.trim()).filter(Boolean);
+        const colorPrimary = getColor('color.primary');
+        const colorSecondary = getColor('color.secondary');
         btn.textContent = '保存中…';
         try {
           await fetch(`/api/agents/${encodeURIComponent(key)}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
+              nickname: getField('nickname'),
               roleDescription: getField('roleDescription'),
               personality: getField('personality'),
               strengths,
               restrictions,
+              color: { primary: colorPrimary, secondary: colorSecondary },
             }),
           });
           if (tip) { tip.textContent = '✓ 已保存'; tip.style.color = 'var(--green)'; tip.classList.remove('hidden'); }
@@ -2542,34 +2593,261 @@ async function loadAgentConfig() {
         btn.textContent = '保存角色卡';
       };
     });
+
+    // 头像上传按钮
+    agentFormEl.querySelectorAll('.avatar-upload-btn').forEach(btn => {
+      btn.onclick = () => {
+        const key = btn.dataset.agent;
+        const input = agentFormEl.querySelector(`.avatar-upload-input[data-agent="${key}"]`);
+        input?.click();
+      };
+    });
+
+    // 头像文件选择
+    agentFormEl.querySelectorAll('.avatar-upload-input').forEach(input => {
+      input.onchange = async () => {
+        const key = input.dataset.agent;
+        const file = input.files?.[0];
+        if (!file) return;
+        if (file.size > 2 * 1024 * 1024) {
+          alert('图片大小不能超过 2MB');
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = async (e) => {
+          const base64 = e.target.result;
+          try {
+            const res = await fetch(`/api/agents/${encodeURIComponent(key)}/avatar`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ data: base64 }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || '上传失败');
+            // 更新预览
+            const preview = agentFormEl.querySelector(`.avatar-preview[data-agent="${key}"]`);
+            if (preview) preview.innerHTML = `<img src="${esc(data.avatar)}" alt="avatar">`;
+            // 更新 agentConfigList
+            const agent = agentConfigList.find(a => a.key === key);
+            if (agent) agent.avatar = data.avatar;
+            // 添加移除按钮
+            const uploadArea = preview?.parentElement;
+            if (uploadArea && !uploadArea.querySelector('.avatar-remove-btn')) {
+              const removeBtn = document.createElement('button');
+              removeBtn.type = 'button';
+              removeBtn.className = 'avatar-remove-btn';
+              removeBtn.dataset.agent = key;
+              removeBtn.style.cssText = 'font-size:11px;color:var(--red);';
+              removeBtn.textContent = '移除';
+              removeBtn.onclick = async () => {
+                try {
+                  await fetch(`/api/agents/${encodeURIComponent(key)}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ avatar: '' }),
+                  });
+                  if (preview) preview.innerHTML = agentMeta(key).emoji;
+                  const agent = agentConfigList.find(a => a.key === key);
+                  if (agent) agent.avatar = '';
+                  removeBtn.remove();
+                } catch (e) {
+                  alert('移除失败');
+                }
+              };
+              uploadArea.appendChild(removeBtn);
+            }
+          } catch (e) {
+            alert('上传失败：' + e.message);
+          }
+        };
+        reader.readAsDataURL(file);
+      };
+    });
+
+    // 头像移除按钮
+    agentFormEl.querySelectorAll('.avatar-remove-btn').forEach(btn => {
+      btn.onclick = async () => {
+        const key = btn.dataset.agent;
+        try {
+          await fetch(`/api/agents/${encodeURIComponent(key)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ avatar: '' }),
+          });
+          const preview = agentFormEl.querySelector(`.avatar-preview[data-agent="${key}"]`);
+          if (preview) preview.innerHTML = agentMeta(key).emoji;
+          const agent = agentConfigList.find(a => a.key === key);
+          if (agent) agent.avatar = '';
+          btn.remove();
+        } catch (e) {
+          alert('移除失败');
+        }
+      };
+    });
   } catch {
     agentFormEl.innerHTML = '<div style="color:var(--red);font-size:13px;">无法加载配置，请确认服务器正在运行。</div>';
+  }
+  // 锚定到指定卡片 or 恢复之前的滚动位置
+  if (scrollToKey) {
+    setTimeout(() => {
+      const card = agentFormEl.querySelector(`.agent-card[data-agent="${scrollToKey}"]`);
+      card?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 50);
+  } else if (drawerBody && prevScroll > 0) {
+    setTimeout(() => { drawerBody.scrollTop = prevScroll; }, 50);
   }
 }
 
 agentAddBtn.onclick = async () => {
-  const rawKey = prompt('请输入新 agent 的 key，例如 qwen 或 gemini：');
-  const key = (rawKey || '').trim().toLowerCase().replace(/^@+/, '').replace(/[^a-z0-9_-]+/g, '-');
-  if (!key) return;
+  const availableAgents = agentConfigList.filter(a => a.path && a.available);
+  const result = await showCreateAgentDialog(availableAgents);
+  if (!result) return;
+
+  const { key, label, baseAgent, template } = result;
   if (agentConfigList.some(a => a.key === key)) {
     drawerSaveTip.textContent = `@${key} 已存在`;
     drawerSaveTip.className = 'drawer-save-tip err';
     drawerSaveTip.classList.remove('hidden');
     return;
   }
-  const label = prompt('显示名称（可以直接回车使用 key）：') || key;
-  await saveAgentList([...agentConfigList, {
+
+  // 套用角色模板字段
+  const tpl = ROLE_TEMPLATES.find(t => t.key === template) || {};
+
+  const newAgent = {
     key,
     label,
-    emoji: '●',
-    desc: '自定义 Agent',
-    path: '',
-    inputMode: 'arg',
-    argsTemplate: '-p {prompt}',
-    checkTemplate: '--help',
+    emoji: baseAgent?.emoji || '●',
+    desc: baseAgent ? `${baseAgent.desc} (变体)` : '自定义 Agent',
+    path: baseAgent?.path || '',
+    inputMode: baseAgent?.inputMode || 'arg',
+    argsTemplate: baseAgent?.argsTemplate || '-p {prompt}',
+    checkTemplate: baseAgent?.checkTemplate || '--help',
+    envKey: baseAgent?.envKey || '',
+    baseUrl: baseAgent?.baseUrl || '',
+    apiKey: baseAgent?.apiKey || '',
+    model: '',
+    roleDescription: tpl.roleDescription || '',
+    personality: tpl.personality || '',
+    strengths: tpl.strengths || [],
+    restrictions: tpl.restrictions || [],
+    nickname: '',
+    avatar: '',
+    color: { primary: '#888', secondary: '#ddd' },
     removable: true,
-  }]);
+  };
+
+  await saveAgentList([...agentConfigList, newAgent], { scrollToKey: key });
 };
+
+// 新建 Agent 对话框：基础 CLI + key + label + 角色模板
+function showCreateAgentDialog(availableAgents) {
+  return new Promise((resolve) => {
+    const baseOptions = ['<option value="">— 从零开始（不基于已有 CLI）—</option>']
+      .concat(availableAgents.map((a, i) =>
+        `<option value="${i}">基于 ${esc(a.label)} (@${esc(a.key)})</option>`
+      )).join('');
+
+    const tplOptions = ROLE_TEMPLATES.map(t =>
+      `<option value="${esc(t.key)}">${esc(t.label)}</option>`
+    ).join('');
+
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+    overlay.innerHTML = `
+      <div class="dialog-box" style="min-width:420px;">
+        <div class="dialog-title">新建 Agent / 变体</div>
+        <div class="dialog-form">
+          <label class="dialog-field">
+            <span>基础 CLI</span>
+            <select class="dialog-input" data-field="base">${baseOptions}</select>
+            <small class="dialog-hint">同一 CLI 可以创建多个变体，使用不同模型/角色</small>
+          </label>
+          <label class="dialog-field">
+            <span>Key（用于 @mention，小写字母数字）</span>
+            <input class="dialog-input" data-field="key" placeholder="例如: claude-sonnet" />
+          </label>
+          <label class="dialog-field">
+            <span>显示名称</span>
+            <input class="dialog-input" data-field="label" placeholder="例如: Claude Sonnet" />
+          </label>
+          <label class="dialog-field">
+            <span>角色模板（可选）</span>
+            <select class="dialog-input" data-field="template">${tplOptions}</select>
+            <small class="dialog-hint">套用后自动填入角色描述、性格、擅长、限制</small>
+          </label>
+        </div>
+        <div class="dialog-actions">
+          <button class="dialog-cancel-btn">取消</button>
+          <button class="dialog-confirm-btn">创建</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const baseSel = overlay.querySelector('[data-field="base"]');
+    const keyInp = overlay.querySelector('[data-field="key"]');
+    const labelInp = overlay.querySelector('[data-field="label"]');
+    const tplSel = overlay.querySelector('[data-field="template"]');
+
+    // 选基础 CLI 时自动填默认 label
+    baseSel.onchange = () => {
+      const idx = baseSel.value;
+      if (idx !== '' && availableAgents[idx]) {
+        labelInp.placeholder = `${availableAgents[idx].label} (变体)`;
+      } else {
+        labelInp.placeholder = '例如: Claude Sonnet';
+      }
+    };
+
+    setTimeout(() => keyInp.focus(), 50);
+
+    const close = (val) => { document.body.removeChild(overlay); resolve(val); };
+
+    overlay.querySelector('.dialog-confirm-btn').onclick = () => {
+      const rawKey = keyInp.value.trim();
+      const key = rawKey.toLowerCase().replace(/^@+/, '').replace(/[^a-z0-9_-]+/g, '-');
+      if (!key) { keyInp.focus(); keyInp.style.borderColor = 'var(--red)'; return; }
+      const idx = baseSel.value;
+      const baseAgent = (idx !== '' && availableAgents[idx]) || null;
+      const label = labelInp.value.trim() || (baseAgent ? `${baseAgent.label} (变体)` : key);
+      close({ key, label, baseAgent, template: tplSel.value });
+    };
+    overlay.querySelector('.dialog-cancel-btn').onclick = () => close(null);
+    overlay.onclick = (e) => { if (e.target === overlay) close(null); };
+  });
+}
+
+// 旧的简单选择对话框（保留用于其他场景）
+function showChoiceDialog(title, choices) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+    overlay.innerHTML = `
+      <div class="dialog-box">
+        <div class="dialog-title">${esc(title)}</div>
+        <div class="dialog-choices">
+          ${choices.map((c, i) => `<button class="dialog-choice-btn" data-idx="${i}">${esc(c)}</button>`).join('')}
+        </div>
+        <button class="dialog-cancel-btn">取消</button>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    
+    overlay.querySelectorAll('.dialog-choice-btn').forEach(btn => {
+      btn.onclick = () => {
+        const idx = parseInt(btn.dataset.idx);
+        document.body.removeChild(overlay);
+        resolve(idx);
+      };
+    });
+    
+    overlay.querySelector('.dialog-cancel-btn').onclick = () => {
+      document.body.removeChild(overlay);
+      resolve(null);
+    };
+  });
+}
 
 workspaceSaveBtn.onclick = async () => {
   workspaceSaveBtn.disabled = true;
@@ -2609,15 +2887,23 @@ drawerSaveBtn.onclick = async () => {
     if (baseUrl !== undefined) target.baseUrl = baseUrl;
     if (apiKey !== undefined)  target.apiKey = apiKey;
     if (model !== undefined)   target.model = model;
-    // 角色卡字段（如果存在）
+    // 角色卡字段（nickname 空时自动 fallback 到 label，避免用户重复填写）
+    const nicknameRaw = card.querySelector(`.role-input[data-agent="${key}"][data-field="nickname"]`)?.value?.trim();
     const roleDesc  = card.querySelector(`.role-input[data-agent="${key}"][data-field="roleDescription"]`)?.value?.trim();
     const personality = card.querySelector(`.role-input[data-agent="${key}"][data-field="personality"]`)?.value?.trim();
     const strengthsRaw = card.querySelector(`.role-input[data-agent="${key}"][data-field="strengths"]`)?.value?.trim();
     const restrictionsRaw = card.querySelector(`.role-input[data-agent="${key}"][data-field="restrictions"]`)?.value?.trim();
+    const colorPrimary = card.querySelector(`.color-input[data-agent="${key}"][data-field="color.primary"]`)?.value;
+    const colorSecondary = card.querySelector(`.color-input[data-agent="${key}"][data-field="color.secondary"]`)?.value;
+    // nickname 不填则不强制写入，保留已有值（agentMeta 渲染时 fallback 到 label）
+    if (nicknameRaw !== undefined) target.nickname = nicknameRaw;
     if (roleDesc !== undefined) target.roleDescription = roleDesc;
     if (personality !== undefined) target.personality = personality;
     if (strengthsRaw !== undefined) target.strengths = strengthsRaw.split(/[,，]/).map(s => s.trim()).filter(Boolean);
     if (restrictionsRaw !== undefined) target.restrictions = restrictionsRaw.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+    if (colorPrimary || colorSecondary) {
+      target.color = { primary: colorPrimary || target.color?.primary || '#888', secondary: colorSecondary || target.color?.secondary || '#ddd' };
+    }
   });
 
   drawerSaveBtn.disabled = true;
@@ -2880,18 +3166,14 @@ async function loadHistoryLegacy() {
       if (h.role === 'user') {
         addUserBubble(h.text, { attachments: h.attachments || [] });
       } else if (h.role === 'assistant') {
-        const avatarMap = {
-          codex:  { cls: 'codex-av',  emoji: '🤖', name: 'Codex' },
-          claude: { cls: 'claude-av', emoji: '✨', name: 'Claude' },
-          kimi:   { cls: 'kimi-av',   emoji: '🌙', name: 'Kimi' },
-        };
-        const a = avatarMap[h.agent] || { cls: 'system-av', emoji: '●', name: h.agent || 'codex' };
+        const meta = agentMeta(h.agent);
+        const displayName = meta.nickname || meta.label;
         const row = document.createElement('div');
         row.className = 'bubble-row';
         row.innerHTML = `
-          <div class="avatar ${a.cls}">${a.emoji}</div>
+          ${renderAgentAvatar(h.agent)}
           <div>
-            <div class="bubble-name">${a.name}</div>
+            <div class="bubble-name">${esc(displayName)}</div>
             <div class="bubble agent-bubble">${renderRichText(h.text)}</div>
           </div>`;
         chatEl.appendChild(row);
@@ -2903,18 +3185,14 @@ async function loadHistoryLegacy() {
 
 // ── 初始化 ────────────────────────────────────────────────────
 function renderAssistantHistoryBubble(h) {
-  const avatarMap = {
-    codex:  { cls: 'codex-av',  emoji: '🤖', name: 'Codex' },
-    claude: { cls: 'claude-av', emoji: '✦', name: 'Claude' },
-    kimi:   { cls: 'kimi-av',   emoji: '🌙', name: 'Kimi' },
-  };
-  const a = avatarMap[h.agent] || { cls: 'system-av', emoji: '●', name: h.agent || 'codex' };
+  const meta = agentMeta(h.agent);
+  const displayName = meta.nickname || meta.label;
   const row = document.createElement('div');
   row.className = 'bubble-row';
   row.innerHTML = `
-    <div class="avatar ${a.cls}">${a.emoji}</div>
+    ${renderAgentAvatar(h.agent)}
     <div class="bubble-content-wrap">
-      <div class="bubble-name">${a.name}</div>
+      <div class="bubble-name">${esc(displayName)}</div>
       <div class="bubble agent-bubble">${renderRichText(h.text)}</div>
       <div class="bubble-actions">
         <button class="bubble-action-btn" data-action="copy" title="复制">⧉</button>
@@ -3043,4 +3321,43 @@ async function loadHistory({ older = false } = {}) {
   loadTasks();
   await loadSessions();
   await loadHistory();
+  await restoreRunningState();
 })();
+
+// 刷新后恢复运行中任务状态
+async function restoreRunningState() {
+  try {
+    const res = await fetch('/api/running');
+    const { running } = await res.json();
+    if (!running || !running.length) return;
+    
+    running.forEach(r => {
+      // 恢复 session 运行标记
+      if (r.sessionId) {
+        sessionRuns.set(r.sessionId, {
+          running: true,
+          mode: r.mode,
+          activeAgent: r.agentKey,
+          clientRunId: r.clientRunId,
+          startedAt: new Date(r.startedAt).getTime(),
+        });
+      }
+      
+      // 如果是当前 session，恢复 runningState 面板
+      if (r.sessionId === currentSessionId) {
+        showRunningPanel({
+          agent: r.agentKey,
+          mode: r.mode,
+          taskTitle: r.taskTitle || '',
+        });
+        // 恢复已消耗的时间
+        if (runningState) {
+          runningState.startedAt = new Date(r.startedAt).getTime();
+        }
+      }
+    });
+    updateVisibleRunState();
+  } catch (e) {
+    console.warn('恢复运行状态失败:', e);
+  }
+}

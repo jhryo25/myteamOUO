@@ -22,6 +22,10 @@ const DEFAULT_AGENT_DEFS = [
     personality: '严谨、务实、追求代码质量，习惯先问清楚需求再动手',
     strengths: ['任务拆解', '代码审查', '进度协调'],
     restrictions: [],
+    // 对齐 clowder-ai CatConfig: avatar/color/nickname
+    nickname: '',
+    avatar: '',
+    color: { primary: '#5B8C5A', secondary: '#D4E6D3' },
   },
   {
     key: 'claude',
@@ -36,6 +40,9 @@ const DEFAULT_AGENT_DEFS = [
     personality: '善于推理、思维发散、喜欢先理解全局再落地细节',
     strengths: ['架构设计', '复杂推理', '长文档生成'],
     restrictions: [],
+    nickname: '',
+    avatar: '',
+    color: { primary: '#9B7EBD', secondary: '#E8DFF5' },
   },
   {
     key: 'kimi',
@@ -50,6 +57,9 @@ const DEFAULT_AGENT_DEFS = [
     personality: '高效、简洁、直接给出结果，不绕弯子',
     strengths: ['快速执行', '简单任务', '草稿生成'],
     restrictions: [],
+    nickname: '',
+    avatar: '',
+    color: { primary: '#5B9BD5', secondary: '#D6E9F8' },
   },
 ];
 
@@ -108,6 +118,12 @@ export function readAgentRegistry(ENV = loadEnv(), file = AGENTS_FILE) {
       personality: raw.personality ?? base.personality ?? '',
       strengths: Array.isArray(raw.strengths) ? raw.strengths : (base.strengths ?? []),
       restrictions: Array.isArray(raw.restrictions) ? raw.restrictions : (base.restrictions ?? []),
+      // 对齐 clowder-ai CatConfig: avatar/color/nickname
+      nickname: String(raw.nickname ?? base.nickname ?? '').trim(),
+      avatar: String(raw.avatar ?? base.avatar ?? '').trim(),
+      color: (raw.color && typeof raw.color === 'object')
+        ? { primary: String(raw.color.primary || base.color?.primary || '#888'), secondary: String(raw.color.secondary || base.color?.secondary || '#ddd') }
+        : (base.color || { primary: '#888', secondary: '#ddd' }),
     });
   }
 
@@ -141,6 +157,12 @@ export function writeAgentRegistry(agents, file = AGENTS_FILE) {
         personality: String(agent.personality || '').trim(),
         strengths: Array.isArray(agent.strengths) ? agent.strengths.map(String).filter(Boolean) : [],
         restrictions: Array.isArray(agent.restrictions) ? agent.restrictions.map(String).filter(Boolean) : [],
+        // 对齐 clowder-ai CatConfig: avatar/color/nickname
+        nickname: String(agent.nickname || '').trim(),
+        avatar: String(agent.avatar || '').trim(),
+        color: (agent.color && typeof agent.color === 'object')
+          ? { primary: String(agent.color.primary || '#888'), secondary: String(agent.color.secondary || '#ddd') }
+          : { primary: '#888', secondary: '#ddd' },
       };
     })
     .filter(Boolean);
@@ -591,6 +613,8 @@ export function patchTask(id, patch) {
 }
 
 // ── 共享 Prompt（IMP-004: 从 server.mjs / plan.mjs / dispatch.mjs 抽取） ──
+// 对齐 clowder-ai cross-cat-handoff 五件套（What/Why/Tradeoff/Open/Next）
+// 拆任务时同步产出 why / tradeoff / open_questions，让接手 agent 知道"为什么这么做"
 export const PLAN_PROMPT = `你是 myteam 的任务规划 agent。
 用户会给你一个目标，把它拆成 3-7 个可执行、可验收的小任务。
 
@@ -602,12 +626,21 @@ export const PLAN_PROMPT = `你是 myteam 的任务规划 agent。
 - 严禁调用任何工具（包括 view_image / read_image / read_file / web_search / shell 等）。本阶段不需要看图或读文件。如果任务需要这些操作，请把"分析图片"或"阅读文件"作为子任务标题写到 JSON 里，由后续执行阶段处理。
 - 严禁请求授权、严禁等待用户确认。直接基于用户文字目标拆解。
 
+【交接五件套规则（对齐 clowder-ai cross-cat-handoff）】
+- title 是 What（做什么）；steps 是怎么做；accept 是怎么算完
+- why 必填：为什么这个任务存在、不做会怎样
+- tradeoff 可选：放弃了哪个备选方案，一句话即可，没有就写空串
+- open_questions 可选：还不确定的点，数组；没有就写 []
+
 严格按以下 JSON 格式返回：
 {
   "goal": "<原始目标>",
   "tasks": [
     {
-      "title": "<任务标题>",
+      "title": "<任务标题：What>",
+      "why": "<为什么要做这个任务>",
+      "tradeoff": "<放弃的备选方案，可空>",
+      "open_questions": ["<还不确定的点>"],
       "steps": ["<步骤1>", "<步骤2>"],
       "accept": "<验收标准>",
       "agent": "<推荐执行者: claude|codex|kimi>"
@@ -623,17 +656,139 @@ export function buildExecPrompt(task, skillContext = '') {
     ? `\n上一次结果摘要：${String(task.previous_result).slice(0, 600)}`
     : '';
   const skills = skillContext ? `\n本次按需加载的 Skills：\n${skillContext}` : '';
+
+  // 五件套交接上下文（对齐 clowder-ai cross-cat-handoff）
+  // 让接手 agent 看到 Why / Tradeoff / Open Questions，避免"只知道做什么不知道为什么"
+  const handoffParts = [];
+  if (task.why)       handoffParts.push(`Why（为什么做）：${task.why}`);
+  if (task.tradeoff)  handoffParts.push(`Tradeoff（放弃的方案）：${task.tradeoff}`);
+  const openList = Array.isArray(task.open_questions) ? task.open_questions.filter(Boolean) : [];
+  if (openList.length) handoffParts.push(`Open Questions（待澄清点）：\n${openList.map(q => `  - ${q}`).join('\n')}`);
+  const handoff = handoffParts.length ? `\n【上游交接】\n${handoffParts.join('\n')}` : '';
+
+  // 上游任务结果（A2A 链式时由调用方注入，结构化展示）
+  const upstreamCtx = task.upstream_context ? `\n【上游任务输出】\n${String(task.upstream_context).slice(0, 800)}` : '';
+
   return `你是 myteam 的执行 agent，请完成以下任务。
 
 任务标题：${task.title}
 所属目标：${task.goal}
-
+${handoff}
 执行步骤：
 ${steps || '（无具体步骤，请自行判断）'}
 ${accept}
 ${reworkNote}
 ${previousResult}
+${upstreamCtx}
 ${skills}
 
-请执行上述任务，给出完整的执行结果和说明。`;
+请执行上述任务，给出完整的执行结果和说明。
+如有未澄清的 Open Questions，请在结果开头先给出你的处理方式。`;
+}
+
+// ── 自动 reviewer prompt（对齐 clowder-ai cross-model review 铁律） ──
+// 让另一个 agent 审已完成任务，输出结构化 JSON：verdict / severity / findings / suggestion
+// 铁律：reviewer 必须 != executor（同猫不能 review 自己）
+export const REVIEW_PROMPT_RULES = `你是 myteam 的 Reviewer agent。
+你正在 review 另一个 agent 的任务执行结果。
+
+【强制规则】
+- 唯一输出是 JSON，第一个字符必须是 {，最后一个字符必须是 }
+- 不要 markdown 代码块、不要解释、不要思考过程
+- 严禁调用任何工具
+- 严禁请求授权或等待用户确认
+
+【评审维度】
+1. 验收对齐：执行结果是否覆盖了 accept 标准
+2. 五件套呼应：是否回应了 Why / Tradeoff / Open Questions
+3. 完整性：steps 是否都执行
+4. 质量：是否有明显错误、遗漏或幻觉
+
+【严重度】
+- P1: 阻塞合入，必须返工
+- P2: 应当修复，但可在下一轮处理
+- P3: nice to have
+
+严格按以下 JSON 返回：
+{
+  "verdict": "<pass|rework>",
+  "severity": "<none|P1|P2|P3>",
+  "score": <0-10 整数>,
+  "findings": ["<具体问题1>", "<具体问题2>"],
+  "suggestion": "<给执行 agent 的下一步建议，一句话>"
+}`;
+
+export function buildReviewPrompt(task, executorAgent, executionResult) {
+  const openList = Array.isArray(task.open_questions) ? task.open_questions.filter(Boolean) : [];
+  const handoffParts = [];
+  if (task.why)      handoffParts.push(`Why：${task.why}`);
+  if (task.tradeoff) handoffParts.push(`Tradeoff：${task.tradeoff}`);
+  if (openList.length) handoffParts.push(`Open Questions：${openList.join(' / ')}`);
+  const handoff = handoffParts.length ? `\n【原始交接五件套】\n${handoffParts.join('\n')}` : '';
+  const steps = (task.steps ?? []).map((s, i) => `${i + 1}. ${s}`).join('\n');
+
+  return `${REVIEW_PROMPT_RULES}
+
+【被审任务】
+任务标题：${task.title}
+所属目标：${task.goal}
+执行 agent：${executorAgent}
+${handoff}
+执行步骤：
+${steps || '（无）'}
+验收标准：${task.accept || '（未指定）'}
+
+【执行结果】
+${String(executionResult || '').slice(0, 2000)}
+
+请给出结构化 review JSON。`;
+}
+
+// ── 轻量 SOP 状态机（对齐 clowder-ai development.yaml） ──
+// 阶段：pending → impl → quality_gate → review → gate → done
+// 每个阶段转换时检查前置条件，防止跳步
+
+export const SOP_PHASES = ['pending', 'impl', 'quality_gate', 'review', 'gate', 'done'];
+
+export const SOP_TRANSITIONS = {
+  pending:      { next: 'impl',          requires: [] },
+  impl:         { next: 'quality_gate',  requires: ['status=done'] },
+  quality_gate: { next: 'review',        requires: ['quality_gate_status=pass'] },
+  review:       { next: 'gate',          requires: ['review_status=pass'] },
+  gate:         { next: 'done',          requires: ['gate_status=passed'] },
+  done:         { next: null,            requires: [] },
+};
+
+export function validatePhaseTransition(task, targetPhase) {
+  const currentPhase = task.phase || 'pending';
+  const currentIdx = SOP_PHASES.indexOf(currentPhase);
+  const targetIdx = SOP_PHASES.indexOf(targetPhase);
+
+  if (targetIdx === -1) {
+    return { ok: false, reason: `未知阶段：${targetPhase}` };
+  }
+  if (targetIdx <= currentIdx) {
+    return { ok: false, reason: `不能回退：${currentPhase} → ${targetPhase}` };
+  }
+
+  // 检查前置条件
+  const transition = SOP_TRANSITIONS[currentPhase];
+  if (!transition || transition.next !== targetPhase) {
+    return { ok: false, reason: `不允许跳步：${currentPhase} → ${targetPhase}（必须经过 ${transition?.next || '无'}）` };
+  }
+
+  for (const req of transition.requires) {
+    const [field, value] = req.split('=');
+    if (task[field] !== value) {
+      return { ok: false, reason: `前置条件未满足：${field}=${value}（当前 ${task[field] || 'null'}）` };
+    }
+  }
+
+  return { ok: true };
+}
+
+export function getNextPhase(task) {
+  const currentPhase = task.phase || 'pending';
+  const transition = SOP_TRANSITIONS[currentPhase];
+  return transition?.next || null;
 }

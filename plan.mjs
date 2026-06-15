@@ -21,10 +21,15 @@ function writeTasks(goal, tasks, agentKey) {
       created_at: now,
       goal,
       title: t.title ?? `任务 ${i + 1}`,
+      // 五件套（对齐 clowder-ai cross-cat-handoff）
+      why: t.why ?? '',
+      tradeoff: t.tradeoff ?? '',
+      open_questions: Array.isArray(t.open_questions) ? t.open_questions : [],
       steps: t.steps ?? [],
       accept: t.accept ?? '',
       agent: t.agent ?? agentKey,
       status: 'pending',
+      phase: 'pending', // SOP 状态机初始阶段
     };
     appendFileSync(tasksFile, JSON.stringify(record) + '\n', 'utf8');
     written++;
@@ -81,6 +86,9 @@ console.log(`\n已写入 ${written} 条任务 → .myteam/tasks.jsonl（run_id: 
 console.log('\n任务列表：');
 data.tasks.forEach((t, i) => {
   console.log(`  [${i + 1}] ${t.title}  （推荐：${t.agent ?? agentKey}）`);
+  if (t.why)      console.log(`       Why: ${t.why}`);
+  if (t.tradeoff) console.log(`       Tradeoff: ${t.tradeoff}`);
+  (t.open_questions ?? []).forEach(q => console.log(`       ? ${q}`));
   (t.steps ?? []).forEach(s => console.log(`       · ${s}`));
   if (t.accept) console.log(`       ✓ 验收：${t.accept}`);
 });

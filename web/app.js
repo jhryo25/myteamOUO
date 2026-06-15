@@ -151,7 +151,10 @@ function copyCode(btn) {
 // ── chat helpers ─────────────────────────────────────────────
 const chatEl = document.getElementById('chatMessages');
 const welcome = document.getElementById('chatWelcome');
-let agentTypingBubble = null;
+
+// 每个 session 维护自己的 typing bubble 引用（对齐 clowder-ai per-thread liveness）
+const sessionBubbles = new Map(); // sessionId → { bubble, agentKey }
+let agentTypingBubble = null; // 当前可见 session 的 typing bubble 快捷引用
 
 function hideWelcome() {
   const el = document.getElementById('chatWelcome');
@@ -176,6 +179,66 @@ function addResumePrompt(text, hasFailed) {
     row.remove();
     document.getElementById('dispatchBtn').click();
   };
+  chatEl.appendChild(row);
+  scrollChat();
+}
+
+// 拆任务失败时的恢复选项（不要一截了之）
+function addPlanRecoveryPrompt(goal, failedAgent, message, raw, attachments, agentAttachments) {
+  hideWelcome();
+  const rawDetail = raw ? `<details class="plan-error-detail"><summary>原始输出（前 400 字）</summary><pre>${esc(raw.slice(0, 400))}</pre></details>` : '';
+  // 列出当前可用 agent 备选
+  const others = agentConfigList.filter(a => a.available && a.key !== failedAgent);
+  const switchBtns = others.map(a => `<button class="recovery-btn" data-action="retry-other" data-agent="${esc(a.key)}">↻ 改用 ${esc(a.label || a.key)}</button>`).join('');
+
+  const row = document.createElement('div');
+  row.className = 'bubble-row';
+  row.innerHTML = `
+    <div class="avatar system-av">!</div>
+    <div class="bubble-content-wrap" style="max-width:80%;">
+      <div class="bubble system-bubble plan-recovery">
+        <div class="plan-recovery-title">✗ ${esc(failedAgent)} 拆任务失败</div>
+        <div class="plan-recovery-msg">${esc(message || '')}</div>
+        <div class="plan-recovery-hint">${attachments?.length ? '检测到本次包含图片附件。可能是 agent 想调用 view_image 工具读图但失败。' : '可能是 agent 输出非 JSON、超时或 CLI 报错。'}</div>
+        ${rawDetail}
+        <div class="plan-recovery-actions">
+          <button class="recovery-btn primary" data-action="retry-same">↻ 重试 ${esc(failedAgent)}</button>
+          ${switchBtns}
+          <button class="recovery-btn" data-action="switch-chat">💬 改为对话模式（让 agent 看图回答）</button>
+          <button class="recovery-btn" data-action="dismiss">✕ 关闭</button>
+        </div>
+      </div>
+    </div>`;
+  row.querySelectorAll('[data-action]').forEach(btn => {
+    btn.onclick = async () => {
+      const act = btn.dataset.action;
+      if (act === 'dismiss') { row.remove(); return; }
+      if (act === 'retry-same') {
+        row.remove();
+        const radio = document.querySelector(`#planAgentGroup .radio-btn[data-value="${failedAgent}"]`);
+        radio?.click();
+        document.getElementById('goalInput').value = goal;
+        await doPlan(goal);
+        return;
+      }
+      if (act === 'retry-other') {
+        const newAgent = btn.dataset.agent;
+        row.remove();
+        const radio = document.querySelector(`#planAgentGroup .radio-btn[data-value="${newAgent}"]`);
+        radio?.click();
+        document.getElementById('goalInput').value = goal;
+        await doPlan(goal);
+        return;
+      }
+      if (act === 'switch-chat') {
+        row.remove();
+        // 切对话模式，把 goal 当文本附图发出去
+        modeGroup.querySelector('.radio-btn[data-value="chat"]').click();
+        await doChat(`@${failedAgent} ${goal}`);
+        return;
+      }
+    };
+  });
   chatEl.appendChild(row);
   scrollChat();
 }
@@ -243,7 +306,7 @@ function addUserBubble(text, { prepend = false, scroll = true, attachments = [] 
   return row;
 }
 
-function startAgentBubble(agentKey) {
+function startAgentBubble(agentKey, sessionId = currentSessionId) {
   hideWelcome();
   const avatarMap = {
     codex:  { cls: 'codex-av',  emoji: '🤖', name: 'Codex' },
@@ -252,59 +315,146 @@ function startAgentBubble(agentKey) {
   };
   const a = avatarMap[agentKey] || { cls: 'system-av', emoji: '●', name: agentKey };
 
+  const uid = `bubble-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const thinkUid = `think-${uid}`;
+  const timeUid  = `time-${uid}`;
+
   const row = document.createElement('div');
   row.className = 'bubble-row';
+  row.dataset.sessionId = sessionId || '';
   row.innerHTML = `
     <div class="avatar ${a.cls}">${a.emoji}</div>
     <div class="bubble-content-wrap">
-      <div class="bubble-name">${a.name} <span class="bubble-time" id="bubbleTime"></span></div>
-      <details class="thinking-details hidden" id="thinkingDetails">
-        <summary class="thinking-summary">💭 思考过程 <span class="thinking-count" id="thinkingCount"></span></summary>
-        <div class="thinking-content" id="thinkingContent"></div>
-      </details>
-      <div class="bubble agent-bubble typing-cursor" id="typingBubble">
+      <div class="bubble-name">${a.name} <span class="bubble-time" id="${timeUid}"></span></div>
+      <div class="thinking-panel hidden" id="${thinkUid}">
+        <button class="thinking-toggle" type="button" aria-expanded="false">
+          <span class="thinking-chevron">›</span>
+          <span class="thinking-brain">🧠</span>
+          <span class="thinking-label">思考过程</span>
+          <span class="thinking-count-badge" id="cnt-${uid}"></span>
+          <span class="thinking-preview" id="prev-${uid}"></span>
+        </button>
+        <div class="thinking-body hidden" id="body-${uid}"></div>
+      </div>
+      <div class="bubble agent-bubble typing-cursor" id="${uid}">
         <div class="thinking-line"><span class="thinking-dot"></span><span>正在连接 ${esc(agentKey)}...</span></div>
       </div>
       <div class="bubble-actions">
         <button class="bubble-action-btn" data-action="copy" title="复制">⎘</button>
       </div>
     </div>`;
+
   chatEl.appendChild(row);
-  agentTypingBubble = row.querySelector('#typingBubble');
-  // 绑定操作（完成后 content 已渲染）
+  const bubble = row.querySelector(`#${uid}`);
+
+  // 绑定 thinking 折叠按钮
+  const toggleBtn = row.querySelector('.thinking-toggle');
+  toggleBtn?.addEventListener('click', () => {
+    const body = row.querySelector(`#body-${uid}`);
+    const preview = row.querySelector(`#prev-${uid}`);
+    const isExpanded = toggleBtn.getAttribute('aria-expanded') === 'true';
+    toggleBtn.setAttribute('aria-expanded', String(!isExpanded));
+    toggleBtn.querySelector('.thinking-chevron').textContent = isExpanded ? '›' : '⌄';
+    body?.classList.toggle('hidden', isExpanded);
+    if (preview) preview.style.display = isExpanded ? '' : 'none';
+  });
+
+  // 复制按钮
   row.querySelector('[data-action="copy"]').onclick = () => {
-    const content = agentTypingBubble?.dataset.raw || agentTypingBubble?.textContent || '';
+    const content = bubble.dataset.raw || bubble.textContent || '';
     navigator.clipboard.writeText(content).catch(() => {});
     showCopiedFeedback(row.querySelector('[data-action="copy"]'));
   };
+
+  agentTypingBubble = bubble;
+  if (sessionId) sessionBubbles.set(sessionId, { bubble, row, uid, thinkUid, timeUid });
+
   scrollChat();
-  return agentTypingBubble;
+  return bubble;
+}
+
+// 轻量流式 markdown：仅安全处理换行/粗体/inline code，避免半截代码块、半截 JSON 暴露源文本
+function streamRender(raw) {
+  let s = String(raw || '');
+  // 隐藏未闭合的 ``` 代码块（等完成后再渲染）
+  const fenceCount = (s.match(/```/g) || []).length;
+  if (fenceCount % 2 === 1) {
+    const lastFence = s.lastIndexOf('```');
+    s = s.slice(0, lastFence) + '\n_⏳ 正在生成代码块…_';
+  }
+  // 隐藏看起来像 JSON 大对象的内容（如 plan agent 输出）
+  if (/^\s*[{[]/.test(s.trim()) && !/[}\]]\s*$/.test(s.trim())) {
+    return '<span class="stream-pending">⏳ 正在生成结构化内容…</span>';
+  }
+  return s
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/`([^`\n]+)`/g, '<code class="rb-inline-code">$1</code>')
+    .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\n/g, '<br>');
+}
+
+// ── 打字机节流（参考 clowder-ai StreamingText）────────────────
+const TYPER_CHARS_PER_TICK = 2;   // 每帧追加字符数
+const TYPER_TICK_MS        = 16;  // ~60fps
+const typerStates = new WeakMap(); // bubble → { pending, displayed, rafId }
+
+function _flushTyper(bubble) {
+  const st = typerStates.get(bubble);
+  if (!st) return;
+  if (st.displayed.length >= st.pending.length) {
+    st.rafId = null;
+    bubble.dataset.raw = st.displayed;
+    // 末尾光标渲染
+    bubble.innerHTML = streamRender(st.displayed) + '<span class="stream-cursor">▊</span>';
+    return;
+  }
+  // 一次推进若干字符（配合 setTimeout 平滑节流）
+  const next = Math.min(st.displayed.length + TYPER_CHARS_PER_TICK, st.pending.length);
+  st.displayed = st.pending.slice(0, next);
+  bubble.dataset.raw = st.displayed;
+  bubble.innerHTML = streamRender(st.displayed) + '<span class="stream-cursor">▊</span>';
+  scrollChat();
+  st.rafId = setTimeout(() => _flushTyper(bubble), TYPER_TICK_MS);
 }
 
 function appendTyping(text) {
-  if (!agentTypingBubble) return;
-  // 流式阶段保留 textContent，在 finishTyping 时一次性渲染富文本
-  agentTypingBubble.dataset.raw = (agentTypingBubble.dataset.raw || '') + text;
-  agentTypingBubble.textContent = agentTypingBubble.dataset.raw;
-  scrollChat();
+  if (!agentTypingBubble || !text) return;
+  let st = typerStates.get(agentTypingBubble);
+  if (!st) {
+    st = { pending: '', displayed: '', rafId: null };
+    typerStates.set(agentTypingBubble, st);
+  }
+  st.pending += text;
+  if (!st.rafId) st.rafId = setTimeout(() => _flushTyper(agentTypingBubble), TYPER_TICK_MS);
 }
 
 function appendThinking(text) {
-  if (!agentTypingBubble) return;
+  if (!agentTypingBubble || !text) return;
   const wrap = agentTypingBubble.closest('.bubble-content-wrap');
   if (!wrap) return;
-  const details = wrap.querySelector('#thinkingDetails');
-  const content = wrap.querySelector('#thinkingContent');
-  const count = wrap.querySelector('#thinkingCount');
-  if (!details || !content) return;
-  details.classList.remove('hidden');
-  content.dataset.raw = (content.dataset.raw || '') + text;
-  content.textContent = content.dataset.raw;
-  if (count) {
-    const len = (content.dataset.raw || '').length;
-    count.textContent = `（${len} 字符）`;
+  const panel = wrap.querySelector('.thinking-panel');
+  const body  = wrap.querySelector('.thinking-body');
+  const cnt   = wrap.querySelector('[id^="cnt-"]');
+  const prev  = wrap.querySelector('[id^="prev-"]');
+  if (!panel || !body) return;
+  panel.classList.remove('hidden');
+  body.dataset.raw = (body.dataset.raw || '') + text;
+  body.textContent = body.dataset.raw;
+  const len = (body.dataset.raw || '').length;
+  if (cnt) cnt.textContent = `${len} 字`;
+  // 默认折叠状态下，预览显示最新一行片段（参考 clowder-ai ThinkingContent preview）
+  const toggle = wrap.querySelector('.thinking-toggle');
+  const isExpanded = toggle?.getAttribute('aria-expanded') === 'true';
+  if (prev) {
+    if (isExpanded) {
+      prev.style.display = 'none';
+    } else {
+      prev.style.display = '';
+      const lastChunk = (body.dataset.raw || '').split(/\n+/).filter(Boolean).slice(-1)[0] || '';
+      const slice = lastChunk.slice(0, 80);
+      prev.textContent = slice + (lastChunk.length > 80 ? '…' : '');
+    }
   }
-  // 不自动滚动到 thinking 内容（默认收起，不打扰主输出滚动）
 }
 
 function updateAgentStatus(text) {
@@ -313,22 +463,52 @@ function updateAgentStatus(text) {
   scrollChat();
 }
 
-function finishTyping() {
-  if (agentTypingBubble) {
-    agentTypingBubble.classList.remove('typing-cursor');
-    const raw = agentTypingBubble.dataset.raw || agentTypingBubble.textContent;
-    if (raw) {
-      try {
-        agentTypingBubble.innerHTML = renderRichText(raw);
-      } catch (err) {
-        console.error('renderRichText failed:', err);
-      }
-    }
-    // 填入完成时间戳
-    const timeEl = agentTypingBubble.closest('.bubble-content-wrap')?.querySelector('#bubbleTime');
-    if (timeEl) timeEl.textContent = formatTime();
-    agentTypingBubble = null;
+function collectFinishStats() {
+  if (!runningState) return null;
+  return {
+    elapsedMs: Date.now() - runningState.startedAt,
+    charsOut: runningState.charsOut,
+    charsThink: runningState.charsThink,
+    agent: runningState.agent,
+  };
+}
+
+function finishTyping(stats = null) {
+  if (!agentTypingBubble) return;
+  // 强制 flush 打字机：把剩余字符全部填入
+  const st = typerStates.get(agentTypingBubble);
+  if (st) {
+    if (st.rafId) clearTimeout(st.rafId);
+    st.displayed = st.pending;
+    typerStates.delete(agentTypingBubble);
   }
+  agentTypingBubble.classList.remove('typing-cursor');
+  const raw = agentTypingBubble.dataset.raw || '';
+  if (raw) {
+    try { agentTypingBubble.innerHTML = renderRichText(raw); } catch (err) { console.error('renderRichText failed:', err); }
+  }
+  const wrap = agentTypingBubble.closest('.bubble-content-wrap');
+  const timeEl = wrap?.querySelector('[id^="time-"]');
+  if (timeEl) timeEl.textContent = formatTime();
+  // 在气泡下方追加 token / 耗时摘要
+  if (stats && wrap) {
+    const sec = Math.floor((stats.elapsedMs || 0) / 1000);
+    const elapsed = sec < 60 ? `${sec}s` : `${Math.floor(sec/60)}m${sec%60}s`;
+    const tokOut = Math.round((stats.charsOut || 0) / 4);
+    const tokThink = Math.round((stats.charsThink || 0) / 4);
+    const meta = document.createElement('div');
+    meta.className = 'bubble-token-meta';
+    meta.innerHTML = `
+      <span title="耗时">⏱ ${elapsed}</span>
+      <span title="输出字符 / token 估算">📤 ${stats.charsOut || 0} 字 · ~${tokOut} tok</span>
+      ${stats.charsThink ? `<span title="思考字符">🧠 ${stats.charsThink} 字 · ~${tokThink} tok</span>` : ''}
+    `;
+    // 插到 bubble-actions 之前
+    const actions = wrap.querySelector('.bubble-actions');
+    if (actions) wrap.insertBefore(meta, actions);
+    else wrap.appendChild(meta);
+  }
+  agentTypingBubble = null;
 }
 
 function scrollChat() {
@@ -506,8 +686,10 @@ let activeAgentKey = null;
 
 function setActiveAgent(agentKey) {
   activeAgentKey = agentKey || null;
+  const run = getSessionRun(currentSessionId);
+  const agent = run?.activeAgent || activeAgentKey;
   document.querySelectorAll('.agent-pill').forEach(pill => {
-    pill.classList.toggle('busy', Boolean(activeAgentKey && pill.dataset.agent === activeAgentKey));
+    pill.classList.toggle('busy', Boolean(agent && pill.dataset.agent === agent));
   });
 }
 
@@ -539,6 +721,94 @@ let allTasks = [];
 let currentFilter = 'all';
 let currentSearch = '';
 
+// ── 当前运行 invocation 状态（用于实时面板）─────────────────
+let runningState = null; // { agent, mode, startedAt, charsOut, charsThink, taskTitle, timerId }
+
+function showRunningPanel(meta) {
+  const panel = document.getElementById('runningPanel');
+  if (!panel) return;
+  if (runningState?.timerId) clearInterval(runningState.timerId);
+  runningState = {
+    agent: meta.agent || '',
+    mode: meta.mode || '',
+    taskTitle: meta.taskTitle || '',
+    startedAt: Date.now(),
+    charsOut: 0,
+    charsThink: 0,
+    timerId: null,
+  };
+  panel.classList.remove('hidden');
+  renderRunningPanel();
+  runningState.timerId = setInterval(renderRunningPanel, 500);
+}
+
+function bumpRunningChars(kind, n) {
+  if (!runningState) return;
+  if (kind === 'thinking') runningState.charsThink += n;
+  else runningState.charsOut += n;
+}
+
+function hideRunningPanel() {
+  const panel = document.getElementById('runningPanel');
+  if (runningState?.timerId) clearInterval(runningState.timerId);
+  runningState = null;
+  if (panel) panel.classList.add('hidden');
+}
+
+function renderRunningPanel() {
+  if (!runningState) return;
+  const elapsedMs = Date.now() - runningState.startedAt;
+  const sec = Math.floor(elapsedMs / 1000);
+  const elapsedStr = sec < 60 ? `${sec}s` : `${Math.floor(sec/60)}m${sec%60}s`;
+  document.getElementById('runningElapsed').textContent = elapsedStr;
+  const body = document.getElementById('runningBody');
+  if (!body) return;
+  const tokOut = Math.round(runningState.charsOut / 4);
+  const tokThink = Math.round(runningState.charsThink / 4);
+  const meta = agentMeta(runningState.agent);
+  body.innerHTML = `
+    <div class="running-row">
+      <span class="running-agent">${meta.emoji} ${esc(meta.label || runningState.agent)}</span>
+      ${runningState.mode ? `<span class="running-mode">${esc(runningState.mode)}</span>` : ''}
+    </div>
+    ${runningState.taskTitle ? `<div class="running-task">📋 ${esc(runningState.taskTitle)}</div>` : ''}
+    <div class="running-stats">
+      <span title="输出字符 / token 估算">📤 ${runningState.charsOut} 字符 · ~${tokOut} tok</span>
+      ${runningState.charsThink ? `<span title="思考字符">🧠 ${runningState.charsThink} 字符 · ~${tokThink} tok</span>` : ''}
+    </div>`;
+}
+
+// ── 批量管理 ─────────────────────────────────────────────────
+let bulkMode = false;
+const selectedTaskIds = new Set();
+
+function toggleBulkMode(on) {
+  bulkMode = on;
+  selectedTaskIds.clear();
+  document.getElementById('tasksBulkBar').classList.toggle('hidden', !on);
+  const toggle = document.getElementById('tasksBulkToggle');
+  if (toggle) toggle.textContent = on ? '✕ 退出批量' : '☑ 批量管理';
+  filterAndRenderTasks();
+}
+
+function updateBulkCount() {
+  document.getElementById('tasksBulkCount').textContent = `已选 ${selectedTaskIds.size}`;
+}
+
+async function bulkApply(action) {
+  const ids = [...selectedTaskIds];
+  if (!ids.length) return;
+  if (action === 'delete' && !confirm(`确定删除 ${ids.length} 个任务？`)) return;
+  for (const id of ids) {
+    try {
+      if (action === 'delete') await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
+      else if (action === 'rerun') await fetch(`/api/tasks/${id}/rerun`, { method: 'POST' });
+    } catch {}
+  }
+  selectedTaskIds.clear();
+  await loadTasks();
+}
+
 async function loadTasks() {
   const { tasks } = await fetch('/api/tasks').then(r => r.json()).catch(() => ({ tasks: [] }));
   allTasks = tasks;
@@ -548,7 +818,7 @@ async function loadTasks() {
   const dispatchBtn = document.getElementById('dispatchBtn');
   if (hasPending) {
     dispatchBtn.classList.remove('hidden');
-    dispatchBtn.disabled = false;
+    dispatchBtn.disabled = isCurrentSessionRunning();
   } else {
     dispatchBtn.classList.add('hidden');
     dispatchBtn.disabled = true;
@@ -593,6 +863,27 @@ document.getElementById('tasksSearch').oninput = (e) => {
   currentSearch = e.target.value;
   filterAndRenderTasks();
 };
+
+// 批量管理按钮
+document.getElementById('tasksBulkToggle')?.addEventListener('click', () => toggleBulkMode(!bulkMode));
+document.getElementById('tasksBulkBar')?.querySelectorAll('[data-bulk]').forEach(btn => {
+  btn.onclick = async () => {
+    const act = btn.dataset.bulk;
+    if (act === 'cancel') { toggleBulkMode(false); return; }
+    await bulkApply(act);
+  };
+});
+document.getElementById('tasksSelectAll')?.addEventListener('change', (e) => {
+  const visible = document.querySelectorAll('.task-item[data-id]');
+  visible.forEach(item => {
+    const id = item.dataset.id;
+    if (e.target.checked) selectedTaskIds.add(id);
+    else selectedTaskIds.delete(id);
+    const cb = item.querySelector('.task-bulk-cb');
+    if (cb) cb.checked = e.target.checked;
+  });
+  updateBulkCount();
+});
 
 async function focusTasks(term = '') {
   closeHub();
@@ -713,6 +1004,7 @@ function renderTasks(tasks) {
 
       item.innerHTML = `
         <div class="task-row">
+          ${bulkMode ? `<input type="checkbox" class="task-bulk-cb" data-task-id="${esc(task.id)}" ${selectedTaskIds.has(task.id) ? 'checked' : ''}>` : ''}
           <span class="task-status-dot ${dotCls}"></span>
           <span class="task-row-title" title="${esc(task.title)}">${esc(task.title)}</span>
           <span class="task-row-agent">${esc(agentLabel)}</span>
@@ -751,6 +1043,17 @@ function renderTasks(tasks) {
         };
       });
 
+      // 批量复选
+      const cb = item.querySelector('.task-bulk-cb');
+      if (cb) {
+        cb.onclick = (e) => e.stopPropagation();
+        cb.onchange = () => {
+          if (cb.checked) selectedTaskIds.add(task.id);
+          else selectedTaskIds.delete(task.id);
+          updateBulkCount();
+        };
+      }
+
       itemsEl.appendChild(item);
     });
 
@@ -770,21 +1073,60 @@ function updateTaskDot(id, status) {
 }
 
 // ── SSE fetch ─────────────────────────────────────────────────
-let currentAbortController = null;
-let isRunning = false;
-const messageQueue = [];
+const sessionRuns = new Map();
 
-function setRunning(running) {
-  isRunning = running;
+function getSessionRun(sessionId = currentSessionId) {
+  return sessionRuns.get(sessionId || '');
+}
+
+function isCurrentSessionRunning() {
+  return Boolean(getSessionRun()?.running);
+}
+
+function updateVisibleRunState() {
+  const run = getSessionRun();
+  const stopBtn = document.getElementById('stopBtn');
+  stopBtn.classList.toggle('hidden', !run?.running);
+  // 恢复正在运行 session 的 typing bubble 到当前 chatEl
+  const bubbleInfo = sessionBubbles.get(currentSessionId || '');
+  if (run?.running && bubbleInfo?.row) {
+    if (!bubbleInfo.row.isConnected) chatEl.appendChild(bubbleInfo.row);
+    agentTypingBubble = bubbleInfo.bubble;
+  } else if (!run?.running) {
+    agentTypingBubble = null;
+  }
+  setActiveAgent(run?.activeAgent || null);
   updateSendBtnState();
+  // 刷新 session 列表的运行状态指示器
+  const list = document.getElementById('sessionList');
+  if (list) {
+    list.querySelectorAll('.session-item').forEach(item => {
+      const sid = item.dataset.id;
+      const running = Boolean(sessionRuns.get(sid)?.running);
+      item.classList.toggle('running', running);
+      const badge = item.querySelector('.session-running-badge');
+      if (running && !badge) {
+        const meta = item.querySelector('.session-item-meta');
+        if (meta) {
+          const b = document.createElement('span');
+          b.className = 'session-running-badge';
+          b.innerHTML = '<span class="session-running-dot"></span>运行中';
+          meta.insertBefore(b, meta.firstChild);
+        }
+      } else if (!running && badge) {
+        badge.remove();
+      }
+    });
+  }
 }
 
 function updateSendBtnState() {
+  const run = getSessionRun();
   const hasText = goalInput.value.trim().length > 0 || pendingImages.length > 0;
-  if (isRunning) {
+  if (run?.running) {
     sendBtn.classList.add('queue-mode');
     sendBtn.innerHTML = '⏎';
-    sendBtn.title = messageQueue.length ? `已排队 ${messageQueue.length} 条` : '排队发送（agent 完成后自动发送）';
+    sendBtn.title = run.queue.length ? `已排队 ${run.queue.length} 条` : '排队发送（agent 完成后自动发送）';
     sendBtn.disabled = false;
   } else {
     sendBtn.classList.remove('queue-mode');
@@ -795,18 +1137,26 @@ function updateSendBtnState() {
 }
 
 function ssePost(url, body, handlers) {
-  const requestSessionId = body.sessionId || currentSessionId;
+  const requestSessionId = body.sessionId || currentSessionId || '';
+  const clientRunId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   return new Promise(resolve => {
-    currentAbortController = new AbortController();
-    const stopBtn = document.getElementById('stopBtn');
-    stopBtn.classList.remove('hidden');
-    setRunning(true);
+    const controller = new AbortController();
+    const runState = {
+      running: true,
+      controller,
+      clientRunId,
+      mode: body.mode || getMode(),
+      queue: getSessionRun(requestSessionId)?.queue || [],
+      activeAgent: null,
+    };
+    sessionRuns.set(requestSessionId, runState);
+    updateVisibleRunState();
     
     fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: currentAbortController.signal,
+      body: JSON.stringify({ ...body, clientRunId }),
+      signal: controller.signal,
     }).then(async res => {
       const reader = res.body.getReader();
       const dec = new TextDecoder();
@@ -825,11 +1175,24 @@ function ssePost(url, body, handlers) {
           }
           let parsed;
           try { parsed = JSON.parse(data); } catch { continue; }
-          // 跨 session 守门：用户已切到其他 session 时，丢弃流事件，避免污染当前 DOM。
-          // done/error 仍要执行以释放状态；history 由后端落盘，刷新可见。
-          if (requestSessionId && currentSessionId && requestSessionId !== currentSessionId
-              && event !== 'done' && event !== 'error' && event !== 'aborted') {
-            continue;
+          if (parsed.agent && sessionRuns.get(requestSessionId)?.clientRunId === clientRunId) {
+            sessionRuns.get(requestSessionId).activeAgent = parsed.agent;
+            if (requestSessionId === currentSessionId) updateVisibleRunState();
+          }
+          const isBackground = requestSessionId && currentSessionId && requestSessionId !== currentSessionId;
+          if (isBackground) {
+            // 把 chunk 写进背景 session 的 bubble，切回时能看到进度
+            const bgBubble = sessionBubbles.get(requestSessionId)?.bubble;
+            if (bgBubble) {
+              if (event === 'chunk' && parsed.text) {
+                bgBubble.dataset.raw = (bgBubble.dataset.raw || '') + parsed.text;
+                bgBubble.innerHTML = streamRender(bgBubble.dataset.raw) + '<span class="stream-cursor">▊</span>';
+              }
+              if (event === 'status' && parsed.text && !bgBubble.dataset.raw) {
+                bgBubble.innerHTML = `<div class="thinking-line"><span class="thinking-dot"></span><span>${esc(parsed.text)}</span></div>`;
+              }
+            }
+            if (event !== 'done' && event !== 'error' && event !== 'aborted') continue;
           }
           handlers[event]?.(parsed);
           if (event === 'done') resolve(parsed);
@@ -838,22 +1201,31 @@ function ssePost(url, body, handlers) {
       resolve(null);
     }).catch(err => {
       if (err.name === 'AbortError') {
-        handlers.aborted?.();
+        if (requestSessionId === currentSessionId) handlers.aborted?.();
       } else {
-        handlers.error?.({ message: err.message });
+        if (requestSessionId === currentSessionId) handlers.error?.({ message: err.message });
       }
       resolve(null);
     }).finally(() => {
-      // 只有当前 session 的请求才清状态条；如果用户切到别的 session，原请求结束时不要影响新 session 的运行状态
-      if (!currentSessionId || currentSessionId === requestSessionId) {
-        stopBtn.classList.add('hidden');
-        currentAbortController = null;
-        setActiveAgent(null);
-        setRunning(false);
-        // 消费排队消息
-        if (messageQueue.length && getMode() === 'chat') {
-          const next = messageQueue.shift();
-          setTimeout(() => doChat(next), 100);
+      const run = sessionRuns.get(requestSessionId);
+      if (run?.clientRunId === clientRunId) {
+        sessionRuns.delete(requestSessionId);
+        // 完成 background session 的 bubble — finishTyping 替代品
+        const bgInfo = sessionBubbles.get(requestSessionId);
+        if (bgInfo?.bubble && requestSessionId !== currentSessionId) {
+          const bubble = bgInfo.bubble;
+          bubble.classList.remove('typing-cursor');
+          const raw = bubble.dataset.raw || '';
+          if (raw) { try { bubble.innerHTML = renderRichText(raw); } catch {} }
+          const timeEl = bubble.closest('.bubble-content-wrap')?.querySelector('[id^="time-"]');
+          if (timeEl) timeEl.textContent = formatTime();
+        }
+        // 清掉 sessionBubbles 里的引用
+        sessionBubbles.delete(requestSessionId);
+        if (requestSessionId === currentSessionId) updateVisibleRunState();
+        if (run.queue.length && run.mode === 'chat') {
+          const next = run.queue.shift();
+          setTimeout(() => doChat(next, requestSessionId), 100);
         }
       }
     });
@@ -862,9 +1234,14 @@ function ssePost(url, body, handlers) {
 
 // Stop button handler
 document.getElementById('stopBtn').onclick = async () => {
-  if (currentAbortController) {
-    currentAbortController.abort();
-    await fetch('/api/abort', { method: 'POST' });
+  const run = getSessionRun();
+  if (run?.controller) {
+    run.controller.abort();
+    await fetch('/api/abort', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: currentSessionId, clientRunId: run.clientRunId }),
+    });
   }
 };
 
@@ -1084,13 +1461,18 @@ goalInput.addEventListener('paste', (e) => {
 async function doSend() {
   const text = goalInput.value.trim();
   if (!text && !pendingImages.length) return;
-  // 运行中且 chat 模式 → 入队
-  if (isRunning && getMode() === 'chat') {
+  // 当前 session 运行中且 chat 模式 → 入队
+  const currentRun = getSessionRun();
+  if (currentRun?.running) {
+    if (getMode() !== 'chat') {
+      addSystemMsg('当前对话正在运行，请等完成后再拆任务。');
+      return;
+    }
     if (pendingImages.length) {
       addSystemMsg('正在运行时暂不排队图片消息，请等当前 agent 完成后再发送图片。');
       return;
     }
-    messageQueue.push(text);
+    currentRun.queue.push(text);
     goalInput.value = '';
     goalInput.style.height = '';
     mentionHint.classList.add('hidden');
@@ -1135,7 +1517,7 @@ goalInput.addEventListener('keydown', e => {
 });
 
 // ── chat 模式 ─────────────────────────────────────────────────
-async function doChat(message) {
+async function doChat(message, sessionId = currentSessionId) {
   let attachments = [];
   try {
     attachments = await uploadPendingImages();
@@ -1153,24 +1535,29 @@ async function doChat(message) {
   let bubble = null;
 
   const agentAttachments = attachments.map(({ previewUrl, ...attachment }) => attachment);
-  await ssePost('/api/chat', { message, sessionId: currentSessionId, attachments: agentAttachments }, {
+  await ssePost('/api/chat', { message, sessionId, attachments: agentAttachments, mode: 'chat' }, {
     start: ({ agent }) => {
       setActiveAgent(agent);
-      bubble = startAgentBubble(agent);
+      bubble = startAgentBubble(agent, sessionId);
+      showRunningPanel({ agent, mode: '对话' });
     },
-    chunk: ({ text }) => appendTyping(text),
-    thinking: ({ text }) => appendThinking(text),
+    chunk: ({ text }) => { appendTyping(text); bumpRunningChars('chunk', (text || '').length); },
+    thinking: ({ text }) => { appendThinking(text); bumpRunningChars('thinking', (text || '').length); },
     status: ({ text }) => updateAgentStatus(text),
     error: ({ message: msg }) => {
       finishTyping();
+      hideRunningPanel();
       addSystemMsg(`✗ ${msg}`);
     },
     done: () => {
-      finishTyping();
-      loadSessions(); // 刷新消息计数
+      const stats = collectFinishStats();
+      finishTyping(stats);
+      hideRunningPanel();
+      loadSessions();
     },
     aborted: () => {
       finishTyping();
+      hideRunningPanel();
       addSystemMsg('⏹ 已中断');
     },
   });
@@ -1199,18 +1586,23 @@ async function doPlan(goal) {
   addUserBubble(`📋 ${goal}`, { attachments });
   addSystemMsg(`正在让 ${agent} 拆解任务…`);
   setActiveAgent(agent);
-  startAgentBubble(agent);
+  startAgentBubble(agent, currentSessionId);
+  showRunningPanel({ agent, mode: '拆任务' });
 
-  await ssePost('/api/plan', { goal, agent, sessionId: currentSessionId, attachments: agentAttachments }, {
+  await ssePost('/api/plan', { goal, agent, sessionId: currentSessionId, attachments: agentAttachments, mode: 'plan' }, {
     start: ({ agent }) => setActiveAgent(agent),
     status: ({ text }) => updateAgentStatus(text),
-    chunk: ({ text }) => appendTyping(text),
-    error: ({ message }) => {
+    chunk: ({ text }) => { appendTyping(text); bumpRunningChars('chunk', (text || '').length); },
+    thinking: ({ text }) => { appendThinking(text); bumpRunningChars('thinking', (text || '').length); },
+    error: ({ message, raw }) => {
       finishTyping();
-      addSystemMsg(`✗ 拆任务失败：${message}`);
+      hideRunningPanel();
+      addPlanRecoveryPrompt(goal, agent, message, raw, attachments, agentAttachments);
     },
     done: ({ runId, written, tasks }) => {
-      finishTyping();
+      const stats = collectFinishStats();
+      finishTyping(stats);
+      hideRunningPanel();
       if (tasks && tasks.length) {
         addPlanCard(goal, tasks);
       } else {
@@ -1219,6 +1611,7 @@ async function doPlan(goal) {
     },
     aborted: () => {
       finishTyping();
+      hideRunningPanel();
       addSystemMsg('⏹ 已中断');
     },
   });
@@ -1241,23 +1634,28 @@ async function runDispatch(options = {}) {
     const agentOnlyText = options.agentOnly ? `（仅 ${options.agentOnly}）` : '';
     addSystemMsg(`开始执行 pending 任务${agentOnlyText}…`);
 
-    await ssePost('/api/dispatch', options, {
+    await ssePost('/api/dispatch', { ...options, sessionId: currentSessionId, mode: 'dispatch' }, {
       start:        ({ count }) => addSystemMsg(`共 ${count} 条任务待执行`),
       'task-start': ({ id, title, agent }) => {
         setActiveAgent(agent);
         updateTaskDot(id, 'in_progress');
-        startAgentBubble(agent);
-        appendTyping(`[${title}]\n`);
+        startAgentBubble(agent, currentSessionId);
+        updateAgentStatus(`${agent} 正在执行：${title}`);
+        showRunningPanel({ agent, mode: '执行任务', taskTitle: title });
       },
-      chunk:        ({ text }) => appendTyping(text),
+      chunk:        ({ text }) => { appendTyping(text); bumpRunningChars('chunk', (text || '').length); },
+      thinking:     ({ text }) => { appendThinking(text); bumpRunningChars('thinking', (text || '').length); },
       status:       ({ text }) => updateAgentStatus(text),
       'task-done':  ({ id, title, agent, summary }) => {
-        finishTyping();
+        const stats = collectFinishStats();
+        finishTyping(stats);
+        hideRunningPanel();
         updateTaskDot(id, 'done');
         if (title) addResultCard(title, agent, summary, true);
       },
       'task-failed':({ id, title, agent, error }) => {
         finishTyping();
+        hideRunningPanel();
         updateTaskDot(id, 'failed');
         addResultCard(title || id, agent || '', error, false);
       },
@@ -1266,15 +1664,17 @@ async function runDispatch(options = {}) {
         addSystemMsg(`→ ${from} 触发了 @${to} 继续执行`);
       },
       done: ({ done, failed }) => {
+        hideRunningPanel();
         if (failed > 0) {
           addResumePrompt(`✓ 执行完毕：${done} 成功 / ${failed} 失败`, true);
         } else {
           addSystemMsg(`✓ 全部执行完毕：${done} 成功`);
         }
       },
-      error: ({ message }) => addSystemMsg(`✗ ${message}`),
+      error: ({ message }) => { hideRunningPanel(); addSystemMsg(`✗ ${message}`); },
       aborted: () => {
         finishTyping();
+        hideRunningPanel();
         addResumePrompt('⏹ 已中断执行，仍有未完成任务', false);
       },
     });
@@ -1308,6 +1708,54 @@ const AGENT_META = {
   claude: { label: 'Agent · Claude', emoji: '✨', desc: '主架构 / 深度实现' },
   kimi:   { label: 'Agent · Kimi',   emoji: '🌙', desc: '轻量执行 / 快速草稿' },
 };
+
+// 角色卡模板（参考 clowder-ai 多角色 cat 设定）
+const ROLE_TEMPLATES = [
+  { key: '',         label: '— 选择模板套用 —' },
+  { key: 'planner',  label: '📋 规划师',
+    roleDescription: '任务拆解与规划专家，把目标拆成可验收的子任务。',
+    personality: '严谨、有条理、强调验收标准',
+    strengths: ['任务拆解','优先级排序','验收标准撰写','依赖识别'],
+    restrictions: ['不直接编码','不做最终实现决策'] },
+  { key: 'architect', label: '🏛 架构师',
+    roleDescription: '系统架构设计，关注技术选型、模块边界、可扩展性。',
+    personality: '深度思考、追求长期可维护',
+    strengths: ['架构设计','技术选型','重构方案','性能取舍'],
+    restrictions: ['不写琐碎实现','不做产品决策'] },
+  { key: 'implementer', label: '⚒ 实现工程师',
+    roleDescription: '把已确定方案转化为可运行代码。',
+    personality: '务实、追求可读性与正确性',
+    strengths: ['代码实现','单测编写','调试','PR 提交'],
+    restrictions: ['不擅自改架构','不跳过测试'] },
+  { key: 'reviewer', label: '🔍 审查员',
+    roleDescription: 'PR / 任务结果审查者，负责 Reviewer Gate 决策。',
+    personality: '严格、关注细节、引用证据',
+    strengths: ['代码审查','逻辑核对','安全检查','给出返工建议'],
+    restrictions: ['不直接修改代码','只给评审意见'] },
+  { key: 'researcher', label: '🔬 调研员',
+    roleDescription: '阅读文档/源码并产出结构化报告。',
+    personality: '细心、引用准确、总结清晰',
+    strengths: ['资料检索','源码解读','技术对比','撰写报告'],
+    restrictions: ['不做实现','不下架构结论'] },
+  { key: 'writer', label: '📝 文档作者',
+    roleDescription: '面向用户/开发者的文档撰写。',
+    personality: '清晰、简洁、面向读者',
+    strengths: ['README','使用文档','变更日志','API 说明'],
+    restrictions: ['不直接编码'] },
+];
+
+function applyRoleTemplate(card, key) {
+  const tpl = ROLE_TEMPLATES.find(t => t.key === key);
+  if (!tpl || !tpl.key) return;
+  const set = (field, value) => {
+    const el = card.querySelector(`.role-input[data-field="${field}"]`);
+    if (el && value !== undefined) el.value = Array.isArray(value) ? value.join('，') : value;
+  };
+  set('roleDescription', tpl.roleDescription);
+  set('personality', tpl.personality);
+  set('strengths', tpl.strengths);
+  set('restrictions', tpl.restrictions);
+}
 
 let agentConfigList = [];
 
@@ -1437,13 +1885,36 @@ function renderHub() {
     btn.classList.toggle('active', btn.dataset.tab === hubActiveTab);
   });
   hubBody.scrollTop = 0;
-  if (hubActiveTab === 'agents') return renderHubAgents();
-  if (hubActiveTab === 'skills') return renderHubSkills();
-  if (hubActiveTab === 'lessons') return renderHubLessons();
-  if (hubActiveTab === 'invocations') return renderHubInvocations();
-  if (hubActiveTab === 'gate') return renderHubGate();
-  if (hubActiveTab === 'tasks') return renderHubTasks();
-  return renderHubOverview();
+  let renderer;
+  if (hubActiveTab === 'agents') renderer = renderHubAgents;
+  else if (hubActiveTab === 'skills') renderer = renderHubSkills;
+  else if (hubActiveTab === 'lessons') renderer = renderHubLessons;
+  else if (hubActiveTab === 'invocations') renderer = renderHubInvocations;
+  else if (hubActiveTab === 'gate') renderer = renderHubGate;
+  else if (hubActiveTab === 'tasks') renderer = renderHubTasks;
+  else renderer = renderHubOverview;
+  renderer();
+  hubBody.insertAdjacentHTML('afterbegin', hubTabIntro(hubActiveTab));
+}
+
+function hubTabIntro(tab) {
+  const map = {
+    overview:    { icon: '📊', title: '总览', desc: 'agent / 任务 / 调用 / 课程的整体快照。点 KPI 数字可跳转对应 tab。' },
+    agents:      { icon: '🤖', title: 'Agent 管理', desc: '查看并配置 CLI 路径、Base URL、API Key、模型、角色卡。可使用模板快速套用。' },
+    skills:      { icon: '🧩', title: 'Skills 路由', desc: '按需加载的 Skill 清单。支持导入新 skill；agent 调用时根据 mention 路由按需注入。' },
+    lessons:     { icon: '📚', title: 'Lessons 课程', desc: 'agent 失败时记录的踩坑与原因，供下次任务规划参考。' },
+    invocations: { icon: '⏱', title: '调用历史', desc: '所有 agent CLI 调用记录：耗时、状态、退出码、stderr。可定位疑难 case。' },
+    gate:        { icon: '🚦', title: 'Reviewer Gate', desc: '任务完成后的人工通过 / 返工节点。后续将由 reviewer agent 自动审。' },
+    tasks:       { icon: '📋', title: '任务清单', desc: 'pending / in_progress / done / failed 全量任务。可点 ▶ 重跑或查看 lesson。' },
+  };
+  const m = map[tab] || { icon: '·', title: tab, desc: '' };
+  return `<div class="hub-tab-intro">
+    <span class="hub-tab-intro-icon">${m.icon}</span>
+    <div class="hub-tab-intro-text">
+      <strong>${esc(m.title)}</strong>
+      <span>${esc(m.desc)}</span>
+    </div>
+  </div>`;
 }
 
 function renderHubOverview() {
@@ -1567,6 +2038,10 @@ function renderHubSkills() {
     </div>
     <section class="hub-section">
       <div class="hub-section-title">本次按需加载 <span class="hub-mini-note">根据当前输入、模式和 agent 选择</span></div>
+      <div class="hub-actions" style="margin-bottom:8px;">
+        <button class="hub-action-btn" data-hub-action="skill-import">＋ 导入 Skill</button>
+        <span style="font-size:11px;color:var(--muted);">支持粘贴 yaml 或填写表单（路由按 mention/category 匹配）</span>
+      </div>
       <div class="hub-list">
         ${hubState.selectedSkills.length ? hubState.selectedSkills.map(skill => `<div class="hub-row">
           <div class="hub-row-main">
@@ -1739,8 +2214,38 @@ function bindHubActions() {
       if (action === 'lesson-task') {
         await focusTasks(btn.dataset.taskQuery || '');
       }
+      if (action === 'skill-import') {
+        await openSkillImportDialog();
+      }
     };
   });
+}
+
+async function openSkillImportDialog() {
+  const sample = `- name: my-new-skill
+  category: codeReview
+  trigger: '@codex'
+  description: 简短描述
+  load: progressive
+  mounts:
+    worker: true
+    reviewer: true
+  prompt: "在执行前，请先 …"`;
+  const yaml = prompt('粘贴 skill 的 YAML 定义（参考下面格式）：\n\n' + sample, sample);
+  if (!yaml || !yaml.trim()) return;
+  try {
+    const res = await fetch('/api/skills/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ yaml }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '导入失败');
+    addSystemMsg(`✓ Skill 已导入，当前共 ${data.total} 条`);
+    await loadHub();
+  } catch (err) {
+    addSystemMsg(`✗ Skill 导入失败：${err.message}`);
+  }
 }
 
 async function submitGateDecision(taskId, decision, btn) {
@@ -1806,6 +2311,7 @@ async function loadAgentConfig() {
       const restrictionsStr = Array.isArray(a.restrictions) ? a.restrictions.join('、') : (a.restrictions || '');
       const card = document.createElement('div');
       card.className = 'agent-card';
+      card.dataset.agent = a.key;
       card.innerHTML = `
         <div class="agent-card-header">
           <span style="font-size:18px;">${meta.emoji}</span>
@@ -1826,9 +2332,46 @@ async function loadAgentConfig() {
           style="font-size:11px;margin-top:5px;color:${a.available ? 'var(--green)' : (a.path ? 'var(--red)' : 'var(--muted)')};">
           ${esc(statusText)}
         </div>
+        <div class="role-card-fields" style="margin-top:8px;">
+          <label style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+            <span style="white-space:nowrap;font-size:12px;color:var(--muted);width:60px;">API Key</span>
+            <div style="flex:1;position:relative;display:flex;align-items:center;">
+              <input class="role-input api-key-input" data-agent="${a.key}" data-field="apiKey"
+                type="password"
+                value="${esc(a.apiKey || '')}"
+                placeholder="Bearer Token / API Key（可选，不保存到 git）"
+                style="flex:1;padding-right:32px;">
+              <button type="button" class="api-key-eye" data-agent="${a.key}"
+                style="position:absolute;right:6px;background:none;border:none;cursor:pointer;color:var(--muted);font-size:13px;padding:0;line-height:1;"
+                title="显示/隐藏">👁</button>
+            </div>
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+            <span style="white-space:nowrap;font-size:12px;color:var(--muted);width:60px;">Base URL</span>
+            <input class="role-input base-url-input" data-agent="${a.key}" data-field="baseUrl"
+              value="${esc(a.baseUrl || '')}" placeholder="例如 https://aigw.ds.163.com/v1" style="flex:1;">
+            <button class="path-check-btn fetch-models-btn" data-agent="${a.key}" style="white-space:nowrap;font-size:11px;">拉取模型</button>
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+            <span style="white-space:nowrap;font-size:12px;color:var(--muted);width:60px;">Model</span>
+            <select class="role-input model-select" data-agent="${a.key}" data-field="model" style="flex:1;">
+              <option value="${esc(a.model || '')}">${a.model ? esc(a.model) : '— 手动填写或先拉取列表 —'}</option>
+            </select>
+            <input class="role-input model-input" data-agent="${a.key}" data-field="model"
+              value="${esc(a.model || '')}" placeholder="或手动输入模型名" style="flex:1;">
+          </label>
+          <button class="role-card-save-btn model-save-btn" data-agent="${a.key}" style="margin-bottom:0;">保存 API 配置</button>
+          <span class="role-card-save-tip hidden" data-tip-model="${a.key}"></span>
+        </div>
         <details class="role-card-details">
           <summary class="role-card-summary">角色卡 <span style="font-size:10px;color:var(--muted);">（注入每次调用的 prompt 头部）</span></summary>
           <div class="role-card-fields">
+            <div class="agent-template-row">
+              <label>📋 模板：</label>
+              <select class="agent-template-select" data-agent="${a.key}">
+                ${ROLE_TEMPLATES.map(t => `<option value="${esc(t.key)}">${esc(t.label)}</option>`).join('')}
+              </select>
+            </div>
             <label>角色描述
               <input class="role-input" data-agent="${a.key}" data-field="roleDescription"
                 value="${esc(a.roleDescription || '')}" placeholder="例如：任务规划、代码审查、自迭代协调者">
@@ -1850,6 +2393,25 @@ async function loadAgentConfig() {
           </div>
         </details>`;
       agentFormEl.appendChild(card);
+
+      // 眼睛按钮：切换 API Key 显示/隐藏
+      card.querySelectorAll('.api-key-eye').forEach(eyeBtn => {
+        eyeBtn.onclick = () => {
+          const input = agentFormEl.querySelector(`.api-key-input[data-agent="${eyeBtn.dataset.agent}"]`);
+          if (!input) return;
+          input.type = input.type === 'password' ? 'text' : 'password';
+          eyeBtn.textContent = input.type === 'password' ? '👁' : '🙈';
+        };
+      });
+
+      // 角色模板下拉
+      card.querySelectorAll('.agent-template-select').forEach(sel => {
+        sel.onchange = () => {
+          applyRoleTemplate(card, sel.value);
+          sel.value = '';
+        };
+      });
+
       if (a.removable !== false) {
         const removeBtn = document.createElement('button');
         removeBtn.className = 'agent-remove-btn';
@@ -1862,8 +2424,66 @@ async function loadAgentConfig() {
       }
     });
 
+    // 拉取模型列表按钮
+    agentFormEl.querySelectorAll('.fetch-models-btn').forEach(btn => {
+      btn.onclick = async () => {
+        const key = btn.dataset.agent;
+        const urlInput = agentFormEl.querySelector(`.base-url-input[data-agent="${key}"]`);
+        const apiKeyInput = agentFormEl.querySelector(`.api-key-input[data-agent="${key}"]`);
+        const sel = agentFormEl.querySelector(`.model-select[data-agent="${key}"]`);
+        const manualInput = agentFormEl.querySelector(`.model-input[data-agent="${key}"]`);
+        const baseUrl = urlInput?.value.trim();
+        const apiKey = apiKeyInput?.value.trim() || '';
+        if (!baseUrl) { btn.textContent = '需要 URL'; setTimeout(() => { btn.textContent = '拉取模型'; }, 1500); return; }
+        btn.disabled = true;
+        btn.textContent = '…';
+        try {
+          const params = new URLSearchParams({ baseUrl });
+          if (apiKey) params.set('apiKey', apiKey);
+          const { models, error } = await fetch(`/api/models?${params}`).then(r => r.json());
+          if (models && models.length) {
+            const current = manualInput?.value.trim() || '';
+            sel.innerHTML = models.map(m => `<option value="${esc(m)}" ${m === current ? 'selected' : ''}>${esc(m)}</option>`).join('');
+            sel.classList.remove('hidden');
+            if (manualInput) {
+              sel.onchange = () => { manualInput.value = sel.value; };
+              if (!current) { manualInput.value = models[0]; sel.value = models[0]; }
+            }
+            btn.textContent = `✓ ${models.length} 个`;
+          } else {
+            btn.textContent = error ? '失败' : '空列表';
+          }
+        } catch { btn.textContent = '请求失败'; }
+        btn.disabled = false;
+        if (btn.textContent === '失败' || btn.textContent === '请求失败') setTimeout(() => { btn.textContent = '拉取模型'; }, 2000);
+      };
+    });
+
+    // 保存 API 配置（baseUrl + model）
+    agentFormEl.querySelectorAll('.model-save-btn').forEach(btn => {
+      btn.onclick = async () => {
+        const key = btn.dataset.agent;
+        const tip = agentFormEl.querySelector(`[data-tip-model="${key}"]`);
+        const baseUrl = agentFormEl.querySelector(`.base-url-input[data-agent="${key}"]`)?.value.trim() || '';
+        const apiKey = agentFormEl.querySelector(`.api-key-input[data-agent="${key}"]`)?.value.trim() || '';
+        const model = agentFormEl.querySelector(`.model-input[data-agent="${key}"]`)?.value.trim() || '';
+        btn.textContent = '保存中…';
+        try {
+          await fetch(`/api/agents/${encodeURIComponent(key)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ baseUrl, apiKey, model }),
+          });
+          if (tip) { tip.textContent = '✓ 已保存'; tip.style.color = 'var(--green)'; tip.classList.remove('hidden'); setTimeout(() => tip.classList.add('hidden'), 2000); }
+        } catch (e) {
+          if (tip) { tip.textContent = `失败：${e.message}`; tip.style.color = 'var(--red)'; tip.classList.remove('hidden'); }
+        }
+        btn.textContent = '保存 API 配置';
+      };
+    });
+
     // 检测按钮：临时保存当前输入路径后调 /api/agents，看返回的 available
-    agentFormEl.querySelectorAll('.path-check-btn').forEach(btn => {
+    agentFormEl.querySelectorAll('.path-check-btn:not(.fetch-models-btn)').forEach(btn => {
       btn.onclick = async () => {
         const key = btn.dataset.agent;
         const input = agentFormEl.querySelector(`.path-input[data-agent="${key}"]`);
@@ -1972,28 +2592,43 @@ workspaceSaveBtn.onclick = async () => {
 };
 
 drawerSaveBtn.onclick = async () => {
-  const inputs = agentFormEl.querySelectorAll('.path-input');
-  const payload = {};
-  inputs.forEach(inp => { payload[inp.dataset.agent] = inp.value.trim(); });
+  // 从 UI 收集每个 agent 的完整字段（path + baseUrl + apiKey + model + 角色卡）
+  const cards = agentFormEl.querySelectorAll('.agent-card[data-agent]');
+  const nextAgents = agentConfigList.map(orig => ({ ...orig }));
+  cards.forEach(card => {
+    const key = card.dataset.agent;
+    const target = nextAgents.find(a => a.key === key);
+    if (!target) return;
+    const get = (sel) => card.querySelector(sel)?.value?.trim() ?? '';
+    const pathVal    = get(`.path-input[data-agent="${key}"]`);
+    const baseUrl    = get(`.base-url-input[data-agent="${key}"]`);
+    const apiKey     = get(`.api-key-input[data-agent="${key}"]`);
+    const model      = get(`.model-input[data-agent="${key}"]`)
+                    || get(`.model-text-input[data-agent="${key}"]`);
+    if (pathVal !== undefined) target.path = pathVal;
+    if (baseUrl !== undefined) target.baseUrl = baseUrl;
+    if (apiKey !== undefined)  target.apiKey = apiKey;
+    if (model !== undefined)   target.model = model;
+    // 角色卡字段（如果存在）
+    const roleDesc  = card.querySelector(`.role-input[data-agent="${key}"][data-field="roleDescription"]`)?.value?.trim();
+    const personality = card.querySelector(`.role-input[data-agent="${key}"][data-field="personality"]`)?.value?.trim();
+    const strengthsRaw = card.querySelector(`.role-input[data-agent="${key}"][data-field="strengths"]`)?.value?.trim();
+    const restrictionsRaw = card.querySelector(`.role-input[data-agent="${key}"][data-field="restrictions"]`)?.value?.trim();
+    if (roleDesc !== undefined) target.roleDescription = roleDesc;
+    if (personality !== undefined) target.personality = personality;
+    if (strengthsRaw !== undefined) target.strengths = strengthsRaw.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+    if (restrictionsRaw !== undefined) target.restrictions = restrictionsRaw.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+  });
 
   drawerSaveBtn.disabled = true;
   drawerSaveTip.className = 'drawer-save-tip hidden';
 
   try {
-    const { agents: updated } = await fetch('/api/agents', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    }).then(r => r.json());
-
-    drawerSaveTip.textContent = '✓ 已保存，配置立即生效';
+    await saveAgentList(nextAgents);
+    drawerSaveTip.textContent = '✓ 已保存全部配置（path + API + 角色卡），立即生效';
     drawerSaveTip.className = 'drawer-save-tip ok';
     drawerSaveTip.classList.remove('hidden');
-
-    // 刷新顶部 pills
     loadStatus();
-    // 刷新抽屉状态
-    setTimeout(loadAgentConfig, 300);
   } catch (err) {
     drawerSaveTip.textContent = `✗ 保存失败：${err.message}`;
     drawerSaveTip.className = 'drawer-save-tip err';
@@ -2008,7 +2643,10 @@ const HISTORY_PAGE_SIZE = 20;
 let historyPage = { hasMore: false, nextBefore: null, loading: false };
 
 function clearChatArea() {
+  // 保留当前仍在运行的 bubble row（data-session-id 匹配）——切走再切回时能看到
+  // 其余 DOM 全清，然后重建
   chatEl.innerHTML = '';
+  // agentTypingBubble 指向当前可见 session，切 session 后会由 updateVisibleRunState 重建
   agentTypingBubble = null;
   historyPage = { hasMore: false, nextBefore: null, loading: false };
   const w = document.createElement('div');
@@ -2033,69 +2671,52 @@ function renderSessionList(sessions, activeId) {
   const list = document.getElementById('sessionList');
   list.innerHTML = '';
   sessions.forEach(s => {
+    const isRunning = Boolean(sessionRuns.get(s.id)?.running);
     const item = document.createElement('div');
-    item.className = 'session-item' + (s.id === activeId ? ' active' : '');
+    item.className = 'session-item' + (s.id === activeId ? ' active' : '') + (isRunning ? ' running' : '');
     item.dataset.id = s.id;
     const d = new Date(s.created_at);
     const timeStr = `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
     item.innerHTML = `
-      <div class="session-item-name" data-editing="false">${esc(s.name)}</div>
+      <div class="session-item-header">
+        <div class="session-item-name" data-editing="false">${esc(s.name)}</div>
+        <button class="session-delete-btn" title="删除">✕</button>
+      </div>
       <div class="session-item-meta">
+        ${isRunning ? '<span class="session-running-badge"><span class="session-running-dot"></span>运行中</span>' : ''}
         ${sessionModeBadge(s.mode)}
         <span>${timeStr}</span>
         ${s.message_count ? `<span>· ${s.message_count} 条</span>` : ''}
-      </div>
-      <button class="session-item-more" title="更多操作">···</button>
-      <div class="session-popover hidden">
-        <button class="session-popover-item" data-action="rename">✏ 重命名</button>
-        <button class="session-popover-item danger" data-action="delete">✕ 删除</button>
       </div>`;
 
     const nameEl = item.querySelector('.session-item-name');
-    const moreBtn = item.querySelector('.session-item-more');
-    const popover = item.querySelector('.session-popover');
+    const deleteBtn = item.querySelector('.session-delete-btn');
 
     // 点击主体切换 session
     item.onclick = (e) => {
-      if (e.target.closest('.session-item-more') || e.target.closest('.session-popover')) return;
+      if (e.target.closest('.session-delete-btn')) return;
       if (nameEl.contentEditable === 'true') return;
       if (s.id !== currentSessionId) switchSession(s.id);
     };
 
-    // ··· 按钮开关 popover
-    moreBtn.onclick = (e) => {
+    // 双击改名
+    nameEl.ondblclick = (e) => {
       e.stopPropagation();
-      const isOpen = !popover.classList.contains('hidden');
-      // 关掉其他所有 popover
-      document.querySelectorAll('.session-popover').forEach(p => p.classList.add('hidden'));
-      if (!isOpen) popover.classList.remove('hidden');
+      startRenameSession(s.id, nameEl);
     };
 
-    // popover 菜单项
-    popover.querySelectorAll('.session-popover-item').forEach(btn => {
-      btn.onclick = async (e) => {
-        e.stopPropagation();
-        popover.classList.add('hidden');
-        if (btn.dataset.action === 'delete') {
-          await deleteSession(s.id);
-        } else if (btn.dataset.action === 'rename') {
-          startRenameSession(s.id, nameEl);
-        }
-      };
-    });
+    // 删除按钮
+    deleteBtn.onclick = async (e) => {
+      e.stopPropagation();
+      if (isRunning) {
+        addSystemMsg('⚠ 该 session 正在运行，请先停止后再删除。');
+        return;
+      }
+      await deleteSession(s.id);
+    };
 
     list.appendChild(item);
   });
-
-  // 全局点击关闭所有 popover
-  if (!list._popoverCloseHandler) {
-    list._popoverCloseHandler = (e) => {
-      if (!e.target.closest('.session-item-more') && !e.target.closest('.session-popover')) {
-        document.querySelectorAll('.session-popover').forEach(p => p.classList.add('hidden'));
-      }
-    };
-    document.addEventListener('click', list._popoverCloseHandler);
-  }
 }
 
 function startRenameSession(sessionId, nameEl) {
@@ -2148,8 +2769,8 @@ async function loadSessions() {
 }
 
 async function switchSession(sessionId) {
-  // 如果当前有正在运行的请求（属于其他 session），提示用户后台继续，不打断
-  if (isRunning && currentAbortController) {
+  const leavingRun = getSessionRun(currentSessionId);
+  if (leavingRun?.running) {
     addSystemMsg('⏳ 当前 session 任务在后台继续运行，结果会自动入库，刷新或切回可查看。');
   }
   await fetch('/api/sessions', {
@@ -2157,17 +2778,26 @@ async function switchSession(sessionId) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ activeId: sessionId }),
   });
-  // 关键：清掉运行状态绑定（旧 SSE 仍在后台跑，但前端不再受其约束）
-  currentAbortController = null;
-  setRunning(false);
-  setActiveAgent(null);
-  document.getElementById('stopBtn')?.classList.add('hidden');
 
   currentSessionId = sessionId;
   clearChatArea();
   await loadSessions();
   await loadHistory();
   await loadTasks();
+  updateVisibleRunState();
+  // 强制锚定到最新一条消息（图片/卡片渲染完成后再滚动）
+  scrollToBottomAfterLayout();
+}
+
+function scrollToBottomAfterLayout() {
+  chatEl.scrollTop = chatEl.scrollHeight;
+  // 图片加载完后再钉一次底部
+  const imgs = chatEl.querySelectorAll('img');
+  imgs.forEach(img => {
+    if (img.complete) return;
+    img.addEventListener('load',  () => { chatEl.scrollTop = chatEl.scrollHeight; }, { once: true });
+    img.addEventListener('error', () => { chatEl.scrollTop = chatEl.scrollHeight; }, { once: true });
+  });
 }
 
 async function createSession() {
@@ -2180,6 +2810,7 @@ async function createSession() {
     currentSessionId = session.id;
     await loadSessions();
     clearChatArea();
+    updateVisibleRunState();
     goalInput.focus();
   }
 }
@@ -2192,6 +2823,7 @@ async function deleteSession(sessionId) {
     currentSessionId = activeId;
     clearChatArea();
     await loadHistory();
+    updateVisibleRunState();
   }
   await loadSessions();
   showUndoToast(trashed);
@@ -2374,6 +3006,7 @@ function updateHistoryPager() {
 
 async function loadHistory({ older = false } = {}) {
   if (historyPage.loading) return;
+  const requestedSessionId = currentSessionId;
   historyPage.loading = true;
   updateHistoryPager();
   const prevHeight = chatEl.scrollHeight;
@@ -2383,6 +3016,7 @@ async function loadHistory({ older = false } = {}) {
     if (currentSessionId) params.set('sessionId', currentSessionId);
     if (older && historyPage.nextBefore !== null) params.set('before', String(historyPage.nextBefore));
     const { history, sessionId, page } = await fetch(`/api/history?${params.toString()}`).then(r => r.json());
+    if (requestedSessionId && requestedSessionId !== currentSessionId) return;
     if (sessionId) currentSessionId = sessionId;
     if (history && history.length) {
       if (older) {
@@ -2390,7 +3024,8 @@ async function loadHistory({ older = false } = {}) {
         chatEl.scrollTop = prevTop + (chatEl.scrollHeight - prevHeight);
       } else {
         history.forEach(h => renderHistoryEntry(h, false));
-        scrollChat();
+        // 直接定位到底部，不做滚动动画（用户点对话就从最新消息开始看）
+        chatEl.scrollTop = chatEl.scrollHeight;
       }
     }
     historyPage.hasMore = Boolean(page?.hasMore);

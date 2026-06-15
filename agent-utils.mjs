@@ -100,6 +100,9 @@ export function readAgentRegistry(ENV = loadEnv(), file = AGENTS_FILE) {
       checkTemplate: raw.checkTemplate || base.checkTemplate || '--help',
       envKey: raw.envKey || base.envKey || `${key.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_PATH`,
       removable: raw.removable ?? !AGENT_KEYS.includes(key),
+      baseUrl: String(raw.baseUrl ?? base.baseUrl ?? ''),
+      model: String(raw.model ?? base.model ?? ''),
+      apiKey: String(raw.apiKey ?? base.apiKey ?? ''),
       // 角色卡字段
       roleDescription: raw.roleDescription ?? base.roleDescription ?? '',
       personality: raw.personality ?? base.personality ?? '',
@@ -130,6 +133,9 @@ export function writeAgentRegistry(agents, file = AGENTS_FILE) {
         argsTemplate: String(agent.argsTemplate || '-p {prompt}').trim(),
         checkTemplate: String(agent.checkTemplate || '--help').trim(),
         removable: agent.removable ?? !AGENT_KEYS.includes(key),
+        baseUrl: String(agent.baseUrl || '').trim(),
+        model: String(agent.model || '').trim(),
+        apiKey: String(agent.apiKey || '').trim(),
         // 角色卡字段
         roleDescription: String(agent.roleDescription || '').trim(),
         personality: String(agent.personality || '').trim(),
@@ -178,17 +184,49 @@ export function loadEnv(envPath = '.env') {
   return result;
 }
 
+// 各 agent CLI 对应的环境变量前缀（baseUrl / apiKey / model 通过 env 注入，避免 CLI 不识别 --base-url）
+const AGENT_ENV_MAP = {
+  codex:  { baseUrl: 'OPENAI_BASE_URL',     apiKey: 'OPENAI_API_KEY',     model: 'OPENAI_MODEL' },
+  claude: { baseUrl: 'ANTHROPIC_BASE_URL',  apiKey: 'ANTHROPIC_API_KEY',  model: 'ANTHROPIC_MODEL' },
+  kimi:   { baseUrl: 'KIMI_BASE_URL',       apiKey: 'KIMI_API_KEY',       model: 'KIMI_MODEL' },
+};
+
+function buildAgentSpawnEnv(agent) {
+  const env = { ...process.env };
+  const mapping = AGENT_ENV_MAP[agent.key] || {};
+  // 写入按 agent 类型映射的 env 名
+  if (agent.baseUrl && mapping.baseUrl) env[mapping.baseUrl] = agent.baseUrl;
+  if (agent.apiKey  && mapping.apiKey)  env[mapping.apiKey]  = agent.apiKey;
+  if (agent.model   && mapping.model)   env[mapping.model]   = agent.model;
+  // 额外写入通用名，方便自定义 CLI 读取
+  if (agent.baseUrl) env.AGENT_BASE_URL = agent.baseUrl;
+  if (agent.apiKey)  env.AGENT_API_KEY  = agent.apiKey;
+  if (agent.model)   env.AGENT_MODEL    = agent.model;
+  return env;
+}
+
 // ── CLI 配置工厂（接受已解析的 ENV） ─────────────────────────
 export function buildCliConfig(ENV) {
   const config = {};
   for (const agent of readAgentRegistry(ENV)) {
+    // 注意：不再把 --base-url / --api-key / --model 强行拼到 argsTemplate，
+    // 因为不同 CLI 不一定识别（如 claude CLI 不识别 --base-url）。
+    // 通过 spawnOptions.env 注入，由 CLI 自行读取对应 env 变量。
+    // 用户如果显式在 argsTemplate 里写了 {model}/{baseUrl}/{apiKey}，仍按模板替换。
+    let effectiveTemplate = agent.argsTemplate
+      .replaceAll('{model}',   agent.model   || '')
+      .replaceAll('{baseUrl}', agent.baseUrl || '')
+      .replaceAll('{apiKey}',  agent.apiKey  || '');
     config[agent.key] = {
       ...agent,
       path: agent.path || '',
       inputMode: agent.inputMode,
-      args: (prompt) => splitArgs(agent.argsTemplate, prompt),
+      args: (prompt) => splitArgs(effectiveTemplate, prompt),
       checkArgs: () => splitArgs(agent.checkTemplate || '--help'),
-      spawnOptions: { stdio: [agent.inputMode === 'stdin' ? 'pipe' : 'ignore', 'pipe', 'pipe'] },
+      spawnOptions: {
+        stdio: [agent.inputMode === 'stdin' ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+        env: buildAgentSpawnEnv(agent),
+      },
     };
   }
   return config;
@@ -224,12 +262,32 @@ function parseClaude(line) {
 }
 
 function parseCodex(line) {
-  // codex exec --json：type=item.completed 行含 item.text
-  // codex 不分思考流，直接返回文本
+  // codex exec --json 输出 JSONL，每行一个事件。常见类型：
+  //   thread.started / turn.started  — 启动信号（无文本）
+  //   agent_message_delta / item.delta — 增量文本（更早展现给用户）
+  //   reasoning / agent_reasoning_delta — 思考流
+  //   item.completed                 — 完整段输出（兜底）
+  //   error / turn.failed           — 失败事件（必须抛出，否则前端傻等）
   try {
     const e = JSON.parse(line);
-    if (e.type === 'item.completed' && e.item?.text) return e.item.text;
-  } catch {}
+    // 失败事件 → 抛错让外层 reject
+    if (e.type === 'error' || e.type === 'turn.failed') {
+      const msg = e.message || e.error?.message || JSON.stringify(e);
+      throw Object.assign(new Error(`codex: ${msg}`), { __agentError: true });
+    }
+    // 增量文本（不同 codex 版本字段名不同）
+    if (e.type === 'agent_message_delta' && typeof e.delta === 'string') return { text: e.delta, thinking: '' };
+    if (e.type === 'item.delta' && typeof e.delta?.text === 'string') return { text: e.delta.text, thinking: '' };
+    if (e.type === 'response.output_text.delta' && typeof e.delta === 'string') return { text: e.delta, thinking: '' };
+    // 思考流
+    if (e.type === 'agent_reasoning_delta' && typeof e.delta === 'string') return { text: '', thinking: e.delta };
+    if (e.type === 'response.reasoning.delta' && typeof e.delta === 'string') return { text: '', thinking: e.delta };
+    // 完整段（兜底）
+    if (e.type === 'item.completed' && e.item?.text) return { text: e.item.text, thinking: '' };
+    if (e.type === 'agent_message' && typeof e.message === 'string') return { text: e.message, thinking: '' };
+  } catch (err) {
+    if (err && err.__agentError) throw err;
+  }
   return null;
 }
 
@@ -541,6 +599,8 @@ export const PLAN_PROMPT = `你是 myteam 的任务规划 agent。
 - 不要分析用户意图，不要解释，不要思考过程，不要 markdown 代码块
 - 如果目标是一个问题或闲聊，也必须把它拆成任务返回，不要直接回答
 - 第一个字符必须是 {，最后一个字符必须是 }
+- 严禁调用任何工具（包括 view_image / read_image / read_file / web_search / shell 等）。本阶段不需要看图或读文件。如果任务需要这些操作，请把"分析图片"或"阅读文件"作为子任务标题写到 JSON 里，由后续执行阶段处理。
+- 严禁请求授权、严禁等待用户确认。直接基于用户文字目标拆解。
 
 严格按以下 JSON 格式返回：
 {

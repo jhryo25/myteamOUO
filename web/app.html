@@ -57,13 +57,13 @@
     <button class="drawer-close" id="hubClose">✕</button>
   </div>
   <div class="hub-tabs" id="hubTabs">
-    <button class="hub-tab active" data-tab="overview">总览</button>
-    <button class="hub-tab" data-tab="agents">Agent</button>
-    <button class="hub-tab" data-tab="skills">Skills</button>
-    <button class="hub-tab" data-tab="lessons">Lessons</button>
-    <button class="hub-tab" data-tab="invocations">调用</button>
-    <button class="hub-tab" data-tab="gate">Gate</button>
-    <button class="hub-tab" data-tab="tasks">任务</button>
+    <button class="hub-tab active" data-tab="overview" title="项目状态总览：agent / 任务 / 课程统计">📊 总览</button>
+    <button class="hub-tab" data-tab="agents" title="管理 Agent 路径、API、模型、角色卡">🤖 Agent</button>
+    <button class="hub-tab" data-tab="skills" title="按需加载的 Skill 列表，支持导入和路由">🧩 Skills</button>
+    <button class="hub-tab" data-tab="lessons" title="agent 失败时记录的踩坑记录">📚 Lessons</button>
+    <button class="hub-tab" data-tab="invocations" title="所有 agent 调用历史（耗时 / 状态）">⏱ 调用</button>
+    <button class="hub-tab" data-tab="gate" title="Reviewer Gate：等待人工通过的 PR/任务">🚦 Gate</button>
+    <button class="hub-tab" data-tab="tasks" title="待办任务清单（pending / in_progress / done）">📋 任务</button>
   </div>
   <div class="hub-body" id="hubBody">
     <div class="hub-loading">正在读取本地状态…</div>
@@ -154,6 +154,28 @@
           <button class="filter-chip" data-filter="done">已完成</button>
           <button class="filter-chip" data-filter="failed">失败</button>
         </div>
+      </div>
+      <!-- 当前正在运行的 invocation 实时面板 -->
+      <div class="running-panel hidden" id="runningPanel">
+        <div class="running-panel-title">
+          <span class="running-panel-dot"></span>
+          <span>正在执行</span>
+          <span class="running-panel-elapsed" id="runningElapsed">0s</span>
+        </div>
+        <div class="running-panel-body" id="runningBody"></div>
+      </div>
+      <!-- 批量操作工具条 -->
+      <div class="tasks-bulk-bar hidden" id="tasksBulkBar">
+        <label class="tasks-bulk-select-all">
+          <input type="checkbox" id="tasksSelectAll"> 全选
+        </label>
+        <span class="tasks-bulk-count" id="tasksBulkCount">已选 0</span>
+        <button class="tasks-bulk-btn" data-bulk="rerun">↻ 重跑</button>
+        <button class="tasks-bulk-btn danger" data-bulk="delete">✕ 删除</button>
+        <button class="tasks-bulk-btn" data-bulk="cancel" style="margin-left:auto;">取消</button>
+      </div>
+      <div class="tasks-list-actions">
+        <button class="tasks-bulk-toggle" id="tasksBulkToggle">☑ 批量管理</button>
       </div>
       <div class="tasks-list" id="tasksList">
         <div class="tasks-empty">暂无任务</div>

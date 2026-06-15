@@ -453,6 +453,14 @@ function attachmentPrompt(attachments = []) {
   return list ? `\n\n【图片输入】\n用户这次发送了图片。请先观察和分析图片，再回答用户的问题。\n如果你的运行环境无法直接读取图片，请明确说明“当前 agent 无法直接读取图片”，并告诉用户需要补充什么信息，不要假装已经看过图片。\n本地图片路径如下：\n${list}` : '';
 }
 
+// 给 plan 阶段使用：不传具体路径，避免 agent 自动调 view_image 工具导致失败。
+// 拆任务只需要让 agent 知道"有图"，让它据文字目标拆任务，具体读图交给后续执行 agent。
+function attachmentPromptForPlan(attachments = []) {
+  const arr = Array.isArray(attachments) ? attachments.filter(a => a && a.path) : [];
+  if (!arr.length) return '';
+  return `\n\n【图片附件提示】\n用户额外上传了 ${arr.length} 张图片（拆任务阶段不需要你查看）。\n请直接根据用户文字目标拆解任务；若任务需要分析图片，请在对应任务里明确写出 "分析图片：xxx"，由具体执行 agent 阶段处理。\n切勿调用 view_image / read_image 等工具，本阶段只输出 JSON。`;
+}
+
 const PORT = (() => {
   const i = process.argv.indexOf('--port');
   return i >= 0 ? Number(process.argv[i + 1]) : 7878;
@@ -486,24 +494,27 @@ function sseSend(res, event, data) {
 }
 
 // ── 活跃子进程追踪（用于 abort） ──────────────────────────────
-const activeChildren = new Map(); // id → child process
+const activeChildren = new Map(); // id → { child, sessionId, clientRunId, aborted }
 let childIdSeq = 0;
-let isAborting = false;
 
-function abortAllChildren() {
-  isAborting = true;
-  for (const [id, child] of activeChildren) {
-    try { child.kill('SIGTERM'); } catch { /* already dead */ }
+function abortChildren({ sessionId = '', clientRunId = '' } = {}) {
+  if (!sessionId && !clientRunId) return 0;
+  let count = 0;
+  for (const [id, record] of activeChildren) {
+    if (clientRunId && record.clientRunId !== clientRunId) continue;
+    if (!clientRunId && sessionId && record.sessionId !== sessionId) continue;
+    record.aborted = true;
+    count++;
+    try { record.child.kill('SIGTERM'); } catch { /* already dead */ }
   }
-  activeChildren.clear();
-  setTimeout(() => { isAborting = false; }, 1000);
+  return count;
 }
 
 // ── 调用 agent 并实时流到 SSE ─────────────────────────────────
 // 教训1 (02-cli-engineering): readline 接管 stdout 后，child.stdout.on('data') 不再触发。
 // watchdog 必须在 rl.on('line') 和 stderr.on('data') 里刷新。
 // 教训1: 超时 30min，匹配复杂任务实际需要。
-function streamAgent(agentKey, prompt, res, label = 'chunk', { skipRoleCard = false } = {}) {
+function streamAgent(agentKey, prompt, res, label = 'chunk', { skipRoleCard = false, sessionId = '', clientRunId = '' } = {}) {
   const invocationId = randomUUID().slice(0, 8);
   const startedAt = Date.now();
   const startedIso = new Date(startedAt).toISOString();
@@ -561,7 +572,8 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', { skipRoleCard = fa
     }
 
     const cid = ++childIdSeq;
-    activeChildren.set(cid, child);
+    const childRecord = { child, sessionId, clientRunId, aborted: false };
+    activeChildren.set(cid, childRecord);
 
     child.on('error', (err) => {
       fail(new Error(formatLaunchError(agentKey, err)), cid);
@@ -599,7 +611,15 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', { skipRoleCard = fa
     rl.on('line', (line) => {
       touch(); // 教训1: readline 接管后在这里刷新
       if (!line.trim()) return;
-      const out = parser(line);
+      let out;
+      try {
+        out = parser(line);
+      } catch (parseErr) {
+        // parser 显式抛错（如 codex turn.failed / error 事件）→ 直接终止 stream
+        try { child.kill('SIGTERM'); } catch {}
+        fail(new Error(parseErr.message || String(parseErr)), cid);
+        return;
+      }
       if (!out) return;
       // 兼容旧 parser 返回字符串 vs 新 parser 返回 { text, thinking }
       const text = typeof out === 'string' ? out : (out.text || '');
@@ -633,7 +653,7 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', { skipRoleCard = fa
         exit_code: code,
         output_chars: fullText.length,
       };
-      if (isAborting) {
+      if (childRecord.aborted) {
         finishInvocation('interrupted', { ...common, error: 'aborted' });
         resolve(fullText);
       } else if (code !== 0) {
@@ -776,8 +796,11 @@ async function handle(req, res) {
   }
 
   if (req.method === 'POST' && pathname === '/api/abort') {
-    const count = activeChildren.size;
-    abortAllChildren();
+    const body = await readBody(req);
+    const count = abortChildren({
+      sessionId: String(body.sessionId || ''),
+      clientRunId: String(body.clientRunId || ''),
+    });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ aborted: count }));
   }
@@ -919,6 +942,7 @@ async function handle(req, res) {
   if (req.method === 'POST' && pathname === '/api/chat') {
     const body = await readBody(req);
     const message = (body.message || '').trim();
+    const clientRunId = String(body.clientRunId || '');
     const attachments = Array.isArray(body.attachments) ? body.attachments : [];
     if (!message && !attachments.length) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -955,7 +979,7 @@ async function handle(req, res) {
       if (!agentStatus?.available) {
         throw new Error(`${agentKey} 不可用：${agentStatus?.error || '没有可启动的 agent'}`);
       }
-      fullReply = await streamAgent(agentKey, prompt, res, 'chunk');
+      fullReply = await streamAgent(agentKey, prompt, res, 'chunk', { sessionId: session.id, clientRunId });
       session.history.push({ role: 'assistant', text: fullReply, agent: agentKey });
       if (session.history.length > 40) session.history.splice(0, session.history.length - 40);
       saveSessions();
@@ -1000,7 +1024,7 @@ async function handle(req, res) {
       return res.end(JSON.stringify({ error: `agent ${agentKey} 不存在` }));
     }
     // 只允许更新角色卡字段和基础展示字段
-    const allowed = ['label', 'emoji', 'desc', 'roleDescription', 'personality', 'strengths', 'restrictions'];
+    const allowed = ['label', 'emoji', 'desc', 'baseUrl', 'apiKey', 'model', 'roleDescription', 'personality', 'strengths', 'restrictions'];
     for (const field of allowed) {
       if (body[field] !== undefined) current[idx][field] = body[field];
     }
@@ -1067,7 +1091,42 @@ async function handle(req, res) {
     return res.end(JSON.stringify({ tasks: readTasks() }));
   }
 
-  // GET /api/skills — 返回 MVP 静态技能清单
+  // GET /api/models?baseUrl=...&apiKey=... — 从 OpenAI 兼容 API 拉取模型列表
+  if (req.method === 'GET' && pathname === '/api/models') {
+    const baseUrl = (url.searchParams.get('baseUrl') || '').trim().replace(/\/+$/, '');
+    const apiKey = (url.searchParams.get('apiKey') || '').trim();
+    if (!baseUrl) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'baseUrl 不能为空' }));
+    }
+    try {
+      const { default: https } = await import('https');
+      const { default: http } = await import('http');
+      const modelsUrl = new URL(`${baseUrl}/models`);
+      const lib = modelsUrl.protocol === 'https:' ? https : http;
+      const reqOptions = { timeout: 5000 };
+      if (apiKey) reqOptions.headers = { Authorization: `Bearer ${apiKey}` };
+      const data = await new Promise((resolve, reject) => {
+        const hreq = lib.get(modelsUrl.toString(), reqOptions, (resp) => {
+          let body = '';
+          resp.on('data', c => { body += c; });
+          resp.on('end', () => {
+            try { resolve(JSON.parse(body)); } catch { reject(new Error(`返回非 JSON: ${body.slice(0, 80)}`)); }
+          });
+        });
+        hreq.on('error', reject);
+        hreq.on('timeout', () => { hreq.destroy(); reject(new Error('请求超时')); });
+      });
+      const models = (data.data || data.models || []).map(m => typeof m === 'string' ? m : (m.id || m.name || '')).filter(Boolean);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ models }));
+    } catch (err) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ models: [], error: err.message }));
+    }
+  }
+
+
   if (req.method === 'GET' && pathname === '/api/skills') {
     const skills = readSkills();
     const text = url.searchParams.get('text') || '';
@@ -1087,6 +1146,45 @@ async function handle(req, res) {
       summary,
       contextPreview: buildSkillContext(selected),
     }));
+  }
+
+  // POST /api/skills/import — 导入 skill（追加 yaml 或单条 JSON）
+  if (req.method === 'POST' && pathname === '/api/skills/import') {
+    const body = await readBody(req);
+    try {
+      const lines = [];
+      if (typeof body.yaml === 'string' && body.yaml.trim()) {
+        // 直接追加 yaml 文本
+        lines.push(body.yaml.trimEnd());
+      } else if (body.skill && typeof body.skill === 'object') {
+        const s = body.skill;
+        if (!s.name) throw new Error('skill.name 必填');
+        lines.push(`- name: ${s.name}`);
+        if (s.category)    lines.push(`  category: ${s.category}`);
+        if (s.trigger)     lines.push(`  trigger: ${s.trigger}`);
+        if (s.description) lines.push(`  description: ${s.description}`);
+        if (s.load)        lines.push(`  load: ${s.load}`);
+        if (s.prompt)      lines.push(`  prompt: ${JSON.stringify(s.prompt)}`);
+        if (s.mounts && typeof s.mounts === 'object') {
+          lines.push('  mounts:');
+          for (const [role, on] of Object.entries(s.mounts)) {
+            lines.push(`    ${role}: ${on ? 'true' : 'false'}`);
+          }
+        }
+      } else {
+        throw new Error('需要 yaml 文本或 skill 对象');
+      }
+      mkdirSync('.myteam', { recursive: true });
+      const header = existsSync(SKILLS_FILE) ? '' : 'skills:\n';
+      const append = (header ? header : '') + lines.join('\n') + '\n';
+      appendFileSync(SKILLS_FILE, append, 'utf8');
+      const skills = readSkills();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, total: skills.length, skills }));
+    } catch (err) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: err.message }));
+    }
   }
 
   // GET /api/invocations — 返回 agent 调用记录，用于轻量成本/稳定性看板
@@ -1241,6 +1339,7 @@ async function handle(req, res) {
   if (req.method === 'POST' && pathname === '/api/plan') {
     const body = await readBody(req);
     const goal = (body.goal || '').trim();
+    const clientRunId = String(body.clientRunId || '');
     const agentKey = body.agent || agentKeys()[0] || 'codex';
     const attachments = Array.isArray(body.attachments) ? body.attachments : [];
     if (!goal && !attachments.length) {
@@ -1265,9 +1364,11 @@ async function handle(req, res) {
       }
       const effectiveGoal = goal || '请根据上传的图片内容制定合理的执行计划';
       const skillContext = buildSkillContext(selectSkills({ text: effectiveGoal, agent: agentKey, phase: 'plan' }));
-      const imgPrompt = attachmentPrompt(attachments);
+      // 拆任务阶段不让 agent 直接看图（避免 view_image 工具调用导致 exit 1）；
+      // 只告知"有图"，由后续执行 agent 阶段处理读图。
+      const imgPrompt = attachmentPromptForPlan(attachments);
       const prompt = `${PLAN_PROMPT}${skillContext ? `\n\n本次按需加载的 Skills：\n${skillContext}` : ''}\n\n用户目标：${effectiveGoal}${imgPrompt}`;
-      const raw = await streamAgent(agentKey, prompt, res, 'chunk', { skipRoleCard: true });
+      const raw = await streamAgent(agentKey, prompt, res, 'chunk', { skipRoleCard: true, sessionId: session.id, clientRunId });
       const data = extractJson(raw);
       // 教训2: 严格验证，防止幻觉数据写入 tasks.jsonl
       const validation = validatePlanResult(data);
@@ -1326,7 +1427,8 @@ async function handle(req, res) {
         kind: 'plan-error',
       });
       saveSessions();
-      sseSend(res, 'error', { message: err.message });
+      // 把完整错误信息（含 stderr）暴露给前端，方便用户排查
+      sseSend(res, 'error', { message: err.message, raw: '' });
     }
     return res.end();
   }
@@ -1335,6 +1437,8 @@ async function handle(req, res) {
   // 支持 A2A Worklist：agent 回复中的 @mention 自动触发链式任务
   if (req.method === 'POST' && pathname === '/api/dispatch') {
     const body = await readBody(req);
+    const clientRunId = String(body.clientRunId || '');
+    const sessionId = String(body.sessionId || '');
     const filterRun = body.runId || '';
     const filterTask = body.taskId || '';
     const filterAgent = body.agentOnly || '';
@@ -1381,7 +1485,7 @@ async function handle(req, res) {
       try {
         const skillText = [task.goal, task.title, task.accept, ...(task.steps || [])].join('\n');
         const skillContext = buildSkillContext(selectSkills({ text: skillText, agent: agentKey, phase: 'run' }));
-        const result = await streamAgent(agentKey, buildExecPrompt(task, skillContext), res, `task-chunk:${task.id}`);
+        const result = await streamAgent(agentKey, buildExecPrompt(task, skillContext), res, `task-chunk:${task.id}`, { sessionId, clientRunId });
         patchTask(task.id, {
           status: 'done',
           finished_at: new Date().toISOString(),

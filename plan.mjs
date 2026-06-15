@@ -3,26 +3,10 @@
 
 import { appendFileSync } from 'fs';
 import { randomUUID } from 'crypto';
-import { loadEnv, buildCliConfig, invokeAgent, extractJson, validatePlanResult, AGENT_KEYS } from './agent-utils.mjs';
+import { loadEnv, buildCliConfig, invokeAgent, extractJson, validatePlanResult, AGENT_KEYS, PLAN_PROMPT } from './agent-utils.mjs';
 
 const ENV = loadEnv();
 const CLI_CONFIG = buildCliConfig(ENV);
-
-const SYSTEM_PROMPT = `你是 myteam 的任务规划 agent。
-用户会给你一个目标，把它拆成 3-7 个可执行、可验收的小任务。
-
-严格按以下 JSON 格式返回，不要有任何额外解释或 markdown 包裹：
-{
-  "goal": "<原始目标>",
-  "tasks": [
-    {
-      "title": "<任务标题>",
-      "steps": ["<步骤1>", "<步骤2>"],
-      "accept": "<验收标准>",
-      "agent": "<推荐执行者: claude|codex|kimi>"
-    }
-  ]
-}`;
 
 function writeTasks(goal, tasks, agentKey) {
   const tasksFile = '.myteam/tasks.jsonl';
@@ -72,7 +56,7 @@ console.log(`正在调用 ${agentKey} 拆分任务，请稍候...\n目标：${go
 
 let rawOutput;
 try {
-  rawOutput = await invokeAgent(CLI_CONFIG, agentKey, `${SYSTEM_PROMPT}\n\n用户目标：${goal}`);
+  rawOutput = await invokeAgent(CLI_CONFIG, agentKey, `${PLAN_PROMPT}\n\n用户目标：${goal}`);
 } catch (err) {
   console.error(`\n调用失败：${err.message}`);
   process.exit(1);

@@ -7,7 +7,7 @@ import { resolve, basename, extname } from 'path';
 import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
-import { loadEnv, buildCliConfig, invokeAgent, extractJson, PARSERS, validatePlanResult, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, AGENT_KEYS, buildSpawnCommand, checkAgentLaunchable, formatLaunchError, readAgentRegistry, writeAgentRegistry, sanitizeAgentKey } from './agent-utils.mjs';
+import { loadEnv, buildCliConfig, invokeAgent, extractJson, PARSERS, validatePlanResult, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, AGENT_KEYS, buildSpawnCommand, checkAgentLaunchable, formatLaunchError, readAgentRegistry, writeAgentRegistry, sanitizeAgentKey, buildRoleCard } from './agent-utils.mjs';
 
 let ENV = loadEnv();
 let CLI_CONFIG = buildCliConfig(ENV);
@@ -242,7 +242,14 @@ function newSession(name) {
     name: name || DEFAULT_DRAFT_SESSION_NAME,
     created_at: new Date().toISOString(),
     history: [],
+    mode: null, // 'chat' | 'plan' | 'mixed'，由首次/最近一次操作决定
   };
+}
+
+function recordSessionMode(session, mode) {
+  if (!session) return;
+  if (!session.mode) session.mode = mode;
+  else if (session.mode !== mode) session.mode = 'mixed';
 }
 
 function isAutoSessionName(name) {
@@ -302,6 +309,7 @@ function loadSessions() {
         name: s.name || DEFAULT_SESSION_NAME,
         created_at: s.created_at || new Date().toISOString(),
         history: Array.isArray(s.history) ? s.history.slice(-40) : [],
+        mode: s.mode || null,
       }));
       activeSessionId = data.activeId && getSession(data.activeId)
         ? data.activeId : sessions[0].id;
@@ -495,7 +503,7 @@ function abortAllChildren() {
 // 教训1 (02-cli-engineering): readline 接管 stdout 后，child.stdout.on('data') 不再触发。
 // watchdog 必须在 rl.on('line') 和 stderr.on('data') 里刷新。
 // 教训1: 超时 30min，匹配复杂任务实际需要。
-function streamAgent(agentKey, prompt, res, label = 'chunk') {
+function streamAgent(agentKey, prompt, res, label = 'chunk', { skipRoleCard = false } = {}) {
   const invocationId = randomUUID().slice(0, 8);
   const startedAt = Date.now();
   const startedIso = new Date(startedAt).toISOString();
@@ -521,8 +529,13 @@ function streamAgent(agentKey, prompt, res, label = 'chunk') {
     return Promise.reject(new Error('missing path'));
   }
 
+  // 角色卡注入（对齐 clowder-ai buildStaticIdentity）
+  const agentDef = skipRoleCard ? null : readAgentRegistry().find(a => a.key === agentKey);
+  const roleCard = buildRoleCard(agentDef);
+  const fullPrompt = roleCard ? roleCard + prompt : prompt;
+
   const parser = PARSERS[agentKey] || ((line) => `${line}\n`);
-  const args = cfg.args(prompt);
+  const args = cfg.args(fullPrompt);
   const { spawnPath, spawnArgs } = buildSpawnCommand(cfg, args);
 
   return new Promise((resolve, reject) => {
@@ -586,7 +599,11 @@ function streamAgent(agentKey, prompt, res, label = 'chunk') {
     rl.on('line', (line) => {
       touch(); // 教训1: readline 接管后在这里刷新
       if (!line.trim()) return;
-      const text = parser(line);
+      const out = parser(line);
+      if (!out) return;
+      // 兼容旧 parser 返回字符串 vs 新 parser 返回 { text, thinking }
+      const text = typeof out === 'string' ? out : (out.text || '');
+      const thinking = typeof out === 'string' ? '' : (out.thinking || '');
       if (text) {
         fullText += text;
         if (fullText.length === text.length) {
@@ -594,6 +611,9 @@ function streamAgent(agentKey, prompt, res, label = 'chunk') {
         }
         sseSend(res, label, { text });
         if (label !== 'chunk') sseSend(res, 'chunk', { text });
+      }
+      if (thinking) {
+        sseSend(res, 'thinking', { text: thinking });
       }
     });
 
@@ -771,6 +791,7 @@ async function handle(req, res) {
         id: s.id,
         name: s.name,
         created_at: s.created_at,
+        mode: s.mode || null,
         message_count: s.history.length,
       })),
     }));
@@ -918,6 +939,7 @@ async function handle(req, res) {
     const cleanMessage = `${imageOnlyMessage}${attachmentPrompt(attachments)}`.trim();
 
     maybeAutoRenameSession(session, cleanMessage || message);
+    recordSessionMode(session, 'chat');
 
     // 存入对话历史（按 session）
     session.history.push({ role: 'user', text: message, agent: null, attachments });
@@ -939,7 +961,13 @@ async function handle(req, res) {
       saveSessions();
       sseSend(res, 'done', { agent: agentKey, sessionId: session.id });
     } catch (err) {
-      session.history.pop();
+      // 不再 pop 用户消息，保留失败现场让用户刷新后能看到
+      session.history.push({
+        role: 'system',
+        text: `调用 ${agentKey} 失败：${err.message}`,
+        agent: agentKey,
+        kind: 'chat-error',
+      });
       saveSessions();
       sseSend(res, 'error', { message: err.message });
     }
@@ -958,6 +986,28 @@ async function handle(req, res) {
     const result = await getAgentStatuses();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ agents: result, workspace: currentWorkspace() }));
+  }
+
+  // PATCH /api/agents/:key — 更新单个 agent 的角色卡字段
+  const agentPatchMatch = pathname.match(/^\/api\/agents\/([^\/]+)$/);
+  if (req.method === 'PATCH' && agentPatchMatch) {
+    const agentKey = decodeURIComponent(agentPatchMatch[1]);
+    const body = await readBody(req);
+    const current = readAgentRegistry(ENV);
+    const idx = current.findIndex(a => a.key === agentKey);
+    if (idx === -1) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: `agent ${agentKey} 不存在` }));
+    }
+    // 只允许更新角色卡字段和基础展示字段
+    const allowed = ['label', 'emoji', 'desc', 'roleDescription', 'personality', 'strengths', 'restrictions'];
+    for (const field of allowed) {
+      if (body[field] !== undefined) current[idx][field] = body[field];
+    }
+    writeAgentRegistry(current);
+    reloadAgentConfig();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, agent: current[idx] }));
   }
 
   // POST /api/agents { codex?: string, claude?: string, kimi?: string } — 写回 .env，实时重载
@@ -1048,6 +1098,28 @@ async function handle(req, res) {
       summary: summarizeInvocations(invocations),
       invocations: recent,
     }));
+  }
+
+  // PATCH /api/tasks/:id/agent — 修改任务分配的 agent
+  const taskAgentMatch = pathname.match(/^\/api\/tasks\/([^\/]+)\/agent$/);
+  if (req.method === 'PATCH' && taskAgentMatch) {
+    const taskId = decodeURIComponent(taskAgentMatch[1]);
+    const body = await readBody(req);
+    const newAgent = (body.agent || '').trim();
+    if (!newAgent) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'agent 不能为空' }));
+    }
+    const tasks = readTasks();
+    const task = tasks.find(t => t.id === taskId);
+    if (!task) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: '任务不存在' }));
+    }
+    task.agent = newAgent;
+    writeAllTasks(tasks);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, task }));
   }
 
   // POST /api/tasks/:id/rerun — 重新执行单个任务
@@ -1165,7 +1237,7 @@ async function handle(req, res) {
     return res.end(JSON.stringify({ lessons }));
   }
 
-  // POST /api/plan { goal, agent } — SSE 流式返回
+  // POST /api/plan { goal, agent, sessionId? } — SSE 流式返回
   if (req.method === 'POST' && pathname === '/api/plan') {
     const body = await readBody(req);
     const goal = (body.goal || '').trim();
@@ -1175,8 +1247,15 @@ async function handle(req, res) {
       return res.end(JSON.stringify({ error: 'goal 不能为空' }));
     }
 
+    const session = (body.sessionId && getSession(body.sessionId)) || getActiveSession();
+    if (body.sessionId && getSession(body.sessionId)) activeSessionId = body.sessionId;
+    recordSessionMode(session, 'plan');
+    maybeAutoRenameSession(session, goal);
+    session.history.push({ role: 'user', text: goal, agent: null, kind: 'plan-goal' });
+    saveSessions();
+
     sseInit(res);
-    sseSend(res, 'start', { goal, agent: agentKey });
+    sseSend(res, 'start', { goal, agent: agentKey, sessionId: session.id });
 
     try {
       const agentStatus = (await getAgentStatuses()).find(a => a.key === agentKey);
@@ -1185,11 +1264,19 @@ async function handle(req, res) {
       }
       const skillContext = buildSkillContext(selectSkills({ text: goal, agent: agentKey, phase: 'plan' }));
       const prompt = `${PLAN_PROMPT}${skillContext ? `\n\n本次按需加载的 Skills：\n${skillContext}` : ''}\n\n用户目标：${goal}`;
-      const raw = await streamAgent(agentKey, prompt, res, 'chunk');
+      const raw = await streamAgent(agentKey, prompt, res, 'chunk', { skipRoleCard: true });
       const data = extractJson(raw);
       // 教训2: 严格验证，防止幻觉数据写入 tasks.jsonl
       const validation = validatePlanResult(data);
       if (!validation.ok) {
+        // 把失败现场写入 session 历史，刷新后还能看到
+        session.history.push({
+          role: 'system',
+          text: `拆任务失败：${validation.reason}\n原始输出（前 400 字）：\n${raw.slice(0, 400)}`,
+          agent: agentKey,
+          kind: 'plan-error',
+        });
+        saveSessions();
         sseSend(res, 'error', { message: `任务解析失败（${validation.reason}）`, raw: raw.slice(0, 400) });
         return res.end();
       }
@@ -1200,6 +1287,7 @@ async function handle(req, res) {
           id: `${runId}-${i + 1}`,
           run_id: runId,
           created_at: now,
+          session_id: session.id, // 关联 session
           goal: data.goal || goal,
           title: t.title ?? `任务 ${i + 1}`,
           steps: t.steps ?? [],
@@ -1215,8 +1303,26 @@ async function handle(req, res) {
         accept: t.accept ?? '',
         steps: t.steps ?? [],
       }));
+      // 把 plan 结果写入 session 历史，刷新后能复现
+      session.history.push({
+        role: 'plan',
+        agent: agentKey,
+        kind: 'plan-result',
+        runId,
+        goal: data.goal || goal,
+        tasks: taskSummaries,
+        text: `已拆分为 ${taskSummaries.length} 个任务（run ${runId}）`,
+      });
+      saveSessions();
       sseSend(res, 'done', { runId, written: data.tasks.length, tasks: taskSummaries });
     } catch (err) {
+      session.history.push({
+        role: 'system',
+        text: `拆任务失败：${err.message}`,
+        agent: agentKey,
+        kind: 'plan-error',
+      });
+      saveSessions();
       sseSend(res, 'error', { message: err.message });
     }
     return res.end();
@@ -1252,7 +1358,20 @@ async function handle(req, res) {
 
     // 执行单个任务并返回结果文本（用于 worklist 链检测）
     async function executeTask(task, depth = 0, chainHistory = []) {
-      const agentKey = agentOverride || (CLI_CONFIG[task.agent] ? task.agent : (agentKeys()[0] || 'codex'));
+      // 优先用 agentOverride（全局覆盖），其次用任务分配的 agent（需可用），最后 fallback 到第一个可用 agent
+      let agentKey = agentOverride;
+      if (!agentKey) {
+        const statuses = await getAgentStatuses();
+        const taskAgentStatus = statuses.find(a => a.key === task.agent);
+        if (taskAgentStatus?.available) {
+          agentKey = task.agent;
+        } else {
+          // 任务指定的 agent 不可用，找第一个可用的
+          const fallback = statuses.find(a => a.available);
+          agentKey = fallback?.key || agentKeys()[0] || 'codex';
+          sseSend(res, 'system', { text: `⚠️ ${task.agent} 不可用，改用 ${agentKey} 执行任务「${task.title}」` });
+        }
+      }
       sseSend(res, 'task-start', { id: task.id, title: task.title, agent: agentKey });
       patchTask(task.id, { status: 'in_progress', started_at: new Date().toISOString() });
 

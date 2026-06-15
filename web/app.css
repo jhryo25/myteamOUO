@@ -227,7 +227,18 @@ body {
   color: var(--muted);
   display: flex;
   gap: 6px;
+  align-items: center;
 }
+.session-mode-badge {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.session-mode-badge.plan { background: var(--orange-soft, #fff3e6); color: var(--orange, #d97706); }
+.session-mode-badge.chat { background: var(--blue-soft); color: var(--blue); }
+.session-mode-badge.mixed { background: var(--green-soft); color: var(--green); }
 .session-item-more {
   position: absolute;
   right: 6px;
@@ -296,7 +307,6 @@ body {
   color: var(--accent);
   border-style: solid;
 }
-
 /* sidebar 折叠态：仅显示图标 */
 .layout.sidebar-collapsed .sidebar-title,
 .layout.sidebar-collapsed .sidebar-list,
@@ -464,6 +474,53 @@ body {
   align-self: center;
   max-width: 90%;
   text-align: center;
+}
+.bubble.system-bubble.system-bubble-error {
+  background: var(--red-soft);
+  color: var(--red);
+  border: 1px solid var(--red);
+  text-align: left;
+  white-space: pre-wrap;
+  max-width: 95%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* 思考过程折叠 */
+.thinking-details {
+  margin: 4px 0 6px;
+  border-left: 2px solid var(--border);
+  padding-left: 10px;
+}
+.thinking-details.hidden { display: none; }
+.thinking-summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--muted);
+  user-select: none;
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.thinking-summary::-webkit-details-marker { display: none; }
+.thinking-summary::before {
+  content: '▶';
+  font-size: 8px;
+  transition: transform .15s;
+}
+.thinking-details[open] .thinking-summary::before { transform: rotate(90deg); }
+.thinking-count { color: var(--muted); font-size: 10px; }
+.thinking-content {
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: var(--surface2);
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: pre-wrap;
+  max-height: 240px;
+  overflow-y: auto;
 }
 .bubble.system-bubble.resume-prompt {
   display: flex;
@@ -1154,6 +1211,22 @@ body {
   border-radius: 4px;
   font-weight: 600;
 }
+.plan-task-agent-select {
+  background: var(--blue-soft);
+  color: var(--blue);
+  border: 1px solid var(--blue);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 4px;
+  cursor: pointer;
+  outline: none;
+  font-family: inherit;
+}
+.plan-task-agent-select:hover {
+  background: var(--blue);
+  color: #fff;
+}
 .plan-task-accept {
   color: var(--green);
   font-size: 11px;
@@ -1454,6 +1527,67 @@ body {
   font-size: 12px;
 }
 .agent-remove-btn:disabled { display: none; }
+
+/* 角色卡 */
+.role-card-details {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.role-card-summary {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.role-card-summary::-webkit-details-marker { display: none; }
+.role-card-summary::before { content: '▶'; font-size: 9px; color: var(--muted); transition: transform .15s; }
+details[open] .role-card-summary::before { transform: rotate(90deg); }
+.role-card-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+.role-card-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.role-input {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 12px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+}
+.role-input:focus { outline: none; border-color: var(--blue); }
+.role-card-save-btn {
+  align-self: flex-start;
+  padding: 5px 12px;
+  border: 1px solid var(--blue);
+  background: var(--blue-soft);
+  color: var(--blue);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+}
+.role-card-save-btn:hover { background: var(--blue); color: #fff; }
+.role-card-save-tip {
+  font-size: 11px;
+  align-self: center;
+}
 .agent-card-header {
   display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
 }

@@ -18,6 +18,10 @@ const DEFAULT_AGENT_DEFS = [
     inputMode: 'stdin',
     argsTemplate: 'exec - --json --skip-git-repo-check',
     checkTemplate: '--help',
+    roleDescription: '任务规划、代码审查、自迭代协调者',
+    personality: '严谨、务实、追求代码质量，习惯先问清楚需求再动手',
+    strengths: ['任务拆解', '代码审查', '进度协调'],
+    restrictions: [],
   },
   {
     key: 'claude',
@@ -28,6 +32,10 @@ const DEFAULT_AGENT_DEFS = [
     inputMode: 'stdin',
     argsTemplate: '-p - --output-format stream-json --verbose',
     checkTemplate: '--help',
+    roleDescription: '深度分析、系统架构设计、复杂代码生成',
+    personality: '善于推理、思维发散、喜欢先理解全局再落地细节',
+    strengths: ['架构设计', '复杂推理', '长文档生成'],
+    restrictions: [],
   },
   {
     key: 'kimi',
@@ -36,8 +44,12 @@ const DEFAULT_AGENT_DEFS = [
     desc: '轻量执行 / 快速草稿',
     envKey: 'KIMI_PATH',
     inputMode: 'arg',
-    argsTemplate: '-p {prompt} --output-format text',
+    argsTemplate: '--print --output-format stream-json --prompt {prompt}',
     checkTemplate: '--help',
+    roleDescription: '快速执行、轻量任务、草稿生成',
+    personality: '高效、简洁、直接给出结果，不绕弯子',
+    strengths: ['快速执行', '简单任务', '草稿生成'],
+    restrictions: [],
   },
 ];
 
@@ -88,6 +100,11 @@ export function readAgentRegistry(ENV = loadEnv(), file = AGENTS_FILE) {
       checkTemplate: raw.checkTemplate || base.checkTemplate || '--help',
       envKey: raw.envKey || base.envKey || `${key.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_PATH`,
       removable: raw.removable ?? !AGENT_KEYS.includes(key),
+      // 角色卡字段
+      roleDescription: raw.roleDescription ?? base.roleDescription ?? '',
+      personality: raw.personality ?? base.personality ?? '',
+      strengths: Array.isArray(raw.strengths) ? raw.strengths : (base.strengths ?? []),
+      restrictions: Array.isArray(raw.restrictions) ? raw.restrictions : (base.restrictions ?? []),
     });
   }
 
@@ -113,11 +130,39 @@ export function writeAgentRegistry(agents, file = AGENTS_FILE) {
         argsTemplate: String(agent.argsTemplate || '-p {prompt}').trim(),
         checkTemplate: String(agent.checkTemplate || '--help').trim(),
         removable: agent.removable ?? !AGENT_KEYS.includes(key),
+        // 角色卡字段
+        roleDescription: String(agent.roleDescription || '').trim(),
+        personality: String(agent.personality || '').trim(),
+        strengths: Array.isArray(agent.strengths) ? agent.strengths.map(String).filter(Boolean) : [],
+        restrictions: Array.isArray(agent.restrictions) ? agent.restrictions.map(String).filter(Boolean) : [],
       };
     })
     .filter(Boolean);
   writeFileSync(file, JSON.stringify({ agents: cleaned }, null, 2), 'utf8');
   return cleaned;
+}
+
+/**
+ * 构建角色卡 system prompt 头部（对齐 clowder-ai buildStaticIdentity）
+ * 注入到每次 agent 调用的 prompt 最前面
+ */
+export function buildRoleCard(agentDef) {
+  if (!agentDef) return '';
+  const lines = [];
+  const name = agentDef.label || agentDef.key;
+  if (agentDef.roleDescription) {
+    lines.push(`你是 ${name}，角色：${agentDef.roleDescription}`);
+  }
+  if (agentDef.personality) {
+    lines.push(`性格：${agentDef.personality}`);
+  }
+  if (agentDef.strengths?.length) {
+    lines.push(`擅长：${agentDef.strengths.join('、')}`);
+  }
+  if (agentDef.restrictions?.length) {
+    lines.push(`\n你的硬限制：${agentDef.restrictions.join('、')}。被要求做这类任务时请明确说明无法完成。`);
+  }
+  return lines.length ? lines.join('\n') + '\n\n' : '';
 }
 
 // ── .env 读取 ─────────────────────────────────────────────────
@@ -150,23 +195,66 @@ export function buildCliConfig(ENV) {
 }
 
 // ── NDJSON 解析器 ─────────────────────────────────────────────
+// clowder-ai 对齐：各 agent CLI 均使用 --output-format stream-json / --json
+// 解析器返回 { text, thinking } 或字符串（兼容旧调用）；返回 null 表示当前行无 chunk
+
 function parseClaude(line) {
+  // claude --output-format stream-json
+  // - type=assistant → message.content[].text 是正文
+  // - type=stream_event 中 thinking_delta 是思考流
   try {
     const e = JSON.parse(line);
     if (e.type === 'assistant') {
-      return (e.message?.content ?? [])
-        .filter(b => b.type === 'text')
-        .map(b => b.text)
-        .join('') || null;
+      const blocks = e.message?.content ?? [];
+      const text = blocks.filter(b => b.type === 'text').map(b => b.text).join('');
+      const thinking = blocks.filter(b => b.type === 'thinking').map(b => b.thinking || b.text || '').join('');
+      if (!text && !thinking) return null;
+      return { text: text || '', thinking: thinking || '' };
+    }
+    if (e.type === 'stream_event') {
+      const s = e.event;
+      if (s?.type === 'content_block_delta') {
+        const d = s.delta;
+        if (d?.type === 'thinking_delta') return { text: '', thinking: d.thinking || '' };
+        if (d?.type === 'text_delta') return { text: d.text || '', thinking: '' };
+      }
     }
   } catch {}
   return null;
 }
 
 function parseCodex(line) {
+  // codex exec --json：type=item.completed 行含 item.text
+  // codex 不分思考流，直接返回文本
   try {
     const e = JSON.parse(line);
     if (e.type === 'item.completed' && e.item?.text) return e.item.text;
+  } catch {}
+  return null;
+}
+
+function parseKimi(line) {
+  // kimi --output-format stream-json：role=assistant 行
+  // content 字段是正文，thinking/reasoning_content 是思考
+  try {
+    const e = JSON.parse(line);
+    if (e.role === 'assistant') {
+      const content = e.content;
+      let text = '';
+      if (typeof content === 'string') text = content;
+      else if (Array.isArray(content)) {
+        text = content
+          .map(b => (typeof b === 'string' ? b : (b?.text || b?.content || '')))
+          .filter(Boolean)
+          .join('');
+      }
+      let thinking = '';
+      if (typeof e.thinking === 'string') thinking = e.thinking;
+      else if (typeof e.reasoning === 'string') thinking = e.reasoning;
+      else if (typeof e.reasoning_content === 'string') thinking = e.reasoning_content;
+      if (!text && !thinking) return null;
+      return { text, thinking };
+    }
   } catch {}
   return null;
 }
@@ -175,7 +263,7 @@ function parseText(line) {
   return `${line}\n`;
 }
 
-export const PARSERS = { codex: parseCodex, claude: parseClaude, kimi: parseText };
+export const PARSERS = { codex: parseCodex, claude: parseClaude, kimi: parseKimi };
 
 export function buildSpawnCommand(cfg, args) {
   const isCmd = cfg.path.toLowerCase().endsWith('.cmd');
@@ -448,7 +536,13 @@ export function patchTask(id, patch) {
 export const PLAN_PROMPT = `你是 myteam 的任务规划 agent。
 用户会给你一个目标，把它拆成 3-7 个可执行、可验收的小任务。
 
-严格按以下 JSON 格式返回，不要有任何额外解释或 markdown 包裹：
+【强制规则】
+- 无论用户说什么，你的唯一输出是下方 JSON，不得有任何其他文字
+- 不要分析用户意图，不要解释，不要思考过程，不要 markdown 代码块
+- 如果目标是一个问题或闲聊，也必须把它拆成任务返回，不要直接回答
+- 第一个字符必须是 {，最后一个字符必须是 }
+
+严格按以下 JSON 格式返回：
 {
   "goal": "<原始目标>",
   "tasks": [

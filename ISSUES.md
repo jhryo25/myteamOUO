@@ -306,3 +306,70 @@
   - 使用真实截图作为图片附件时，Kimi 能读取图片并描述出截图内容。
 - **教训**: CLI prompt 模板中的 `{prompt}` 必须作为一个完整参数处理；agent 失败时必须记录 stderr，否则用户只能看到无意义的退出码。
 - **标签**: `bug`, `agent`, `image`, `windows`, `lesson:prompt占位符不能先替换再按空格拆分`
+
+---
+
+## Phase 6: clowder-ai 深度对齐 (2026-06-15)
+
+### IMP-020: plan card agent 下拉 + 建议按钮过滤不可用 agent [ux]
+
+- **位置**: `web/app.js`, `server.mjs`
+- **问题**: plan card 里任务节点的 agent 是静态标签，用户无法自由调整；"建议执行"按钮没有过滤不可用 agent，会生成"让 kimi 执行"的按钮即使 kimi 离线。
+- **解法**: `addPlanCard` 改为下拉选择器（只列 `available` agent）；新增 `PATCH /api/tasks/:id/agent` 接口；建议按钮用 `availableKeys` 过滤。
+- **教训**: 下拉要在 DOM 插入后设置 `select.value`，不能在 innerHTML 里加 `selected`，否则动态 option 顺序问题会导致默认值错误。
+- **标签**: `ux`, `plan`
+
+### IMP-021: PLAN_PROMPT 强制 JSON 输出 + plan.mjs 统一引用 [quality]
+
+- **问题**: Codex 在拆任务时用角色对话模式回答而非输出 JSON；`plan.mjs` 里有独立的旧版 prompt，与 `agent-utils.mjs` 的 `PLAN_PROMPT` 不同步。
+- **解法**: `PLAN_PROMPT` 加硬约束（无论用户说什么只输出 JSON，第一个字符必须是 `{`）；`plan.mjs` 删除内嵌 SYSTEM_PROMPT，改为 `import { PLAN_PROMPT }`。
+- **教训**: 同一份 prompt 不能在多处维护；plan prompt 的系统约束必须比角色人设更高优先级。
+- **标签**: `quality`, `plan`, `lesson:prompt单一来源`
+
+### IMP-022: NDJSON 解析器对齐 clowder-ai，Kimi 改 stream-json [arch]
+
+- **位置**: `agent-utils.mjs`
+- **问题**: Kimi 使用 `--output-format text`，`parseText` 原样返回每行，JSON 混在普通文字里，`extractJson` 成功率低。clowder-ai 所有 agent 均使用 CLI 协议层面保证格式，而非依赖 prompt 约束。
+- **解法**: Kimi 改为 `--print --output-format stream-json --prompt {prompt}`；新增 `parseKimi()` 解析 `role=assistant` 行；解析器统一返回 `{ text, thinking }`，`streamAgent` 区分发 `chunk` / `thinking` 事件。
+- **教训**: CLI 协议层面强制格式比 prompt 约束更可靠；`parseText` 等于放弃了结构化输出，应尽快对齐各 agent 的 stream-json 协议。
+- **标签**: `arch`, `quality`, `agent`, `lesson:CLI协议层保证格式比prompt约束更可靠`
+
+### IMP-023: dispatch 不可用 agent 自动 fallback [bug]
+
+- **位置**: `server.mjs:executeTask`
+- **问题**: `CLI_CONFIG[task.agent]` 只检查路径配置是否存在，不检查 agent 是否真正可启动。kimi 路径配了但 `available=false`，dispatch 仍会用 kimi 执行导致失败。
+- **解法**: `executeTask` 改为调 `getAgentStatuses()` 检查 `available`；不可用时 fallback 到第一个可用 agent，并通过 `system` 事件在聊天区提示用户。
+- **教训**: agent 可用性判断必须走 `checkAgentLaunchable()`，不能只检查配置存在。
+- **标签**: `bug`, `agent`, `dispatch`, `lesson:文件存在不等于可执行`
+
+### IMP-024: 角色卡对齐 clowder-ai buildStaticIdentity [arch]
+
+- **位置**: `agent-utils.mjs`, `server.mjs`, `web/app.js`, `web/app.css`
+- **问题**: agent 只有 key/label/desc，没有 persona 注入，所有 agent 每次调用都是"白板"状态。
+- **解法**: DEFAULT_AGENT_DEFS 加 `roleDescription / personality / strengths / restrictions`；新增 `buildRoleCard()`；`streamAgent` 内自动前置角色卡；plan 调用传 `skipRoleCard: true`；Hub Agent 卡片加折叠"角色卡"编辑区；新增 `PATCH /api/agents/:key` 接口。
+- **教训**: plan prompt 是系统指令，注入角色卡会让 LLM 以为在扮演角色回答，破坏 JSON 输出格式。
+- **标签**: `arch`, `ux`, `agent`, `lesson:角色卡不能注入系统指令调用`
+
+### IMP-025: 跨 session SSE 隔离 + 失败历史保留 [ux]
+
+- **位置**: `web/app.js`, `server.mjs`
+- **问题**: 切换 session 时，旧 session 的 SSE 事件仍在触发，会污染新 session 的聊天 DOM；chat 失败时 `session.history.pop()` 删除用户消息，刷新后失败现场消失，plan 失败完全不写 history。
+- **解法**: `ssePost` 记录 `requestSessionId`，事件处理前比对 `currentSessionId`，跨 session chunk 丢弃（done/error 仍执行）；chat 错误改为写入 `kind: chat-error` system 记录；plan 成功写 `plan-result`、失败写 `plan-error`；`renderHistoryEntry` 新增 plan / system 角色渲染。
+- **教训**: 单页应用的 SSE 事件必须带身份标识，前端按当前上下文守门，否则异步事件会错位到错误容器。
+- **标签**: `ux`, `arch`, `session`, `lesson:SSE事件要带sessionId守门`
+
+### IMP-026: ctrl+v 粘贴图片 + session 模式徽章 [ux]
+
+- **位置**: `web/app.js`, `web/app.css`, `server.mjs`
+- **问题**: 输入框不支持 ctrl+v 粘贴图片；sidebar 无法区分 session 是对话模式还是任务模式。
+- **解法**: `goalInput` 加 `paste` 监听，抓 `clipboardData.items` 中的 image/* 文件；session 数据加 `mode: 'chat'|'plan'|'mixed'` 字段，chat/plan 入口调 `recordSessionMode()`，sidebar 渲染对应徽章。
+- **教训**: 粘贴图片要用 `e.preventDefault()` 阻止默认行为，否则图片 URL 会被粘贴为文本；session 模式是用户理解上下文的重要线索，应在数据层记录而非只靠 UI 推断。
+- **标签**: `ux`, `session`, `image`
+
+### IMP-027: 思考过程折叠展示对齐 clowder-ai [ux]
+
+- **位置**: `agent-utils.mjs`, `server.mjs`, `web/app.js`, `web/app.css`
+- **问题**: agent 的思考过程（Claude thinking_delta / Kimi reasoning_content）混入正文输出，无法区分。
+- **解法**: NDJSON 解析器统一返回 `{ text, thinking }`；`streamAgent` 把 thinking 单独发 `thinking` SSE 事件；`startAgentBubble` 在 bubble 上方嵌入 `<details>` 折叠区，默认收起，标题显示字符数；前端 chat handler 新增 `thinking` 处理器调 `appendThinking()`。
+- **教训**: thinking 和正文必须在解析器层就分离，不能在前端用正则从 fullText 里截取；默认收起体验更好，让用户主动展开而非被动接受大段思考文本。
+- **标签**: `ux`, `thinking`, `lesson:思考流要在解析层分离`

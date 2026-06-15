@@ -258,6 +258,10 @@ function startAgentBubble(agentKey) {
     <div class="avatar ${a.cls}">${a.emoji}</div>
     <div class="bubble-content-wrap">
       <div class="bubble-name">${a.name} <span class="bubble-time" id="bubbleTime"></span></div>
+      <details class="thinking-details hidden" id="thinkingDetails">
+        <summary class="thinking-summary">💭 思考过程 <span class="thinking-count" id="thinkingCount"></span></summary>
+        <div class="thinking-content" id="thinkingContent"></div>
+      </details>
       <div class="bubble agent-bubble typing-cursor" id="typingBubble">
         <div class="thinking-line"><span class="thinking-dot"></span><span>正在连接 ${esc(agentKey)}...</span></div>
       </div>
@@ -283,6 +287,24 @@ function appendTyping(text) {
   agentTypingBubble.dataset.raw = (agentTypingBubble.dataset.raw || '') + text;
   agentTypingBubble.textContent = agentTypingBubble.dataset.raw;
   scrollChat();
+}
+
+function appendThinking(text) {
+  if (!agentTypingBubble) return;
+  const wrap = agentTypingBubble.closest('.bubble-content-wrap');
+  if (!wrap) return;
+  const details = wrap.querySelector('#thinkingDetails');
+  const content = wrap.querySelector('#thinkingContent');
+  const count = wrap.querySelector('#thinkingCount');
+  if (!details || !content) return;
+  details.classList.remove('hidden');
+  content.dataset.raw = (content.dataset.raw || '') + text;
+  content.textContent = content.dataset.raw;
+  if (count) {
+    const len = (content.dataset.raw || '').length;
+    count.textContent = `（${len} 字符）`;
+  }
+  // 不自动滚动到 thinking 内容（默认收起，不打扰主输出滚动）
 }
 
 function updateAgentStatus(text) {
@@ -316,14 +338,29 @@ function scrollChat() {
 // ── 结构化气泡：plan 任务列表 ─────────────────────────────────
 function addPlanCard(goal, tasks) {
   hideWelcome();
+  // 可用 agent 列表（用于下拉）
+  const availableAgents = (window.agentConfigList || mentionAgents)
+    .filter(a => a.available !== false);
+  const agentOptions = availableAgents.map(a =>
+    `<option value="${esc(a.key)}">${esc(a.label || a.key)}</option>`
+  ).join('');
+
   const rows = tasks.map((t, i) => {
     const steps = (t.steps || []).length;
-    return `<div class="plan-task-row">
+    // agent 下拉：默认选中 plan 推荐的 agent，若不可用则保留显示但标记
+    const selectedAgent = t.agent || '';
+    const isAvailable = availableAgents.some(a => a.key === selectedAgent);
+    const selectHtml = `<select class="plan-task-agent-select" data-task-id="${esc(t.id)}" title="修改执行 agent">
+      ${agentOptions}
+      ${!isAvailable && selectedAgent ? `<option value="${esc(selectedAgent)}" disabled>${esc(selectedAgent)}（不可用）</option>` : ''}
+    </select>`;
+    // 设置 selected 需要在 DOM 后操作，先用 data 属性传递
+    return `<div class="plan-task-row" data-task-id="${esc(t.id)}" data-agent="${esc(selectedAgent)}">
       <span class="plan-task-num">${i + 1}</span>
       <div class="plan-task-body">
         <div class="plan-task-name">${esc(t.title)}</div>
         <div class="plan-task-meta">
-          <span class="plan-task-agent">${esc(t.agent)}</span>
+          ${selectHtml}
           ${steps ? `<span>${steps} 步</span>` : ''}
         </div>
         ${t.accept ? `<div class="plan-task-accept">✓ ${esc(t.accept)}</div>` : ''}
@@ -331,14 +368,17 @@ function addPlanCard(goal, tasks) {
     </div>`;
   }).join('');
 
-  // 统计各 agent 的 pending 任务数，生成建议按钮
+  // 统计各 agent 的 pending 任务数，只生成可用 agent 的建议按钮
   const agentCounts = {};
   tasks.forEach(t => { agentCounts[t.agent] = (agentCounts[t.agent] || 0) + 1; });
-  const suggestionBtns = Object.entries(agentCounts).map(([agent, cnt]) =>
-    `<button class="plan-suggest-btn" data-agent="${esc(agent)}">
-      ▶ 让 ${esc(agent)} 执行 (${cnt} 条)
-    </button>`
-  ).join('');
+  const availableKeys = new Set(availableAgents.map(a => a.key));
+  const suggestionBtns = Object.entries(agentCounts)
+    .filter(([agent]) => availableKeys.has(agent))
+    .map(([agent, cnt]) =>
+      `<button class="plan-suggest-btn" data-agent="${esc(agent)}">
+        ▶ 让 ${esc(agent)} 执行 (${cnt} 条)
+      </button>`
+    ).join('');
 
   const row = document.createElement('div');
   row.className = 'bubble-row';
@@ -353,6 +393,29 @@ function addPlanCard(goal, tasks) {
         <button class="plan-suggest-btn plan-suggest-manual">手动选择任务</button>
       </div>
     </div>`;
+
+  // 初始化各下拉的 selected 值
+  row.querySelectorAll('.plan-task-row[data-agent]').forEach(taskRow => {
+    const sel = taskRow.querySelector('.plan-task-agent-select');
+    if (sel) sel.value = taskRow.dataset.agent;
+  });
+
+  // 下拉修改 agent → PATCH 到后端
+  row.querySelectorAll('.plan-task-agent-select').forEach(sel => {
+    sel.onchange = async () => {
+      const taskId = sel.dataset.taskId;
+      const newAgent = sel.value;
+      try {
+        await fetch(`/api/tasks/${encodeURIComponent(taskId)}/agent`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agent: newAgent }),
+        });
+      } catch (e) {
+        addSystemMsg(`修改 agent 失败：${e.message}`);
+      }
+    };
+  });
 
   // 按 agent 执行：dispatch 时只跑对应 agent 的 pending
   row.querySelectorAll('.plan-suggest-btn[data-agent]').forEach(btn => {
@@ -732,6 +795,7 @@ function updateSendBtnState() {
 }
 
 function ssePost(url, body, handlers) {
+  const requestSessionId = body.sessionId || currentSessionId;
   return new Promise(resolve => {
     currentAbortController = new AbortController();
     const stopBtn = document.getElementById('stopBtn');
@@ -761,6 +825,12 @@ function ssePost(url, body, handlers) {
           }
           let parsed;
           try { parsed = JSON.parse(data); } catch { continue; }
+          // 跨 session 守门：用户已切到其他 session 时，丢弃流事件，避免污染当前 DOM。
+          // done/error 仍要执行以释放状态；history 由后端落盘，刷新可见。
+          if (requestSessionId && currentSessionId && requestSessionId !== currentSessionId
+              && event !== 'done' && event !== 'error' && event !== 'aborted') {
+            continue;
+          }
           handlers[event]?.(parsed);
           if (event === 'done') resolve(parsed);
         }
@@ -774,14 +844,17 @@ function ssePost(url, body, handlers) {
       }
       resolve(null);
     }).finally(() => {
-      stopBtn.classList.add('hidden');
-      currentAbortController = null;
-      setActiveAgent(null);
-      setRunning(false);
-      // 消费排队消息
-      if (messageQueue.length && getMode() === 'chat') {
-        const next = messageQueue.shift();
-        setTimeout(() => doChat(next), 100);
+      // 只有当前 session 的请求才清状态条；如果用户切到别的 session，原请求结束时不要影响新 session 的运行状态
+      if (!currentSessionId || currentSessionId === requestSessionId) {
+        stopBtn.classList.add('hidden');
+        currentAbortController = null;
+        setActiveAgent(null);
+        setRunning(false);
+        // 消费排队消息
+        if (messageQueue.length && getMode() === 'chat') {
+          const next = messageQueue.shift();
+          setTimeout(() => doChat(next), 100);
+        }
       }
     });
   });
@@ -984,6 +1057,29 @@ imageInput.onchange = () => {
   updateSendBtnState();
 };
 
+// ctrl+v 粘贴图片到输入框
+goalInput.addEventListener('paste', (e) => {
+  const items = Array.from(e.clipboardData?.items || []);
+  const imageItems = items.filter(it => it.kind === 'file' && it.type.startsWith('image/'));
+  if (!imageItems.length) return;
+  e.preventDefault();
+  const newOnes = imageItems.map(it => {
+    const file = it.getAsFile();
+    if (!file) return null;
+    // 给粘贴的图片起个有意义的名字
+    const ext = file.type.split('/')[1] || 'png';
+    const named = file.name && file.name !== 'image.png'
+      ? file
+      : new File([file], `pasted-${Date.now()}.${ext}`, { type: file.type });
+    return { file: named, previewUrl: URL.createObjectURL(named) };
+  }).filter(Boolean);
+  pendingImages.push(...newOnes);
+  const overflow = pendingImages.splice(5);
+  overflow.forEach(item => URL.revokeObjectURL(item.previewUrl));
+  renderAttachmentTray();
+  updateSendBtnState();
+});
+
 // ── send 入口：按模式分发 ─────────────────────────────────────
 async function doSend() {
   const text = goalInput.value.trim();
@@ -1067,6 +1163,7 @@ async function doChat(message) {
       bubble = startAgentBubble(agent);
     },
     chunk: ({ text }) => appendTyping(text),
+    thinking: ({ text }) => appendThinking(text),
     status: ({ text }) => updateAgentStatus(text),
     error: ({ message: msg }) => {
       finishTyping();
@@ -1098,7 +1195,7 @@ async function doPlan(goal) {
   setActiveAgent(agent);
   startAgentBubble(agent);
 
-  await ssePost('/api/plan', { goal, agent }, {
+  await ssePost('/api/plan', { goal, agent, sessionId: currentSessionId }, {
     start: ({ agent }) => setActiveAgent(agent),
     status: ({ text }) => updateAgentStatus(text),
     chunk: ({ text }) => appendTyping(text),
@@ -1699,6 +1796,8 @@ async function loadAgentConfig() {
       const statusText = a.available
         ? '✓ 可启动，路径有效'
         : (a.path ? `✗ ${a.error || '文件不可用'}` : '未配置');
+      const strengthsStr = Array.isArray(a.strengths) ? a.strengths.join('、') : (a.strengths || '');
+      const restrictionsStr = Array.isArray(a.restrictions) ? a.restrictions.join('、') : (a.restrictions || '');
       const card = document.createElement('div');
       card.className = 'agent-card';
       card.innerHTML = `
@@ -1720,7 +1819,30 @@ async function loadAgentConfig() {
         <div class="path-check-result" data-result="${a.key}"
           style="font-size:11px;margin-top:5px;color:${a.available ? 'var(--green)' : (a.path ? 'var(--red)' : 'var(--muted)')};">
           ${esc(statusText)}
-        </div>`;
+        </div>
+        <details class="role-card-details">
+          <summary class="role-card-summary">角色卡 <span style="font-size:10px;color:var(--muted);">（注入每次调用的 prompt 头部）</span></summary>
+          <div class="role-card-fields">
+            <label>角色描述
+              <input class="role-input" data-agent="${a.key}" data-field="roleDescription"
+                value="${esc(a.roleDescription || '')}" placeholder="例如：任务规划、代码审查、自迭代协调者">
+            </label>
+            <label>性格
+              <input class="role-input" data-agent="${a.key}" data-field="personality"
+                value="${esc(a.personality || '')}" placeholder="例如：严谨、务实、追求代码质量">
+            </label>
+            <label>擅长（逗号分隔）
+              <input class="role-input" data-agent="${a.key}" data-field="strengths"
+                value="${esc(strengthsStr)}" placeholder="例如：任务拆解、代码审查">
+            </label>
+            <label>限制（逗号分隔，空则无限制）
+              <input class="role-input" data-agent="${a.key}" data-field="restrictions"
+                value="${esc(restrictionsStr)}" placeholder="例如：不处理财务数据、不生成真实个人信息">
+            </label>
+            <button class="role-card-save-btn" data-agent="${a.key}">保存角色卡</button>
+            <span class="role-card-save-tip hidden" data-tip="${a.key}"></span>
+          </div>
+        </details>`;
       agentFormEl.appendChild(card);
       if (a.removable !== false) {
         const removeBtn = document.createElement('button');
@@ -1760,6 +1882,38 @@ async function loadAgentConfig() {
           }
         } catch { resultEl.textContent = '检测失败'; }
         btn.textContent = '检测';
+      };
+    });
+
+    // 角色卡保存按钮
+    agentFormEl.querySelectorAll('.role-card-save-btn').forEach(btn => {
+      btn.onclick = async () => {
+        const key = btn.dataset.agent;
+        const tip = agentFormEl.querySelector(`.role-card-save-tip[data-tip="${key}"]`);
+        const getField = (field) => {
+          const el = agentFormEl.querySelector(`.role-input[data-agent="${key}"][data-field="${field}"]`);
+          return el ? el.value.trim() : '';
+        };
+        const strengths = getField('strengths').split(/[,，]/).map(s => s.trim()).filter(Boolean);
+        const restrictions = getField('restrictions').split(/[,，]/).map(s => s.trim()).filter(Boolean);
+        btn.textContent = '保存中…';
+        try {
+          await fetch(`/api/agents/${encodeURIComponent(key)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              roleDescription: getField('roleDescription'),
+              personality: getField('personality'),
+              strengths,
+              restrictions,
+            }),
+          });
+          if (tip) { tip.textContent = '✓ 已保存'; tip.style.color = 'var(--green)'; tip.classList.remove('hidden'); }
+          setTimeout(() => tip?.classList.add('hidden'), 2000);
+        } catch (e) {
+          if (tip) { tip.textContent = '保存失败'; tip.style.color = 'var(--red)'; tip.classList.remove('hidden'); }
+        }
+        btn.textContent = '保存角色卡';
       };
     });
   } catch {
@@ -1862,6 +2016,13 @@ function clearChatArea() {
   window.welcome = w;
 }
 
+function sessionModeBadge(mode) {
+  if (mode === 'plan') return `<span class="session-mode-badge plan" title="拆任务模式">📋 任务</span>`;
+  if (mode === 'mixed') return `<span class="session-mode-badge mixed" title="对话+任务">🔀 混合</span>`;
+  if (mode === 'chat') return `<span class="session-mode-badge chat" title="对话模式">💬 对话</span>`;
+  return '';
+}
+
 function renderSessionList(sessions, activeId) {
   const list = document.getElementById('sessionList');
   list.innerHTML = '';
@@ -1874,6 +2035,7 @@ function renderSessionList(sessions, activeId) {
     item.innerHTML = `
       <div class="session-item-name" data-editing="false">${esc(s.name)}</div>
       <div class="session-item-meta">
+        ${sessionModeBadge(s.mode)}
         <span>${timeStr}</span>
         ${s.message_count ? `<span>· ${s.message_count} 条</span>` : ''}
       </div>
@@ -1980,11 +2142,21 @@ async function loadSessions() {
 }
 
 async function switchSession(sessionId) {
+  // 如果当前有正在运行的请求（属于其他 session），提示用户后台继续，不打断
+  if (isRunning && currentAbortController) {
+    addSystemMsg('⏳ 当前 session 任务在后台继续运行，结果会自动入库，刷新或切回可查看。');
+  }
   await fetch('/api/sessions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ activeId: sessionId }),
   });
+  // 关键：清掉运行状态绑定（旧 SSE 仍在后台跑，但前端不再受其约束）
+  currentAbortController = null;
+  setRunning(false);
+  setActiveAgent(null);
+  document.getElementById('stopBtn')?.classList.add('hidden');
+
   currentSessionId = sessionId;
   clearChatArea();
   await loadSessions();
@@ -2121,6 +2293,51 @@ function renderHistoryEntry(h, prepend = false) {
   if (h.role === 'assistant') {
     hideWelcome();
     const row = renderAssistantHistoryBubble(h);
+    if (prepend) {
+      const pager = document.getElementById('historyPager');
+      chatEl.insertBefore(row, pager ? pager.nextSibling : chatEl.firstElementChild);
+    } else {
+      chatEl.appendChild(row);
+    }
+    return row;
+  }
+  if (h.role === 'plan' && h.kind === 'plan-result' && Array.isArray(h.tasks)) {
+    // 复现 plan card（不带交互按钮，只展示）
+    hideWelcome();
+    const row = document.createElement('div');
+    row.className = 'bubble-row';
+    const taskRows = h.tasks.map((t, i) => `
+      <div class="plan-task-row">
+        <span class="plan-task-num">${i + 1}</span>
+        <div class="plan-task-body">
+          <div class="plan-task-name">${esc(t.title)}</div>
+          <div class="plan-task-meta">
+            <span class="plan-task-agent">${esc(t.agent || '')}</span>
+            ${(t.steps || []).length ? `<span>${t.steps.length} 步</span>` : ''}
+          </div>
+          ${t.accept ? `<div class="plan-task-accept">✓ ${esc(t.accept)}</div>` : ''}
+        </div>
+      </div>`).join('');
+    row.innerHTML = `
+      <div class="avatar system-av">📋</div>
+      <div class="plan-card">
+        <div class="plan-card-title">🎯 ${esc(h.goal || '')} <span style="font-size:11px;color:var(--muted);font-weight:normal;">（历史 run ${esc(h.runId || '')}）</span></div>
+        ${taskRows}
+      </div>`;
+    if (prepend) {
+      const pager = document.getElementById('historyPager');
+      chatEl.insertBefore(row, pager ? pager.nextSibling : chatEl.firstElementChild);
+    } else {
+      chatEl.appendChild(row);
+    }
+    return row;
+  }
+  if (h.role === 'system') {
+    // 失败/系统消息历史
+    hideWelcome();
+    const row = document.createElement('div');
+    const isError = h.kind === 'plan-error' || h.kind === 'chat-error';
+    row.innerHTML = `<div class="bubble system-bubble${isError ? ' system-bubble-error' : ''}">${esc(h.text)}</div>`;
     if (prepend) {
       const pager = document.getElementById('historyPager');
       chatEl.insertBefore(row, pager ? pager.nextSibling : chatEl.firstElementChild);

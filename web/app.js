@@ -1099,10 +1099,6 @@ async function doSend() {
     return;
   }
   if (getMode() === 'plan') {
-    if (pendingImages.length) {
-      addSystemMsg('拆任务模式暂不使用图片，请切回对话模式发送图片。');
-      return;
-    }
     await doPlan(text);
   } else {
     await doChat(text);
@@ -1186,16 +1182,26 @@ async function doChat(message) {
 async function doPlan(goal) {
   const agent = getRadio('planAgentGroup') || 'codex';
 
+  let attachments = [];
+  try {
+    attachments = await uploadPendingImages();
+  } catch (err) {
+    addSystemMsg(`图片发送失败：${err.message}`);
+    return;
+  }
+  clearPendingImages();
+
   goalInput.value = '';
   goalInput.style.height = '';
   document.getElementById('dispatchBtn').disabled = true;
 
-  addUserBubble(`📋 ${goal}`);
+  const agentAttachments = attachments.map(({ previewUrl, ...a }) => a);
+  addUserBubble(`📋 ${goal}`, { attachments });
   addSystemMsg(`正在让 ${agent} 拆解任务…`);
   setActiveAgent(agent);
   startAgentBubble(agent);
 
-  await ssePost('/api/plan', { goal, agent, sessionId: currentSessionId }, {
+  await ssePost('/api/plan', { goal, agent, sessionId: currentSessionId, attachments: agentAttachments }, {
     start: ({ agent }) => setActiveAgent(agent),
     status: ({ text }) => updateAgentStatus(text),
     chunk: ({ text }) => appendTyping(text),

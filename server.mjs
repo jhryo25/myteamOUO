@@ -1237,12 +1237,13 @@ async function handle(req, res) {
     return res.end(JSON.stringify({ lessons }));
   }
 
-  // POST /api/plan { goal, agent, sessionId? } — SSE 流式返回
+  // POST /api/plan { goal, agent, sessionId?, attachments? } — SSE 流式返回
   if (req.method === 'POST' && pathname === '/api/plan') {
     const body = await readBody(req);
     const goal = (body.goal || '').trim();
     const agentKey = body.agent || agentKeys()[0] || 'codex';
-    if (!goal) {
+    const attachments = Array.isArray(body.attachments) ? body.attachments : [];
+    if (!goal && !attachments.length) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: 'goal 不能为空' }));
     }
@@ -1250,8 +1251,8 @@ async function handle(req, res) {
     const session = (body.sessionId && getSession(body.sessionId)) || getActiveSession();
     if (body.sessionId && getSession(body.sessionId)) activeSessionId = body.sessionId;
     recordSessionMode(session, 'plan');
-    maybeAutoRenameSession(session, goal);
-    session.history.push({ role: 'user', text: goal, agent: null, kind: 'plan-goal' });
+    maybeAutoRenameSession(session, goal || '图片拆任务');
+    session.history.push({ role: 'user', text: goal, agent: null, kind: 'plan-goal', attachments });
     saveSessions();
 
     sseInit(res);
@@ -1262,8 +1263,10 @@ async function handle(req, res) {
       if (!agentStatus?.available) {
         throw new Error(`${agentKey} 不可用：${agentStatus?.error || '没有可启动的 agent'}。请在右上角 Agent 配置里换成可启动的 CLI。`);
       }
-      const skillContext = buildSkillContext(selectSkills({ text: goal, agent: agentKey, phase: 'plan' }));
-      const prompt = `${PLAN_PROMPT}${skillContext ? `\n\n本次按需加载的 Skills：\n${skillContext}` : ''}\n\n用户目标：${goal}`;
+      const effectiveGoal = goal || '请根据上传的图片内容制定合理的执行计划';
+      const skillContext = buildSkillContext(selectSkills({ text: effectiveGoal, agent: agentKey, phase: 'plan' }));
+      const imgPrompt = attachmentPrompt(attachments);
+      const prompt = `${PLAN_PROMPT}${skillContext ? `\n\n本次按需加载的 Skills：\n${skillContext}` : ''}\n\n用户目标：${effectiveGoal}${imgPrompt}`;
       const raw = await streamAgent(agentKey, prompt, res, 'chunk', { skipRoleCard: true });
       const data = extractJson(raw);
       // 教训2: 严格验证，防止幻觉数据写入 tasks.jsonl

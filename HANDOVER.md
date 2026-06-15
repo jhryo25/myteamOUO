@@ -1,6 +1,6 @@
 # myteamOUO 交接文档
 
-最后更新：2026-06-15
+最后更新：2026-06-15（IMP-028 拆任务支持图片）
 
 这份文档用于新对话冷启动。新的 agent 接手时，请先读本文件，再读 `docs/problem-course.md` 和 `ISSUES.md`，最后再改代码。
 
@@ -66,6 +66,7 @@ for /f "tokens=5" %a in ('netstat -aon ^| findstr ":7878"') do taskkill /F /PID 
 
 - "拆任务"模式把目标拆成结构化任务。
 - 任务写入 `.myteam/tasks.jsonl`，并关联 `session_id`。
+- **支持图片附件**：可上传或 ctrl+v 粘贴图片，图片路径注入 plan prompt，agent 可分析图片内容后拆任务；goal 为空时自动补默认目标。
 - plan card 里每条任务的 agent 为下拉选择器（只列可用 agent），可自由调整分配。
 - 建议执行按钮只显示可用 agent，不可用的 agent 自动过滤。
 - plan 结果和失败现场写入 session.history，刷新后可复现。

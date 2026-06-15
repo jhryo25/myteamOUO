@@ -373,3 +373,12 @@
 - **解法**: NDJSON 解析器统一返回 `{ text, thinking }`；`streamAgent` 把 thinking 单独发 `thinking` SSE 事件；`startAgentBubble` 在 bubble 上方嵌入 `<details>` 折叠区，默认收起，标题显示字符数；前端 chat handler 新增 `thinking` 处理器调 `appendThinking()`。
 - **教训**: thinking 和正文必须在解析器层就分离，不能在前端用正则从 fullText 里截取；默认收起体验更好，让用户主动展开而非被动接受大段思考文本。
 - **标签**: `ux`, `thinking`, `lesson:思考流要在解析层分离`
+
+### IMP-028: 拆任务模式支持图片附件 [ux]
+
+- **位置**: `web/app.js`, `server.mjs`
+- **问题**: 拆任务模式（plan）有一个主动拦截：`if (pendingImages.length) { addSystemMsg('拆任务模式暂不使用图片…'); return; }`，导致用户无法把截图/流程图发给 agent 进行任务拆解。
+- **根因**: 早期 plan 只发文本，图片能力是后加的，拦截逻辑没有同步移除。
+- **解法**: 去掉前端拦截；`doPlan` 加 `uploadPendingImages()` + `clearPendingImages()`，图片路径通过 `attachments` 传给后端；`/api/plan` 接收 `attachments` 并调 `attachmentPrompt()` 追加到 prompt；goal 为空时自动补默认目标。
+- **教训**: 新增能力（图片）后必须扫描所有调用路径，去掉已过期的主动拦截；否则"这个功能不支持"就变成了自我实现的谎言。
+- **标签**: `ux`, `plan`, `image`, `lesson:新增能力后要清理过期拦截`

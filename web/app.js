@@ -1787,10 +1787,73 @@ function openDrawer() {
   settingsDrawer.classList.remove('hidden');
   drawerMask.classList.remove('hidden');
   loadAgentConfig();
+  initStudioTemplates();
 }
 function closeDrawer() {
   settingsDrawer.classList.add('hidden');
   drawerMask.classList.add('hidden');
+}
+
+// ── Studio 团队模板 ────────────────────────────────────────────────────────
+let studioTemplates = [];
+
+async function initStudioTemplates() {
+  const sel = document.getElementById('studioSelect');
+  const applyBtn = document.getElementById('studioApplyBtn');
+  const preview = document.getElementById('studioPreview');
+  if (!sel) return;
+
+  if (!studioTemplates.length) {
+    try {
+      const data = await fetch('/api/studio-templates').then(r => r.json());
+      studioTemplates = data.templates || [];
+    } catch { studioTemplates = []; }
+  }
+
+  // 填充 options
+  sel.innerHTML = '<option value="">— 选择模板快速配置整个团队 —</option>'
+    + studioTemplates.map(t =>
+        `<option value="${esc(t.id)}">${esc(t.name)}</option>`
+      ).join('');
+
+  sel.onchange = () => {
+    const tpl = studioTemplates.find(t => t.id === sel.value);
+    applyBtn.disabled = !tpl;
+    if (tpl) {
+      preview.innerHTML = `<strong>${esc(tpl.name)}</strong> — ${esc(tpl.desc)}<br>
+        角色：${tpl.agents.map(a => `<b>${esc(a.label)}</b>（${esc(a.roleDescription)}）`).join(' · ')}`;
+      preview.classList.remove('hidden');
+    } else {
+      preview.classList.add('hidden');
+    }
+  };
+
+  applyBtn.onclick = async () => {
+    const tpl = studioTemplates.find(t => t.id === sel.value);
+    if (!tpl) return;
+    if (!confirm(`应用「${tpl.name}」模板？\n这会覆盖所有 agent 的角色卡（路径/API Key/模型不变）。`)) return;
+    applyBtn.disabled = true;
+    applyBtn.textContent = '应用中…';
+    try {
+      const res = await fetch('/api/studio-templates/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ templateId: tpl.id }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '应用失败');
+      addSystemMsg(`✓ 已应用团队模板「${data.template}」，角色卡已更新。`);
+      preview.innerHTML = `✅ 已应用「${esc(data.template)}」`;
+      sel.value = '';
+      applyBtn.disabled = true;
+      applyBtn.textContent = '一键应用';
+      await loadAgentConfig(); // 刷新表单
+    } catch (err) {
+      addSystemMsg(`✗ 模板应用失败：${err.message}`);
+      applyBtn.disabled = false;
+      applyBtn.textContent = '一键应用';
+    }
+  };
 }
 
 settingsBtn.onclick = openDrawer;
@@ -2520,8 +2583,8 @@ async function loadAgentConfig({ scrollToKey = null } = {}) {
             <div style="flex:1;position:relative;display:flex;align-items:center;">
               <input class="role-input api-key-input" data-agent="${a.key}" data-field="apiKey"
                 type="password"
-                value="${esc(a.apiKey || '')}"
-                placeholder="Bearer Token / API Key（可选，不保存到 git）"
+                value=""
+                placeholder="${a.hasApiKey ? ('已配置 ' + esc(a.apiKeyMasked || '••••')) : 'Bearer Token / API Key（可选，不保存到 git）'}"
                 style="flex:1;padding-right:32px;">
               <button type="button" class="api-key-eye" data-agent="${a.key}"
                 style="position:absolute;right:6px;background:none;border:none;cursor:pointer;color:var(--muted);font-size:13px;padding:0;line-height:1;"
@@ -2548,7 +2611,7 @@ async function loadAgentConfig({ scrollToKey = null } = {}) {
         <details class="role-card-details">
           <summary class="role-card-summary">角色卡 <span style="font-size:10px;color:var(--muted);">（注入每次调用的 prompt 头部）</span></summary>
           <div class="role-card-fields">
-            <div class="agent-template-row">
+            <div class="agent-template-row full-width">
               <label>📋 模板：</label>
               <select class="agent-template-select" data-agent="${a.key}">
                 ${ROLE_TEMPLATES.map(t => `<option value="${esc(t.key)}">${esc(t.label)}</option>`).join('')}
@@ -2578,7 +2641,7 @@ async function loadAgentConfig({ scrollToKey = null } = {}) {
                 <span style="font-size:11px;color:var(--muted);">辅色</span>
               </div>
             </label>
-            <label>角色描述
+            <label class="full-width">角色描述
               <input class="role-input" data-agent="${a.key}" data-field="roleDescription"
                 value="${esc(a.roleDescription || '')}" placeholder="例如：任务规划、代码审查、自迭代协调者">
             </label>
@@ -3244,6 +3307,8 @@ async function switchSession(sessionId) {
   await loadHistory();
   await loadTasks();
   updateVisibleRunState();
+  // 刷新产物面板
+  if (typeof refreshArtifactsOnSessionChange === 'function') refreshArtifactsOnSessionChange();
   // 强制锚定到最新一条消息（图片/卡片渲染完成后再滚动）
   scrollToBottomAfterLayout();
 }
@@ -3534,3 +3599,279 @@ async function restoreRunningState() {
     console.warn('恢复运行状态失败:', e);
   }
 }
+
+// ═══════════════════════════════════════════════════════════════
+// 产物面板（Artifacts Panel）P3+P4+P5
+// 对齐 clowder-ai F063（workspace explorer）+ F148（artifact ledger）
+// ═══════════════════════════════════════════════════════════════
+
+const artifactsBtn = document.getElementById('artifactsBtn');
+const artifactsPanel = document.getElementById('artifactsPanel');
+const artifactsPanelClose = document.getElementById('artifactsPanelClose');
+const artifactsList = document.getElementById('artifactsList');
+const artifactsPreviewWrap = document.getElementById('artifactsPreviewWrap');
+const artifactsPreviewHeader = document.getElementById('artifactsPreviewHeader');
+const artifactsPreviewTitle = document.getElementById('artifactsPreviewTitle');
+const artifactsPreviewContent = document.getElementById('artifactsPreviewContent');
+const artifactsCopyBtn = document.getElementById('artifactsCopyBtn');
+const artifactsOpenBtn = document.getElementById('artifactsOpenBtn');
+
+let apVisible = false;
+let apActiveTab = 'chat'; // 'chat' | 'workspace'
+let apCurrentArtifact = null;
+let apArtifacts = [];
+let apWsFiles = [];
+
+// ── 面板开关 ─────────────────────────────────────────────────
+function openArtifactsPanel() {
+  apVisible = true;
+  artifactsPanel.classList.remove('hidden');
+  artifactsBtn.classList.add('active');
+  document.body.classList.add('artifacts-open');
+  loadArtifacts();
+}
+function closeArtifactsPanel() {
+  apVisible = false;
+  artifactsPanel.classList.add('hidden');
+  artifactsBtn.classList.remove('active');
+  document.body.classList.remove('artifacts-open');
+}
+function toggleArtifactsPanel() {
+  if (apVisible) closeArtifactsPanel(); else openArtifactsPanel();
+}
+
+artifactsBtn.onclick = toggleArtifactsPanel;
+artifactsPanelClose.onclick = closeArtifactsPanel;
+
+// ── Tab 切换 ─────────────────────────────────────────────────
+artifactsPanel.querySelectorAll('.ap-tab').forEach(btn => {
+  btn.onclick = () => {
+    artifactsPanel.querySelectorAll('.ap-tab').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    apActiveTab = btn.dataset.aptab;
+    renderArtifactList();
+  };
+});
+
+// ── 数据加载 ─────────────────────────────────────────────────
+async function loadArtifacts() {
+  const sid = currentSessionId || '';
+  try {
+    const [chatData, wsData] = await Promise.all([
+      fetch('/api/artifacts?sessionId=' + encodeURIComponent(sid)).then(r => r.json()).catch(() => ({ artifacts: [] })),
+      fetch('/api/workspace/recent?limit=30').then(r => r.json()).catch(() => ({ files: [] })),
+    ]);
+    apArtifacts = chatData.artifacts || [];
+    apWsFiles = wsData.files || [];
+    renderArtifactList();
+    // 默认选中第一项
+    if (!apCurrentArtifact) {
+      if (apActiveTab === 'chat' && apArtifacts.length) selectArtifact(apArtifacts[0]);
+      else if (apActiveTab === 'workspace' && apWsFiles.length) selectWsFile(apWsFiles[0]);
+    }
+  } catch (e) {
+    artifactsList.innerHTML = '<div class="artifacts-empty">加载失败：' + esc(String(e)) + '</div>';
+  }
+}
+
+// ── 列表渲染 ─────────────────────────────────────────────────
+const AP_TYPE_ICON = {
+  html: '🌐', markdown: '📝', md: '📝', code: '📄', json: '{ }',
+  url: '🔗', file: '📁', ts: '🔷', py: '🐍', sh: '⚙', sql: '🗄',
+};
+function apTypeIcon(type, lang) {
+  return AP_TYPE_ICON[lang] || AP_TYPE_ICON[type] || '📄';
+}
+function apRelativeTime(ts) {
+  const d = Date.now() - ts;
+  if (d < 60000) return '刚刚';
+  if (d < 3600000) return Math.round(d / 60000) + ' 分钟前';
+  if (d < 86400000) return Math.round(d / 3600000) + ' 小时前';
+  return new Date(ts).toLocaleDateString();
+}
+
+function renderArtifactList() {
+  if (apActiveTab === 'chat') {
+    if (!apArtifacts.length) {
+      artifactsList.innerHTML = '<div class="artifacts-empty">暂无产物。让 agent 输出代码块后会自动收集。</div>';
+      return;
+    }
+    artifactsList.innerHTML = apArtifacts.map((a, i) => `
+      <div class="artifact-item ${apCurrentArtifact?.id === a.id ? 'selected' : ''}" data-idx="${i}" data-source="chat">
+        <span class="artifact-item-icon">${apTypeIcon(a.type, a.lang)}</span>
+        <div class="artifact-item-info">
+          <div class="artifact-item-name">${esc(a.path || a.id)}</div>
+          <div class="artifact-item-meta">${esc(a.agent || '')} · ${apRelativeTime(a.createdAt)}</div>
+        </div>
+        <span class="artifact-item-badge">${esc(a.type)}</span>
+      </div>
+    `).join('');
+    artifactsList.querySelectorAll('.artifact-item[data-source=chat]').forEach(el => {
+      el.onclick = () => selectArtifact(apArtifacts[+el.dataset.idx]);
+    });
+  } else {
+    if (!apWsFiles.length) {
+      artifactsList.innerHTML = '<div class="artifacts-empty">工作区暂无近期文件。</div>';
+      return;
+    }
+    artifactsList.innerHTML = apWsFiles.map((f, i) => `
+      <div class="artifact-item ${apCurrentArtifact?.path === f.path && apCurrentArtifact?.source === 'workspace' ? 'selected' : ''}" data-idx="${i}" data-source="ws">
+        <span class="artifact-item-icon">${apTypeIcon('file', f.lang)}</span>
+        <div class="artifact-item-info">
+          <div class="artifact-item-name">${esc(f.name)}</div>
+          <div class="artifact-item-meta">${esc(f.path)} · ${apRelativeTime(f.mtime)}</div>
+        </div>
+        <span class="artifact-item-badge">${esc(f.lang || f.name.split('.').pop())}</span>
+      </div>
+    `).join('');
+    artifactsList.querySelectorAll('.artifact-item[data-source=ws]').forEach(el => {
+      el.onclick = () => selectWsFile(apWsFiles[+el.dataset.idx]);
+    });
+  }
+}
+
+// ── 选中 artifact ─────────────────────────────────────────────
+function selectArtifact(a) {
+  apCurrentArtifact = { ...a, source: 'chat' };
+  renderArtifactPreview();
+  artifactsList.querySelectorAll('.artifact-item').forEach(el => {
+    el.classList.toggle('selected', apArtifacts[+el.dataset.idx]?.id === a.id);
+  });
+}
+
+async function selectWsFile(f) {
+  artifactsPreviewContent.innerHTML = '<div class="artifacts-empty">加载中…</div>';
+  artifactsPreviewHeader.classList.remove('hidden');
+  artifactsPreviewTitle.textContent = f.path;
+  artifactsOpenBtn.style.display = f.lang === 'html' ? '' : 'none';
+  if (f.lang === 'html') {
+    artifactsOpenBtn.onclick = () => window.open('/api/workspace/raw?path=' + encodeURIComponent(f.path), '_blank');
+  }
+  try {
+    const data = await fetch('/api/workspace/file?path=' + encodeURIComponent(f.path)).then(r => r.json());
+    if (data.error) throw new Error(data.error);
+    apCurrentArtifact = { ...f, source: 'workspace', content: data.content, type: data.lang || 'code' };
+    renderWsFilePreview(f, data.content);
+  } catch (e) {
+    artifactsPreviewContent.innerHTML = '<div class="artifacts-empty">读取失败：' + esc(String(e)) + '</div>';
+  }
+  artifactsList.querySelectorAll('.artifact-item').forEach(el => {
+    el.classList.toggle('selected', apWsFiles[+el.dataset.idx]?.path === f.path);
+  });
+}
+
+// ── 渲染预览 ─────────────────────────────────────────────────
+function renderArtifactPreview() {
+  if (!apCurrentArtifact) return;
+  const a = apCurrentArtifact;
+  artifactsPreviewHeader.classList.remove('hidden');
+  artifactsPreviewTitle.textContent = a.path || a.id;
+
+  const isHtml = a.type === 'html' || a.lang === 'html';
+  artifactsOpenBtn.style.display = isHtml ? '' : 'none';
+  if (isHtml) {
+    artifactsOpenBtn.onclick = () => {
+      const blob = new Blob([a.content || ''], { type: 'text/html' });
+      window.open(URL.createObjectURL(blob), '_blank');
+    };
+  }
+
+  if (a.type === 'url') {
+    artifactsPreviewContent.innerHTML = `<a class="ap-url-card" href="${esc(a.content)}" target="_blank" rel="noopener"><span>🔗</span><span class="ap-url-text">${esc(a.content)}</span></a>`;
+    return;
+  }
+  if (isHtml) {
+    artifactsPreviewContent.innerHTML = '';
+    const iframe = document.createElement('iframe');
+    iframe.className = 'ap-iframe';
+    iframe.sandbox = 'allow-same-origin allow-scripts';
+    iframe.srcdoc = a.content || '';
+    artifactsPreviewContent.appendChild(iframe);
+    return;
+  }
+  const isMd = a.type === 'markdown' || a.lang === 'md' || a.lang === 'markdown';
+  if (isMd) {
+    const div = document.createElement('div');
+    div.className = 'ap-md-render';
+    div.innerHTML = (typeof marked !== 'undefined') ? marked.parse(a.content || '') : '<pre>' + esc(a.content || '') + '</pre>';
+    artifactsPreviewContent.innerHTML = '';
+    artifactsPreviewContent.appendChild(div);
+    return;
+  }
+  if (a.type === 'json') {
+    try {
+      const parsed = JSON.parse(a.content);
+      artifactsPreviewContent.innerHTML = `<pre class="ap-code-block">${esc(JSON.stringify(parsed, null, 2))}</pre>`;
+    } catch {
+      artifactsPreviewContent.innerHTML = `<pre class="ap-code-block">${esc(a.content || '')}</pre>`;
+    }
+    return;
+  }
+  artifactsPreviewContent.innerHTML = `<pre class="ap-code-block">${esc(a.content || '')}</pre>`;
+}
+
+function renderWsFilePreview(f, content) {
+  artifactsPreviewContent.innerHTML = '';
+  const lang = f.lang || '';
+  if (lang === 'html') {
+    const iframe = document.createElement('iframe');
+    iframe.className = 'ap-iframe';
+    iframe.sandbox = 'allow-same-origin allow-scripts';
+    iframe.srcdoc = content;
+    artifactsPreviewContent.appendChild(iframe);
+  } else if ((lang === 'md' || lang === 'markdown') && typeof marked !== 'undefined') {
+    const div = document.createElement('div');
+    div.className = 'ap-md-render';
+    div.innerHTML = marked.parse(content || '');
+    artifactsPreviewContent.appendChild(div);
+  } else {
+    artifactsPreviewContent.innerHTML = `<pre class="ap-code-block">${esc(content || '')}</pre>`;
+  }
+}
+
+// ── 复制 ─────────────────────────────────────────────────────
+artifactsCopyBtn.onclick = async () => {
+  const content = apCurrentArtifact?.content || '';
+  try {
+    await navigator.clipboard.writeText(content);
+    artifactsCopyBtn.textContent = '✓ 已复制';
+    setTimeout(() => { artifactsCopyBtn.textContent = '📋 复制'; }, 1500);
+  } catch {
+    artifactsCopyBtn.textContent = '复制失败';
+    setTimeout(() => { artifactsCopyBtn.textContent = '📋 复制'; }, 1500);
+  }
+};
+
+// ── session 切换时刷新 ────────────────────────────────────────
+function refreshArtifactsOnSessionChange() {
+  if (!apVisible) return;
+  apCurrentArtifact = null;
+  apArtifacts = [];
+  loadArtifacts();
+}
+// 挂载到全局供 session 切换调用
+window.refreshArtifactsOnSessionChange = refreshArtifactsOnSessionChange;
+
+// ── chat 气泡内联角标 ─────────────────────────────────────────
+function injectArtifactBadges(bubbleEl, artifacts) {
+  if (!artifacts || !artifacts.length) return;
+  const pres = bubbleEl.querySelectorAll('pre');
+  artifacts.forEach((a, i) => {
+    const pre = pres[i];
+    if (!pre || pre.querySelector('.artifact-inline-badge')) return;
+    const badge = document.createElement('span');
+    badge.className = 'artifact-inline-badge';
+    badge.textContent = '📁 ' + (a.path || '查看产物');
+    badge.onclick = (e) => {
+      e.stopPropagation();
+      openArtifactsPanel();
+      apActiveTab = 'chat';
+      artifactsPanel.querySelectorAll('.ap-tab').forEach(b => b.classList.toggle('active', b.dataset.aptab === 'chat'));
+      renderArtifactList();
+      setTimeout(() => selectArtifact(a), 60);
+    };
+    pre.style.position = 'relative';
+    pre.insertAdjacentElement('afterbegin', badge);
+  });
+}
+window.injectArtifactBadges = injectArtifactBadges;

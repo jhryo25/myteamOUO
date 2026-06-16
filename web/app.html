@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>myteam · A2A 控制台</title>
   <link rel="stylesheet" href="app.css">
+  <!-- marked.js：轻量 Markdown 渲染（27KB） -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
 </head>
 <body>
 
@@ -14,6 +16,7 @@
   <div class="agent-pills" id="agentPills">
     <span class="agent-pill"><span class="dot"></span>连接中…</span>
   </div>
+  <button class="artifacts-btn" id="artifactsBtn" title="📁 产物面板">📁</button>
   <button class="hub-btn" id="hubBtn" title="打开 Hub">Hub</button>
   <button class="settings-btn" id="settingsBtn" title="Agent 配置">⚙</button>
 </div>
@@ -27,6 +30,17 @@
   </div>
   <div class="drawer-body">
     <p class="drawer-desc">修改工作区和 Agent CLI 配置，保存后只写入本机 `.myteam` 配置，不会上传 GitHub。</p>
+
+    <!-- Studio 团队模板 -->
+    <div class="studio-bar" id="studioBar">
+      <span class="studio-label">🏠 工作室模板</span>
+      <select class="studio-select" id="studioSelect">
+        <option value="">— 选择模板快速配置整个团队 —</option>
+      </select>
+      <button class="studio-apply-btn" id="studioApplyBtn" disabled>一键应用</button>
+    </div>
+    <div class="studio-preview hidden" id="studioPreview"></div>
+
     <div class="workspace-form">
       <label>工作区路径</label>
       <div class="path-input-row">
@@ -179,6 +193,37 @@
       </div>
       <div class="tasks-list" id="tasksList">
         <div class="tasks-empty">暂无任务</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── 产物面板（右侧滑入式，与聊天区同屏并存）── -->
+<div class="artifacts-panel hidden" id="artifactsPanel">
+  <div class="artifacts-panel-header">
+    <span class="artifacts-panel-title">📁 产物</span>
+    <div class="artifacts-panel-tabs">
+      <button class="ap-tab active" data-aptab="chat">💬 聊天提取</button>
+      <button class="ap-tab" data-aptab="workspace">🗂 工作区</button>
+    </div>
+    <button class="artifacts-panel-close" id="artifactsPanelClose">✕</button>
+  </div>
+  <div class="artifacts-panel-body">
+    <!-- 文件列表区 -->
+    <div class="artifacts-list" id="artifactsList">
+      <div class="artifacts-empty">暂无产物。让 agent 输出代码块或文件后会自动收集。</div>
+    </div>
+    <!-- 预览区 -->
+    <div class="artifacts-preview-wrap" id="artifactsPreviewWrap">
+      <div class="artifacts-preview-header hidden" id="artifactsPreviewHeader">
+        <span class="artifacts-preview-title" id="artifactsPreviewTitle"></span>
+        <div class="artifacts-preview-actions">
+          <button class="ap-action-btn" id="artifactsCopyBtn">📋 复制</button>
+          <button class="ap-action-btn primary" id="artifactsOpenBtn" style="display:none">🌐 浏览器打开</button>
+        </div>
+      </div>
+      <div class="artifacts-preview-content" id="artifactsPreviewContent">
+        <div class="artifacts-empty" style="padding:24px">选择左侧产物查看内容</div>
       </div>
     </div>
   </div>

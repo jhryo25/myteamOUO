@@ -4,9 +4,9 @@
 import { createServer } from 'http';
 import { get as httpsGet } from 'https';
 import { get as httpGetModule } from 'http';
-import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync, readdirSync, rmSync } from 'fs';
-import { resolve, basename, extname } from 'path';
-import { randomUUID } from 'crypto';
+import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync, readdirSync, rmSync, statSync, lstatSync, realpathSync } from 'fs';
+import { resolve, basename, extname, join, sep, relative } from 'path';
+import { randomUUID, createHash } from 'crypto';
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
 import { loadEnv, buildCliConfig, invokeAgent, extractJson, PARSERS, validatePlanResult, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, buildReviewPrompt, AGENT_KEYS, buildSpawnCommand, checkAgentLaunchable, formatLaunchError, readAgentRegistry, writeAgentRegistry, sanitizeAgentKey, buildRoleCard, validatePhaseTransition, getNextPhase } from './agent-utils.mjs';
@@ -38,6 +38,108 @@ const SKILL_SOURCES = {
 };
 const AGENT_STATUS_TTL_MS = 5000;
 let agentStatusCache = { time: 0, agents: null };
+
+// ── Studio 团队模板 ───────────────────────────────────────────────────────────
+const STUDIO_TEMPLATES = [
+  {
+    id: 'quick-prototype',
+    name: '🚀 快速原型',
+    desc: '2 人轻量：Codex 拆任务 + Kimi 快速执行，适合小目标快速出结果。',
+    agents: [
+      {
+        key: 'codex', label: 'Codex', emoji: '🤖',
+        roleDescription: '任务规划专家，把目标拆成可验收的子任务并分配给 Kimi 执行。',
+        personality: '严谨、有条理、强调验收标准',
+        strengths: ['任务拆解', '优先级排序', '验收标准撰写'],
+        restrictions: ['不直接编码', '不做最终实现决策'],
+      },
+      {
+        key: 'kimi', label: 'Kimi', emoji: '🌙',
+        roleDescription: '快速执行者，接收明确的小任务并尽快产出结果。',
+        personality: '高效、简洁、直接给出结果',
+        strengths: ['快速执行', '简单任务', '草稿生成'],
+        restrictions: [],
+      },
+    ],
+  },
+  {
+    id: 'full-stack',
+    name: '🏗️ 全栈协作',
+    desc: '经典 3 人：Codex 规划 + Claude 深度实现 + Kimi 轻量执行，适合中等复杂度项目。',
+    agents: [
+      {
+        key: 'codex', label: 'Codex', emoji: '🤖',
+        roleDescription: '总控：拆任务、分配角色、协调进度，负责最终审查和经验沉淀。',
+        personality: '严谨、务实、追求代码质量',
+        strengths: ['任务拆解', '代码审查', '进度协调'],
+        restrictions: ['不直接编码', '不做最终实现决策'],
+      },
+      {
+        key: 'claude', label: 'Claude', emoji: '✦',
+        roleDescription: '主架构 / 深度实现：负责复杂模块、架构设计、高质量代码生成。',
+        personality: '善于推理、思维发散、喜欢先理解全局再落地细节',
+        strengths: ['架构设计', '复杂推理', '长文档生成'],
+        restrictions: [],
+      },
+      {
+        key: 'kimi', label: 'Kimi', emoji: '🌙',
+        roleDescription: '轻量执行：负责简单任务、草稿补全、CLI 命令执行。',
+        personality: '高效、简洁、直接给出结果',
+        strengths: ['快速执行', '简单任务', '草稿生成'],
+        restrictions: [],
+      },
+    ],
+  },
+  {
+    id: 'strict-review',
+    name: '🔍 严格审查',
+    desc: '高质量保障：Codex 规划 + Claude 实现兼审查 + Kimi 执行，双重把关不放水。',
+    agents: [
+      {
+        key: 'codex', label: 'Codex', emoji: '🤖',
+        roleDescription: '总控：拆任务、分配角色、最终经验沉淀。坚持验收标准不降低。',
+        personality: '严格、务实、不接受"差不多好了"',
+        strengths: ['任务拆解', '验收标准撰写', '经验沉淀'],
+        restrictions: ['不直接编码'],
+      },
+      {
+        key: 'claude', label: 'Claude', emoji: '✦',
+        roleDescription: '主力实现 + 审查官：既负责复杂代码，也负责 Reviewer Gate 决策，引用证据而不是主观感受。',
+        personality: '严格、关注细节、引用证据说话',
+        strengths: ['架构设计', '代码审查', '逻辑核对', '安全检查'],
+        restrictions: ['不跳过测试', '不降低验收标准'],
+      },
+      {
+        key: 'kimi', label: 'Kimi', emoji: '🌙',
+        roleDescription: '快速执行：接收明确子任务，执行并汇报结果给 Claude 审查。',
+        personality: '高效、透明汇报、不隐瞒错误',
+        strengths: ['快速执行', '简单任务'],
+        restrictions: ['必须如实汇报执行结果和错误'],
+      },
+    ],
+  },
+  {
+    id: 'research',
+    name: '📖 研究调研',
+    desc: '2 人深研：Claude 深度分析 + Codex 归纳整理，适合技术调研、方案评估、文档生成。',
+    agents: [
+      {
+        key: 'claude', label: 'Claude', emoji: '✦',
+        roleDescription: '首席研究员：多角度分析、拆解技术方案、产出结构化报告。',
+        personality: '细心、引用准确、总结清晰',
+        strengths: ['资料检索', '源码解读', '技术对比', '撰写报告'],
+        restrictions: ['不做实现', '不下架构结论'],
+      },
+      {
+        key: 'codex', label: 'Codex', emoji: '🤖',
+        roleDescription: '整合归纳：把 Claude 的研究成果整理成可操作的任务列表和决策文档。',
+        personality: '清晰、简洁、面向行动',
+        strengths: ['归纳总结', '任务化输出', '文档整理'],
+        restrictions: ['不重复 Claude 的分析'],
+      },
+    ],
+  },
+];
 
 function agentKeys() {
   return Object.keys(CLI_CONFIG);
@@ -91,9 +193,14 @@ function clearAgentStatusCache() {
   agentStatusCache = { time: 0, agents: null };
 }
 
-// 返回给客户端前剥掉敏感字段
+// 返回给客户端前剥掉敏感字段，保留脱敏提示
 function stripSensitive(agent) {
   const { apiKey, ...safe } = agent;
+  const key = String(apiKey || '');
+  safe.hasApiKey = key.length > 0;
+  safe.apiKeyMasked = key.length > 4
+    ? '••••' + key.slice(-4)
+    : key.length > 0 ? '••••' : '';
   return safe;
 }
 
@@ -539,6 +646,131 @@ function parseClowderManifest(yamlText, rawBase) {
     trigger: s.triggers.slice(0, 3).join('、'),
     prompt: s.description.trim().slice(0, 200),
   }));
+}
+
+// ── Artifact 提取（对齐 clowder-ai F148 Phase H：chat-extracted 产物自动追踪）─
+const WORKSPACE_DENYLIST = ['.env', '.pem', '.key', 'id_rsa', '.git', 'node_modules', 'secrets'];
+// 按 mtime 扫描的"常规产出区"（workspace 根 + 常见产出目录）
+const WORKSPACE_SCAN_DIRS = ['', 'docs', 'src', 'web', 'scripts', 'output', 'reports', 'dist'];
+
+function artifactId(sessionId, path, content) {
+  const raw = `${sessionId}:${path || ''}:${(content || '').slice(0, 200)}`;
+  return createHash('sha1').update(raw).digest('hex').slice(0, 12);
+}
+
+/**
+ * 从 agent 输出文本中提取 artifacts（4 种规则）
+ * 返回 Artifact[]
+ */
+function extractArtifacts(text, { sessionId, agent, messageIndex }) {
+  if (!text) return [];
+  const artifacts = [];
+
+  // 规则 1: 围栏代码块，可选带文件路径 ```lang:path/to/file 或 ```lang
+  const fenceRe = /```([a-zA-Z0-9_+-]*)(?::([^\s`\n]+))?\n([\s\S]*?)```/g;
+  let m;
+  while ((m = fenceRe.exec(text)) !== null) {
+    const lang = (m[1] || 'text').toLowerCase();
+    const rawPath = m[2] || null;
+    const content = m[3];
+    if (!content?.trim()) continue;
+
+    const type = lang === 'html' ? 'html'
+      : lang === 'json' ? 'json'
+      : (lang === 'md' || lang === 'markdown') ? 'markdown'
+      : 'code';
+
+    const path = rawPath || guessFilename(type, lang, artifacts.length);
+    const id = artifactId(sessionId, path, content);
+    if (artifacts.some(a => a.id === id)) continue;
+    artifacts.push({
+      id, type, lang, path, content, agent, sessionId, messageIndex,
+      source: 'chat-extracted', createdAt: Date.now(),
+      preview: content.trim().slice(0, 80),
+    });
+  }
+
+  // 规则 2: <file path="xxx">...</file> 路径标记
+  const fileTagRe = /<file\s+path=["']([^"']+)["']>([\s\S]*?)<\/file>/g;
+  while ((m = fileTagRe.exec(text)) !== null) {
+    const path = m[1];
+    const content = m[2];
+    if (!content?.trim()) continue;
+    const lang = extToLang(path);
+    const type = lang === 'html' ? 'html' : lang === 'json' ? 'json' : 'code';
+    const id = artifactId(sessionId, path, content);
+    if (artifacts.some(a => a.id === id)) continue;
+    artifacts.push({
+      id, type, lang, path, content, agent, sessionId, messageIndex,
+      source: 'chat-extracted', createdAt: Date.now(),
+      preview: content.trim().slice(0, 80),
+    });
+  }
+
+  // 规则 3: 整段 markdown（无围栏但含 # 标题 + 多行结构）
+  // 只在无代码块的回复中触发，避免重复
+  if (artifacts.length === 0) {
+    const lines = text.split('\n');
+    const hasH1 = lines.some(l => /^#{1,3}\s+\S/.test(l));
+    const structureLines = lines.filter(l =>
+      /^[-*+]\s+\S/.test(l) ||   // 列表
+      /^\|.+\|/.test(l) ||        // 表格
+      /^#{1,6}\s+\S/.test(l) ||   // 标题
+      /^\d+\.\s+\S/.test(l)       // 有序列表
+    ).length;
+    if (hasH1 && structureLines >= 3 && text.length > 200) {
+      const id = artifactId(sessionId, 'agent-output.md', text);
+      if (!artifacts.some(a => a.id === id)) {
+        artifacts.push({
+          id, type: 'markdown', lang: 'md', path: 'agent-output.md',
+          content: text, agent, sessionId, messageIndex,
+          source: 'chat-extracted', createdAt: Date.now(),
+          preview: text.trim().slice(0, 80),
+        });
+      }
+    }
+  }
+
+  // 规则 4: URL 链接
+  const urlRe = /https?:\/\/[^\s)"'<>\]]+/g;
+  while ((m = urlRe.exec(text)) !== null) {
+    const url = m[0].replace(/[.,;!?]+$/, '');
+    const id = artifactId(sessionId, url, url);
+    if (artifacts.some(a => a.id === id)) continue;
+    artifacts.push({
+      id, type: 'url', lang: '', path: url, content: url, agent, sessionId, messageIndex,
+      source: 'chat-extracted', createdAt: Date.now(),
+      preview: url,
+    });
+  }
+
+  return artifacts;
+}
+
+function guessFilename(type, lang, idx) {
+  if (type === 'html') return `output-${idx + 1}.html`;
+  if (type === 'markdown') return `output-${idx + 1}.md`;
+  if (type === 'json') return `output-${idx + 1}.json`;
+  const exts = { ts: 'ts', js: 'js', py: 'py', sh: 'sh', bash: 'sh', css: 'css', sql: 'sql', yaml: 'yaml', yml: 'yaml' };
+  return `output-${idx + 1}.${exts[lang] || 'txt'}`;
+}
+
+function extToLang(filePath) {
+  const ext = filePath.split('.').pop().toLowerCase();
+  const map = { ts: 'ts', tsx: 'tsx', js: 'js', jsx: 'jsx', py: 'py', html: 'html', css: 'css', json: 'json', md: 'md', yaml: 'yaml', yml: 'yaml', sh: 'sh', sql: 'sql' };
+  return map[ext] || ext;
+}
+
+function guessMime(fileName) {
+  const ext = fileName.split('.').pop().toLowerCase();
+  const map = {
+    html: 'text/html', htm: 'text/html', css: 'text/css', js: 'application/javascript',
+    mjs: 'application/javascript', json: 'application/json', md: 'text/markdown',
+    txt: 'text/plain', py: 'text/x-python', ts: 'text/typescript', svg: 'image/svg+xml',
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+    pdf: 'application/pdf',
+  };
+  return map[ext] || 'application/octet-stream';
 }
 
 function appendInvocation(record) {
@@ -1366,7 +1598,9 @@ async function handle(req, res) {
         throw new Error(`${agentKey} 不可用：${agentStatus?.error || '没有可启动的 agent'}`);
       }
       fullReply = await streamAgent(agentKey, prompt, res, 'chunk', { sessionId: session.id, clientRunId });
-      session.history.push({ role: 'assistant', text: fullReply, agent: agentKey });
+      const msgIndex = session.history.length;
+      const chatArtifacts = extractArtifacts(fullReply, { sessionId: session.id, agent: agentKey, messageIndex: msgIndex });
+      session.history.push({ role: 'assistant', text: fullReply, agent: agentKey, artifacts: chatArtifacts });
       if (session.history.length > 40) session.history.splice(0, session.history.length - 40);
       saveSessions();
       sseSend(res, 'done', { agent: agentKey, sessionId: session.id });
@@ -1491,8 +1725,17 @@ async function handle(req, res) {
   if (req.method === 'POST' && pathname === '/api/agents') {
     const body = await readBody(req);
     const current = readAgentRegistry(ENV);
+    const currentByKey = new Map(current.map(a => [a.key, a]));
+
     const nextAgents = Array.isArray(body.agents)
-      ? body.agents
+      ? body.agents.map(incoming => {
+          const prev = currentByKey.get(incoming.key) || {};
+          // apiKey 为空字符串时保留已有值（前端不传明文则不覆盖）
+          const apiKey = (incoming.apiKey !== undefined && String(incoming.apiKey).trim() !== '')
+            ? String(incoming.apiKey).trim()
+            : (prev.apiKey || '');
+          return { ...prev, ...incoming, apiKey };
+        })
       : current.map(agent => ({
           ...agent,
           path: body[agent.key] !== undefined ? String(body[agent.key] || '').trim() : agent.path,
@@ -1647,6 +1890,46 @@ async function handle(req, res) {
     }
   }
 
+  // ── Studio 团队模板 API ────────────────────────────────────────────────────
+
+  // GET /api/studio-templates — 列出所有团队模板
+  if (req.method === 'GET' && pathname === '/api/studio-templates') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ templates: STUDIO_TEMPLATES }));
+  }
+
+  // POST /api/studio-templates/apply { templateId } — 应用模板（只更新角色卡字段，保留路径/apiKey/baseUrl/model）
+  if (req.method === 'POST' && pathname === '/api/studio-templates/apply') {
+    const body = await readBody(req);
+    const { templateId } = body;
+    const tpl = STUDIO_TEMPLATES.find(t => t.id === templateId);
+    if (!tpl) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: `模板不存在: ${templateId}` }));
+    }
+    const current = readAgentRegistry(ENV);
+    const currentByKey = new Map(current.map(a => [a.key, a]));
+
+    // 只覆盖模板中出现的 agent 的角色卡字段，其余 agent 原样保留
+    const merged = current.map(agent => {
+      const tplAgent = tpl.agents.find(t => t.key === agent.key);
+      if (!tplAgent) return agent;
+      return {
+        ...agent,
+        roleDescription: tplAgent.roleDescription || agent.roleDescription,
+        personality:     tplAgent.personality     || agent.personality,
+        strengths:       tplAgent.strengths        ?? agent.strengths,
+        restrictions:    tplAgent.restrictions     ?? agent.restrictions,
+      };
+    });
+
+    writeAgentRegistry(merged);
+    reloadAgentConfig();
+    const updatedAgents = (await getAgentStatuses({ force: true })).map(stripSensitive);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, template: tpl.name, agents: updatedAgents }));
+  }
+
   // ── Skill 市场 & 生命周期 API ─────────────────────────────────────────────
 
   // GET /api/skills/registry?source=myteam-official|clowder-ai — 远程市场清单
@@ -1767,6 +2050,150 @@ async function handle(req, res) {
     writeSkillsState(state);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, name: skillName }));
+  }
+
+  // GET /api/artifacts?sessionId=&limit=50 — 返回 chat-extracted artifacts
+  if (req.method === 'GET' && pathname === '/api/artifacts') {
+    const sid = url.searchParams.get('sessionId') || activeSessionId;
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '100', 10), 200);
+    const target = getSession(sid);
+    const artifacts = [];
+    if (target) {
+      for (const msg of target.history) {
+        if (Array.isArray(msg.artifacts)) artifacts.push(...msg.artifacts);
+      }
+    }
+    // 按 createdAt 倒序，同 path 去重（保留最新）
+    const seen = new Map();
+    for (const a of artifacts.sort((x, y) => y.createdAt - x.createdAt)) {
+      const key = a.path || a.id;
+      if (!seen.has(key)) seen.set(key, a);
+    }
+    const result = [...seen.values()].slice(0, limit);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ artifacts: result, total: result.length }));
+  }
+
+  // ── Workspace 文件 API（对齐 clowder-ai F063 安全模型）────────────────────
+
+  function wsRoot() { return resolve(currentWorkspace() || '.'); }
+
+  function wsGuard(userPath) {
+    const root = wsRoot();
+    const abs = resolve(root, userPath.replace(/^\//, ''));
+    let real;
+    try { real = realpathSync(abs); } catch { real = abs; }
+    if (!real.startsWith(root + sep) && real !== root) {
+      return { error: '路径越界' };
+    }
+    const rel = relative(root, real);
+    for (const deny of WORKSPACE_DENYLIST) {
+      if (rel.startsWith(deny) || rel.includes(sep + deny) || basename(real).includes(deny)) {
+        return { error: '路径被禁止访问' };
+      }
+    }
+    return { abs: real, rel };
+  }
+
+  function wsIsTextFile(filePath) {
+    const textExts = new Set([
+      'txt','md','markdown','html','htm','css','js','mjs','cjs','ts','tsx','jsx','json','yaml','yml',
+      'py','rb','go','rs','java','c','cpp','h','sh','bash','zsh','fish','sql','xml','svg','toml','ini',
+      'env','example','gitignore','csv','log','conf','cfg','vue','svelte',
+    ]);
+    return textExts.has(extname(filePath).slice(1).toLowerCase());
+  }
+
+  // GET /api/workspace/recent?limit=20 — 最近修改的文件（常规产出区扫描）
+  if (req.method === 'GET' && pathname === '/api/workspace/recent') {
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '20', 10), 50);
+    const root = wsRoot();
+    const files = [];
+
+    for (const dir of WORKSPACE_SCAN_DIRS) {
+      const scanPath = dir ? join(root, dir) : root;
+      if (!existsSync(scanPath)) continue;
+      try {
+        const entries = readdirSync(scanPath, { withFileTypes: true });
+        for (const e of entries) {
+          if (!e.isFile()) continue;
+          const abs = join(scanPath, e.name);
+          const rel = relative(root, abs);
+          const denied = WORKSPACE_DENYLIST.some(d =>
+            rel.startsWith(d) || rel.includes(sep + d) || e.name.includes(d)
+          );
+          if (denied) continue;
+          try {
+            const st = statSync(abs);
+            files.push({ path: rel.replace(/\\/g, '/'), name: e.name, size: st.size, mtime: st.mtimeMs });
+          } catch { /* skip */ }
+        }
+      } catch { /* dir not readable */ }
+    }
+
+    files.sort((a, b) => b.mtime - a.mtime);
+    const result = files.slice(0, limit).map(f => ({
+      ...f,
+      type: wsIsTextFile(f.name) ? 'text' : 'binary',
+      lang: extToLang(f.name),
+      mimeType: guessMime(f.name),
+    }));
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ files: result }));
+  }
+
+  // GET /api/workspace/file?path= — 读取文件内容
+  if (req.method === 'GET' && pathname === '/api/workspace/file') {
+    const userPath = url.searchParams.get('path') || '';
+    const guard = wsGuard(userPath);
+    if (guard.error) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: guard.error }));
+    }
+    if (!existsSync(guard.abs)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: '文件不存在' }));
+    }
+    const st = statSync(guard.abs);
+    if (st.size > 1024 * 1024) {
+      res.writeHead(413, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: '文件超过 1MB 限制', size: st.size }));
+    }
+    if (!wsIsTextFile(guard.abs)) {
+      res.writeHead(415, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: '二进制文件暂不支持文本预览', size: st.size }));
+    }
+    const content = readFileSync(guard.abs, 'utf8');
+    const sha256 = createHash('sha256').update(content).digest('hex').slice(0, 16);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({
+      path: guard.rel.replace(/\\/g, '/'),
+      content,
+      size: st.size,
+      mtime: st.mtimeMs,
+      sha256,
+      lang: extToLang(basename(guard.abs)),
+      mimeType: guessMime(basename(guard.abs)),
+    }));
+  }
+
+  // GET /api/workspace/raw?path= — 原始文件字节流（HTML 浏览器打开用）
+  if (req.method === 'GET' && pathname === '/api/workspace/raw') {
+    const userPath = url.searchParams.get('path') || '';
+    const guard = wsGuard(userPath);
+    if (guard.error) {
+      res.writeHead(403); return res.end(guard.error);
+    }
+    if (!existsSync(guard.abs)) {
+      res.writeHead(404); return res.end('Not Found');
+    }
+    const st = statSync(guard.abs);
+    if (st.size > 4 * 1024 * 1024) {
+      res.writeHead(413); return res.end('Too Large');
+    }
+    const mime = guessMime(basename(guard.abs));
+    res.writeHead(200, { 'Content-Type': mime });
+    return res.end(readFileSync(guard.abs));
   }
 
   // GET /api/invocations — 返回 agent 调用记录，用于轻量成本/稳定性看板
@@ -2210,11 +2637,13 @@ async function handle(req, res) {
         const skillText = [task.goal, task.title, task.accept, ...(task.steps || [])].join('\n');
         const skillContext = buildSkillContext(selectSkills({ text: skillText, agent: agentKey, phase: 'run' }));
         const result = await streamAgent(agentKey, buildExecPrompt(task, skillContext), res, `task-chunk:${task.id}`, { sessionId, clientRunId });
+        const taskArtifacts = extractArtifacts(result, { sessionId, agent: agentKey, messageIndex: null });
         patchTask(task.id, {
           status: 'done',
           finished_at: new Date().toISOString(),
           executed_by: agentKey,
           result: result?.slice(0, 2000),
+          artifacts: taskArtifacts,
           phase: 'impl', // SOP: pending → impl
         });
         const summary = result ? result.slice(0, 200) : '';

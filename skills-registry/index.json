@@ -1,0 +1,47 @@
+{
+  "source": "myteam-official",
+  "label": "myteam 官方",
+  "updated_at": "2026-06-16",
+  "skills": [
+    {
+      "name": "task-planning",
+      "category": "planning",
+      "version": "1.0.0",
+      "description": "把目标拆成 3-7 个可验证的小任务，写清步骤、验收标准和建议 agent。",
+      "triggers": ["拆任务", "目标拆解", "生成任务列表", "任务规划"],
+      "url": "task-planning/SKILL.md"
+    },
+    {
+      "name": "cli-execution",
+      "category": "execution",
+      "version": "1.0.0",
+      "description": "调用可启动的 agent CLI，记录 stdout、stderr、状态和失败原因。",
+      "triggers": ["执行任务", "调用 CLI", "运行命令", "执行步骤"],
+      "url": "cli-execution/SKILL.md"
+    },
+    {
+      "name": "review-gate",
+      "category": "quality",
+      "version": "1.0.0",
+      "description": "检查任务输出、证据、风险和缺口；不通过时生成返工建议。",
+      "triggers": ["审查", "验收", "review", "检查结果", "判断完成"],
+      "url": "review-gate/SKILL.md"
+    },
+    {
+      "name": "lesson-capture",
+      "category": "memory",
+      "version": "1.0.0",
+      "description": "把失败原因转成结构化 lessons，只把确认过的经验写入长期记忆。",
+      "triggers": ["记录经验", "踩坑", "失败记录", "沉淀经验"],
+      "url": "lesson-capture/SKILL.md"
+    },
+    {
+      "name": "html-ui-alignment",
+      "category": "frontend",
+      "version": "1.0.0",
+      "description": "识别 Hub、任务面板、消息操作等 UI 差距，提出 MVP 可落地改动。",
+      "triggers": ["UI 对比", "前端对齐", "clowder-ai", "界面差距", "HTML 对比"],
+      "url": "html-ui-alignment/SKILL.md"
+    }
+  ]
+}

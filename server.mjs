@@ -2,7 +2,9 @@
 // 用法：node server.mjs [--port 7878]
 
 import { createServer } from 'http';
-import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync } from 'fs';
+import { get as httpsGet } from 'https';
+import { get as httpGetModule } from 'http';
+import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync, readdirSync, rmSync } from 'fs';
 import { resolve, basename, extname } from 'path';
 import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
@@ -14,9 +16,26 @@ let CLI_CONFIG = buildCliConfig(ENV);
 const TASKS_FILE = '.myteam/tasks.jsonl';
 const LESSONS_FILE = '.myteam/lessons.jsonl';
 const SKILLS_FILE = '.myteam/skills.yaml';
+const SKILLS_DIR = '.myteam/skills';
+const SKILLS_STATE_FILE = '.myteam/skills-state.json';
 const INVOCATIONS_FILE = '.myteam/invocations.jsonl';
 const SETTINGS_FILE = '.myteam/settings.json';
 const UPLOADS_DIR = '.myteam/uploads';
+
+// skill 市场远程源配置
+const SKILL_SOURCES = {
+  'myteam-official': {
+    label: 'myteam 官方',
+    indexUrl: 'https://raw.githubusercontent.com/jhryo25/myteamOUO/main/skills-registry/index.json',
+    type: 'index',
+  },
+  'clowder-ai': {
+    label: 'clowder-ai',
+    indexUrl: 'https://raw.githubusercontent.com/zts212653/clowder-ai/main/cat-cafe-skills/manifest.yaml',
+    rawBase: 'https://raw.githubusercontent.com/zts212653/clowder-ai/main/cat-cafe-skills',
+    type: 'manifest',
+  },
+};
 const AGENT_STATUS_TTL_MS = 5000;
 let agentStatusCache = { time: 0, agents: null };
 
@@ -70,6 +89,12 @@ async function getAgentStatuses({ force = false } = {}) {
 
 function clearAgentStatusCache() {
   agentStatusCache = { time: 0, agents: null };
+}
+
+// 返回给客户端前剥掉敏感字段
+function stripSensitive(agent) {
+  const { apiKey, ...safe } = agent;
+  return safe;
 }
 
 async function resolveRunnableAgent(preferredAgent) {
@@ -155,7 +180,174 @@ function parseScalar(value) {
   return v.replace(/^["']|["']$/g, '');
 }
 
+// ── SKILL.md frontmatter 解析 ──────────────────────────────────────────────
+function parseSkillFrontmatter(text) {
+  const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!match) return {};
+  const fm = {};
+  let current = null;
+  let inList = null; // 当前正在解析的数组字段名
+
+  for (const raw of match[1].split('\n')) {
+    const line = raw.replace(/\r$/, '');
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    // 列表项
+    if (trimmed.startsWith('- ')) {
+      const val = trimmed.slice(2).trim().replace(/^["']|["']$/g, '');
+      if (inList) {
+        if (!Array.isArray(fm[inList])) fm[inList] = [];
+        fm[inList].push(val);
+      }
+      continue;
+    }
+
+    const kv = trimmed.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+    if (!kv) continue;
+    const key = kv[1];
+    const val = kv[2].trim().replace(/^["']|["']$/g, '');
+
+    if (val === '') {
+      // 下一行是列表
+      inList = key;
+      fm[key] = [];
+    } else if (key === 'mounts') {
+      inList = null;
+      fm.mounts = fm.mounts || {};
+    } else if (current === 'mounts' || (inList === null && line.startsWith('  '))) {
+      // mounts 下的 key: true/false
+      fm.mounts = fm.mounts || {};
+      fm.mounts[key] = val === 'true';
+    } else {
+      inList = null;
+      fm[key] = val === 'true' ? true : val === 'false' ? false : val;
+    }
+
+    if (!line.startsWith(' ') && !line.startsWith('\t')) {
+      current = key;
+    }
+  }
+  return fm;
+}
+
+function parseSkillFrontmatterRobust(text) {
+  const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!match) return {};
+  const block = match[1];
+  const result = { mounts: {}, triggers: [], next: [] };
+  let mode = null; // 'triggers' | 'next' | 'mounts' | null
+
+  for (const raw of block.split('\n')) {
+    const line = raw.replace(/\r$/, '');
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    const indent = line.match(/^(\s*)/)[1].length;
+
+    if (trimmed.startsWith('- ')) {
+      const val = trimmed.slice(2).trim().replace(/^["']|["']$/g, '');
+      if (mode === 'triggers') { result.triggers.push(val); continue; }
+      if (mode === 'next')     { result.next.push(val); continue; }
+      continue;
+    }
+
+    const kv = trimmed.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+    if (!kv) continue;
+    const key = kv[1];
+    const val = kv[2].trim().replace(/^["']|["']$/g, '');
+
+    if (indent >= 2 && mode === 'mounts') {
+      result.mounts[key] = val === 'true';
+      continue;
+    }
+
+    // 顶层字段
+    mode = null;
+    if (val === '') {
+      if (key === 'triggers') { mode = 'triggers'; }
+      else if (key === 'next') { mode = 'next'; }
+      else if (key === 'mounts') { mode = 'mounts'; }
+    } else {
+      result[key] = val === 'true' ? true : val === 'false' ? false : val;
+    }
+  }
+
+  return result;
+}
+
+// ── skills-state.json 读写 ─────────────────────────────────────────────────
+function readSkillsState() {
+  if (!existsSync(SKILLS_STATE_FILE)) return {};
+  try { return JSON.parse(readFileSync(SKILLS_STATE_FILE, 'utf8')); }
+  catch { return {}; }
+}
+
+function writeSkillsState(state) {
+  mkdirSync('.myteam', { recursive: true });
+  writeFileSync(SKILLS_STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+}
+
+// ── 读取单个 SKILL.md 目录下的 skill ─────────────────────────────────────
+function readSkillFromDir(skillDir, name) {
+  const mdPath = `${skillDir}/${name}/SKILL.md`;
+  if (!existsSync(mdPath)) return null;
+  const text = readFileSync(mdPath, 'utf8');
+  const fm = parseSkillFrontmatterRobust(text);
+  // body（frontmatter 之后的内容）作为详细 prompt
+  const bodyMatch = text.match(/^---[\s\S]*?---\r?\n([\s\S]*)$/);
+  const body = bodyMatch ? bodyMatch[1].trim() : '';
+  return {
+    name: fm.name || name,
+    category: fm.category || 'general',
+    load: fm.load || 'progressive',
+    trigger: Array.isArray(fm.triggers) ? fm.triggers.join('、') : (fm.trigger || ''),
+    triggers: Array.isArray(fm.triggers) ? fm.triggers : [],
+    description: fm.description || '',
+    prompt: fm.prompt || body.split('\n').slice(0, 3).join(' ').slice(0, 200) || '',
+    next: Array.isArray(fm.next) ? fm.next : [],
+    mounts: fm.mounts || {},
+    _source: fm._source || '',
+    _mdPath: mdPath,
+  };
+}
+
+// ── readSkills：优先目录形态，fallback yaml ────────────────────────────────
 function readSkills() {
+  const state = readSkillsState();
+
+  // 1. 从 .myteam/skills/{name}/SKILL.md 读取
+  const dirSkills = [];
+  if (existsSync(SKILLS_DIR)) {
+    let entries = [];
+    try { entries = readdirSync(SKILLS_DIR, { withFileTypes: true }); } catch { }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const skill = readSkillFromDir(SKILLS_DIR, entry.name);
+      if (skill) dirSkills.push(skill);
+    }
+  }
+
+  // 2. fallback：从老 skills.yaml 读（如果目录为空）
+  let baseSkills = dirSkills;
+  if (!dirSkills.length && existsSync(SKILLS_FILE)) {
+    baseSkills = readSkillsYaml();
+  }
+
+  // 3. 合并 skills-state.json（enabled/mounts 覆盖）
+  return baseSkills.map(skill => {
+    const st = state[skill.name] || {};
+    return {
+      ...skill,
+      enabled: st.enabled !== false, // 默认 enabled
+      source: st.source || 'myteam-official',
+      mounts: { ...skill.mounts, ...(st.mounts || {}) },
+    };
+  });
+}
+
+// ── 原 skills.yaml 解析（fallback 用） ────────────────────────────────────
+function readSkillsYaml() {
   if (!existsSync(SKILLS_FILE)) return [];
   const skills = [];
   let current = null;
@@ -177,36 +369,20 @@ function readSkills() {
     }
 
     if (!current) continue;
-    if (trimmed === 'mounts:') {
-      inMounts = true;
-      inNext = false;
-      continue;
-    }
-    if (trimmed === 'next:') {
-      inNext = true;
-      inMounts = false;
-      continue;
-    }
+    if (trimmed === 'mounts:') { inMounts = true; inNext = false; continue; }
+    if (trimmed === 'next:')   { inNext = true; inMounts = false; continue; }
 
-    // 处理 next 数组项
     if (inNext && trimmed.startsWith('- ')) {
-      const val = trimmed.slice(2).trim();
-      current.next.push(parseScalar(val));
+      current.next.push(parseScalar(trimmed.slice(2).trim()));
       continue;
     }
 
     const kv = trimmed.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
     if (!kv) continue;
-    
-    // 如果进入新字段，退出 next 模式
-    if (inNext && !trimmed.startsWith('- ')) {
-      inNext = false;
-    }
-    
+    if (inNext && !trimmed.startsWith('- ')) inNext = false;
     if (inMounts) current.mounts[kv[1]] = Boolean(parseScalar(kv[2]));
     else current[kv[1]] = parseScalar(kv[2]);
   }
-
   return skills;
 }
 
@@ -228,7 +404,7 @@ function splitSkillText(skill) {
 }
 
 function selectSkills({ text = '', agent = '', phase = 'run' } = {}) {
-  const skills = readSkills();
+  const skills = readSkills().filter(s => s.enabled !== false);
   const role = skillRoleForPhase(phase);
   const haystack = String(text || '').toLowerCase();
 
@@ -267,6 +443,102 @@ function getNextSkills(currentSkillName) {
   return current.next
     .map(name => skills.find(s => s.name === name))
     .filter(Boolean);
+}
+
+// ── HTTP GET 工具（用于远程拉取 skill 清单 / SKILL.md） ─────────────────────
+function httpGet(url) {
+  return new Promise((resolve, reject) => {
+    const get = url.startsWith('https') ? httpsGet : httpGetModule;
+    const req = get(url, { headers: { 'User-Agent': 'myteamOUO/1.0' } }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return resolve(httpGet(res.headers.location));
+      }
+      if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}: ${url}`));
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    });
+    req.on('error', reject);
+    req.setTimeout(15000, () => { req.destroy(); reject(new Error('timeout')); });
+  });
+}
+
+// ── clowder-ai manifest.yaml 转换为 myteam skill 列表 ──────────────────────
+// clowder 格式：顶层 skills: 下面是两空格缩进的 skill 名（  feat-lifecycle:），
+// skill 字段是四空格缩进，触发词/next 数组项是六空格 + "- "
+function parseClowderManifest(yamlText, rawBase) {
+  const skills = [];
+  let inSkillsBlock = false;
+  let current = null;
+  let mode = null; // 'description' | 'triggers' | 'next' | null
+
+  for (const raw of yamlText.split('\n')) {
+    const line = raw.replace(/\r$/, '');
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const indent = line.match(/^(\s*)/)[1].length;
+
+    if (trimmed === 'skills:') { inSkillsBlock = true; continue; }
+    if (!inSkillsBlock) continue;
+
+    // indent=2 → 新 skill（例如 "  feat-lifecycle:"）
+    if (indent === 2 && !trimmed.startsWith('-')) {
+      const nameMatch = trimmed.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+      if (nameMatch) {
+        current = {
+          name: nameMatch[1],
+          category: 'general',
+          load: 'progressive',
+          description: '',
+          triggers: [],
+          next: [],
+          mounts: { controller: true, worker: true, reviewer: true },
+          source: 'clowder-ai',
+          url: rawBase ? `${rawBase}/${nameMatch[1]}/SKILL.md` : '',
+        };
+        skills.push(current);
+        mode = null;
+      }
+      continue;
+    }
+
+    if (!current) continue;
+
+    // indent=4 → skill 字段
+    if (indent === 4 && !trimmed.startsWith('-')) {
+      const kv = trimmed.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+      if (kv) {
+        const key = kv[1];
+        const val = kv[2].trim().replace(/^[>|]/, '').trim().replace(/^["']|["']$/g, '');
+        if (val === '') {
+          mode = key;
+        } else {
+          mode = key === 'description' ? 'description_inline' : null;
+          if (key === 'description') current.description = val;
+        }
+      }
+      continue;
+    }
+
+    // indent>=6 → 数组项或续行
+    if (indent >= 6) {
+      if (trimmed.startsWith('- ')) {
+        const val = trimmed.slice(2).trim().replace(/^["']|["']$/g, '');
+        if (mode === 'triggers') current.triggers.push(val);
+        else if (mode === 'next') current.next.push(val);
+      } else if (mode === 'description') {
+        current.description += ' ' + trimmed;
+      }
+    }
+  }
+
+  return skills.map(s => ({
+    ...s,
+    description: s.description.trim().slice(0, 300),
+    trigger: s.triggers.slice(0, 3).join('、'),
+    prompt: s.description.trim().slice(0, 200),
+  }));
 }
 
 function appendInvocation(record) {
@@ -1114,7 +1386,7 @@ async function handle(req, res) {
 
   // GET /api/status — agent 配置 + 路径检测
   if (req.method === 'GET' && pathname === '/api/status') {
-    const agents = await getAgentStatuses();
+    const agents = (await getAgentStatuses()).map(stripSensitive);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ agents, workspace: currentWorkspace() }));
   }
@@ -1141,7 +1413,7 @@ async function handle(req, res) {
 
   // GET /api/agents — 返回当前 agent 路径配置（脱敏显示）
   if (req.method === 'GET' && pathname === '/api/agents') {
-    const result = await getAgentStatuses();
+    const result = (await getAgentStatuses()).map(stripSensitive);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ agents: result, workspace: currentWorkspace() }));
   }
@@ -1228,7 +1500,7 @@ async function handle(req, res) {
 
     writeAgentRegistry(nextAgents);
     reloadAgentConfig();
-    const updatedAgents = await getAgentStatuses({ force: true });
+    const updatedAgents = (await getAgentStatuses({ force: true })).map(stripSensitive);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, agents: updatedAgents, workspace: currentWorkspace() }));
 
@@ -1261,7 +1533,7 @@ async function handle(req, res) {
     CLI_CONFIG.kimi   = newCfg.kimi;
     clearAgentStatusCache();
 
-    const result = await getAgentStatuses({ force: true });
+    const result = (await getAgentStatuses({ force: true })).map(stripSensitive);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, agents: result }));
   }
@@ -1373,6 +1645,128 @@ async function handle(req, res) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: err.message }));
     }
+  }
+
+  // ── Skill 市场 & 生命周期 API ─────────────────────────────────────────────
+
+  // GET /api/skills/registry?source=myteam-official|clowder-ai — 远程市场清单
+  if (req.method === 'GET' && pathname === '/api/skills/registry') {
+    const source = url.searchParams.get('source') || 'myteam-official';
+    const srcCfg = SKILL_SOURCES[source];
+    if (!srcCfg) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: `未知 source: ${source}`, sources: Object.keys(SKILL_SOURCES) }));
+    }
+    try {
+      const raw = await httpGet(srcCfg.indexUrl);
+      let skills = [];
+      if (srcCfg.type === 'index') {
+        const data = JSON.parse(raw);
+        skills = data.skills || [];
+      } else if (srcCfg.type === 'manifest') {
+        skills = parseClowderManifest(raw, srcCfg.rawBase);
+      }
+      // 标记本地已安装的
+      const installed = new Set(
+        existsSync(SKILLS_DIR) ? readdirSync(SKILLS_DIR, { withFileTypes: true })
+          .filter(e => e.isDirectory()).map(e => e.name) : []
+      );
+      skills = skills.map(s => ({ ...s, installed: installed.has(s.name) }));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ source, label: srcCfg.label, skills }));
+    } catch (err) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: `拉取失败: ${err.message}` }));
+    }
+  }
+
+  // POST /api/skills/install { source, name } — 下载并安装 skill
+  if (req.method === 'POST' && pathname === '/api/skills/install') {
+    const body = await readBody(req);
+    const { source = 'myteam-official', name } = body;
+    if (!name) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'name 必填' }));
+    }
+    const srcCfg = SKILL_SOURCES[source];
+    if (!srcCfg) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: `未知 source: ${source}` }));
+    }
+    try {
+      let mdContent = '';
+      if (srcCfg.type === 'index') {
+        const raw = await httpGet(srcCfg.indexUrl);
+        const data = JSON.parse(raw);
+        const entry = (data.skills || []).find(s => s.name === name);
+        if (!entry) throw new Error(`市场中找不到 skill: ${name}`);
+        const mdUrl = entry.url.startsWith('http')
+          ? entry.url
+          : `${srcCfg.indexUrl.replace(/\/[^/]+$/, '')}/${entry.url}`;
+        mdContent = await httpGet(mdUrl);
+      } else if (srcCfg.type === 'manifest') {
+        mdContent = await httpGet(`${srcCfg.rawBase}/${name}/SKILL.md`);
+      }
+
+      // 写到 .myteam/skills/{name}/SKILL.md
+      const destDir = `${SKILLS_DIR}/${name}`;
+      mkdirSync(destDir, { recursive: true });
+      writeFileSync(`${destDir}/SKILL.md`, mdContent, 'utf8');
+
+      // 写 skills-state.json（默认 enabled）
+      const state = readSkillsState();
+      state[name] = { enabled: true, source, installedAt: new Date().toISOString() };
+      writeSkillsState(state);
+
+      const skill = readSkillFromDir(SKILLS_DIR, name);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, skill }));
+    } catch (err) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: `安装失败: ${err.message}` }));
+    }
+  }
+
+  // POST /api/skills/:name/toggle { enabled } — 启用/禁用 skill
+  const skillToggleMatch = pathname.match(/^\/api\/skills\/([^\/]+)\/toggle$/);
+  if (req.method === 'POST' && skillToggleMatch) {
+    const skillName = decodeURIComponent(skillToggleMatch[1]);
+    const body = await readBody(req);
+    const state = readSkillsState();
+    state[skillName] = { ...(state[skillName] || {}), enabled: Boolean(body.enabled) };
+    writeSkillsState(state);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, name: skillName, enabled: state[skillName].enabled }));
+  }
+
+  // PATCH /api/skills/:name/mounts { controller, worker, ... } — 调整挂载
+  const skillMountsMatch = pathname.match(/^\/api\/skills\/([^\/]+)\/mounts$/);
+  if (req.method === 'PATCH' && skillMountsMatch) {
+    const skillName = decodeURIComponent(skillMountsMatch[1]);
+    const body = await readBody(req);
+    const state = readSkillsState();
+    state[skillName] = {
+      ...(state[skillName] || {}),
+      mounts: { ...(state[skillName]?.mounts || {}), ...body },
+    };
+    writeSkillsState(state);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, name: skillName, mounts: state[skillName].mounts }));
+  }
+
+  // DELETE /api/skills/:name — 卸载 skill
+  const skillDeleteMatch = pathname.match(/^\/api\/skills\/([^\/]+)$/);
+  if (req.method === 'DELETE' && skillDeleteMatch) {
+    const skillName = decodeURIComponent(skillDeleteMatch[1]);
+    const skillPath = `${SKILLS_DIR}/${skillName}`;
+    if (existsSync(skillPath)) {
+      rmSync(skillPath, { recursive: true, force: true });
+    }
+    const state = readSkillsState();
+    delete state[skillName];
+    writeSkillsState(state);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, name: skillName }));
   }
 
   // GET /api/invocations — 返回 agent 调用记录，用于轻量成本/稳定性看板

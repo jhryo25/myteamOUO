@@ -2488,3 +2488,219 @@ details[open] .role-card-summary::before { transform: rotate(90deg); }
 .dialog-confirm-btn:hover { opacity: .88; }
 
 .hidden { display: none !important; }
+
+/* ── Skill 市场 新样式 ─────────────────────────────────────────── */
+.skill-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 12px 0 8px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 0;
+}
+.skill-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 6px 14px 8px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color .15s, border-color .15s;
+}
+.skill-tab:hover { color: var(--text); }
+.skill-tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.skill-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 16px;
+  font-size: 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 4px;
+  margin-left: 4px;
+  color: var(--muted);
+}
+.skill-tab.active .skill-tab-count { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+
+/* skill 卡片 */
+.skill-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  transition: border-color .15s;
+}
+.skill-card:hover { border-color: var(--accent); }
+.skill-card.disabled { opacity: .55; }
+.skill-card.matched { border-left: 3px solid var(--accent); }
+.skill-card.installed { border-left: 3px solid var(--green); }
+.skill-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.skill-card-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  font-family: Consolas, monospace;
+}
+.skill-card-cat {
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.skill-matched-badge {
+  font-size: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.skill-card-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.skill-card-desc {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+/* 安装按钮 */
+.skill-install-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s;
+}
+.skill-install-btn:hover:not([disabled]) { background: var(--accent); color: #fff; }
+.skill-install-btn.installed, .skill-install-btn[disabled] {
+  border-color: var(--green);
+  background: var(--green-soft);
+  color: var(--green);
+  cursor: default;
+}
+
+/* 卸载按钮 */
+.skill-uninstall-btn {
+  font-size: 14px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  color: var(--muted);
+  border-radius: 4px;
+  transition: background .15s, color .15s;
+}
+.skill-uninstall-btn:hover { background: var(--red-soft); color: var(--red); }
+
+/* 启用/禁用 Toggle */
+.skill-toggle { display: inline-flex; align-items: center; cursor: pointer; }
+.skill-toggle input { display: none; }
+.skill-toggle-track {
+  width: 32px;
+  height: 18px;
+  background: var(--line);
+  border-radius: 9px;
+  position: relative;
+  transition: background .2s;
+}
+.skill-toggle input:checked + .skill-toggle-track { background: var(--accent); }
+.skill-toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  background: #fff;
+  border-radius: 50%;
+  transition: left .2s;
+  box-shadow: 0 1px 3px rgba(0,0,0,.2);
+}
+.skill-toggle input:checked ~ .skill-toggle-track .skill-toggle-thumb { left: 16px; }
+
+/* 挂载复选框 */
+.skill-mounts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+.skill-mount-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.skill-mount-label input { accent-color: var(--accent); }
+.skill-mount-label:has(input:checked) { color: var(--accent); }
+
+/* 市场工具栏 */
+.skill-market-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.skill-source-btns { display: flex; gap: 4px; }
+.skill-src-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  cursor: pointer;
+  transition: all .15s;
+}
+.skill-src-btn.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+.skill-search-input {
+  flex: 1;
+  min-width: 120px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 12px;
+  background: var(--surface);
+  color: var(--text);
+}
+.skill-search-input:focus { outline: none; border-color: var(--accent); }
+
+/* 安装提示条 */
+.skill-install-tip {
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--bg);
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+}
+

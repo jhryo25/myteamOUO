@@ -655,7 +655,7 @@ async function loadStatus() {
     const pillsEl = document.getElementById('agentPills');
     pillsEl.innerHTML = agents.map(a =>
       `<span class="agent-pill ${a.available ? 'ok' : 'err'} ${activeAgentKey === a.key ? 'busy' : ''}" data-agent="${esc(a.key)}" title="${esc(a.error || (a.available ? '可启动' : '不可用'))}">
-        <span class="dot"></span>${a.key}
+        <span class="dot"></span>${esc(a.label || a.key)}
       </span>`
     ).join('');
 
@@ -2039,63 +2039,229 @@ function renderHubAgents() {
 }
 
 function renderHubSkills() {
-  const mountKeys = ['controller', 'worker', 'reviewer', 'codex', 'claude', 'kimi'];
   const categories = [...new Set(hubState.skills.map(s => s.category).filter(Boolean))];
   const selectedNames = new Set(hubState.selectedSkills.map(s => s.name));
+  const enabled = hubState.skills.filter(s => s.enabled !== false);
+  const disabled = hubState.skills.filter(s => s.enabled === false);
+
+  const mountKeys = ['controller', 'worker', 'reviewer', 'codex', 'claude', 'kimi'];
+
+  function skillCard(skill, { showMounts = false, showInstall = false, installed = false } = {}) {
+    const isEnabled = skill.enabled !== false;
+    const isSelected = selectedNames.has(skill.name);
+    const mountsHtml = showMounts ? `
+      <div class="skill-mounts">
+        ${mountKeys.map(k => `
+          <label class="skill-mount-label">
+            <input type="checkbox" class="skill-mount-cb" data-skill="${esc(skill.name)}" data-mount="${k}"
+              ${skill.mounts?.[k] ? 'checked' : ''}>
+            <span>${esc(k)}</span>
+          </label>`).join('')}
+      </div>` : '';
+
+    const actionsHtml = showInstall
+      ? `<button class="skill-install-btn ${installed ? 'installed' : ''}"
+           data-skill="${esc(skill.name)}" data-source="${esc(skill.source || 'clowder-ai')}"
+           ${installed ? 'disabled' : ''}>${installed ? '✓ 已安装' : '⬇ 安装'}</button>`
+      : `<label class="skill-toggle" title="${isEnabled ? '点击禁用' : '点击启用'}">
+           <input type="checkbox" class="skill-toggle-cb" data-skill="${esc(skill.name)}" ${isEnabled ? 'checked' : ''}>
+           <span class="skill-toggle-track"><span class="skill-toggle-thumb"></span></span>
+         </label>
+         <button class="skill-uninstall-btn" data-skill="${esc(skill.name)}" title="卸载">🗑</button>`;
+
+    return `<div class="skill-card ${isEnabled ? '' : 'disabled'} ${isSelected ? 'matched' : ''}">
+      <div class="skill-card-header">
+        <span class="skill-card-name">${esc(skill.name)}</span>
+        <span class="skill-card-cat">${esc(skill.category || 'general')}</span>
+        ${isSelected ? '<span class="skill-matched-badge">命中</span>' : ''}
+        <div class="skill-card-actions">${actionsHtml}</div>
+      </div>
+      <div class="skill-card-desc">${esc((skill.description || skill.trigger || '').slice(0, 120))}</div>
+      ${mountsHtml}
+    </div>`;
+  }
+
   hubBody.innerHTML = `
     <div class="hub-kpi-grid">
       <div class="hub-kpi"><div class="hub-kpi-label">技能总数</div><div class="hub-kpi-value">${hubState.skills.length}</div></div>
       <div class="hub-kpi"><div class="hub-kpi-label">分类</div><div class="hub-kpi-value">${categories.length}</div></div>
-      <div class="hub-kpi"><div class="hub-kpi-label">本次加载</div><div class="hub-kpi-value">${hubState.selectedSkills.length}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">本次命中</div><div class="hub-kpi-value">${hubState.selectedSkills.length}</div></div>
       <div class="hub-kpi"><div class="hub-kpi-label">加载方式</div><div class="hub-kpi-value">按需</div></div>
     </div>
-    <section class="hub-section">
-      <div class="hub-section-title">本次按需加载 <span class="hub-mini-note">根据当前输入、模式和 agent 选择</span></div>
-      <div class="hub-actions" style="margin-bottom:8px;">
-        <button class="hub-action-btn" data-hub-action="skill-import">＋ 导入 Skill</button>
-        <span style="font-size:11px;color:var(--muted);">支持粘贴 yaml 或填写表单（路由按 mention/category 匹配）</span>
+
+    <div class="skill-tabs">
+      <button class="skill-tab active" data-stab="loaded">本次加载 <span class="skill-tab-count">${hubState.selectedSkills.length}</span></button>
+      <button class="skill-tab" data-stab="installed">已安装 <span class="skill-tab-count">${hubState.skills.length}</span></button>
+      <button class="skill-tab" data-stab="market">🛒 市场</button>
+      <button class="skill-tab" data-stab="preview">Prompt 预览</button>
+    </div>
+
+    <div class="skill-tab-panel" data-spanel="loaded">
+      ${hubState.selectedSkills.length
+        ? hubState.selectedSkills.map(s => skillCard(s, { showMounts: false })).join('')
+        : '<div class="hub-empty">当前输入没有匹配到 skill。输入目标或切到拆任务模式再打开 Hub。</div>'}
+    </div>
+
+    <div class="skill-tab-panel hidden" data-spanel="installed">
+      <div class="skill-install-tip">挂载复选框控制该 skill 注入哪些角色/agent 的 prompt。</div>
+      ${hubState.skills.length
+        ? hubState.skills.map(s => skillCard(s, { showMounts: true })).join('')
+        : '<div class="hub-empty">还没有安装任何 skill。去市场 Tab 安装。</div>'}
+    </div>
+
+    <div class="skill-tab-panel hidden" data-spanel="market">
+      <div class="skill-market-bar">
+        <div class="skill-source-btns">
+          <button class="skill-src-btn active" data-src="myteam-official">myteam 官方</button>
+          <button class="skill-src-btn" data-src="clowder-ai">clowder-ai</button>
+        </div>
+        <input class="skill-search-input" placeholder="搜索 skill…" />
       </div>
-      <div class="hub-list">
-        ${hubState.selectedSkills.length ? hubState.selectedSkills.map(skill => `<div class="hub-row">
-          <div class="hub-row-main">
-            <div class="hub-row-title">${esc(skill.name)}</div>
-            <div class="hub-row-meta">${esc(skill.category || '-')} · score ${skill.score || 0} · ${esc(skill.prompt || skill.description || '')}</div>
-          </div>
-          <span class="hub-badge ok">${esc(skill.load || 'progressive')}</span>
-        </div>`).join('') : '<div class="hub-empty">当前输入还没有匹配到 skill。输入目标后再打开 Hub，或切到拆任务模式查看。</div>'}
+      <div class="skill-market-list" id="skillMarketList">
+        <div class="hub-loading">点击上方源名称加载市场列表…</div>
       </div>
-    </section>
-    <section class="hub-section">
-      <div class="hub-section-title">Skills Registry <span class="hub-mini-note">来自 .myteam/skills.yaml，执行时只注入命中的部分</span></div>
-      ${hubState.skills.length ? `<div class="hub-table-wrap">
-        <table class="hub-skills-table">
-          <thead>
-            <tr>
-              <th>Skill</th>
-              <th>分类</th>
-              <th>触发条件</th>
-              <th>加载</th>
-              <th>挂载</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${hubState.skills.map(skill => `<tr>
-              <td><span class="hub-skill-name ${selectedNames.has(skill.name) ? 'active' : ''}">${esc(skill.name)}</span></td>
-              <td>${esc(skill.category || '-')}</td>
-              <td>${esc(skill.trigger || skill.description || '-')}</td>
-              <td>${esc(skill.load || 'manual')}</td>
-              <td><div class="hub-mounts">
-                ${mountKeys.map(key => `<span class="hub-mount ${skill.mounts?.[key] ? 'on' : ''}">${esc(key)}</span>`).join('')}
-              </div></td>
-            </tr>`).join('')}
-          </tbody>
-        </table>
-      </div>` : '<div class="hub-empty">还没有技能清单。请检查 .myteam/skills.yaml。</div>'}
-    </section>
-    <section class="hub-section">
-      <div class="hub-section-title">Prompt Preview <span class="hub-mini-note">真实执行时注入给 agent 的 skill 摘要</span></div>
+    </div>
+
+    <div class="skill-tab-panel hidden" data-spanel="preview">
+      <div class="hub-section-title">注入给 agent 的 Prompt 摘要 <span class="hub-mini-note">仅展示 enabled + 命中的部分</span></div>
       <pre class="hub-code-block">${esc(hubState.skillContextPreview || '暂无匹配 skill。')}</pre>
-    </section>`;
+    </div>
+  `;
+
+  // ── Tab 切换 ──
+  hubBody.querySelectorAll('.skill-tab').forEach(btn => {
+    btn.onclick = () => {
+      hubBody.querySelectorAll('.skill-tab').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const target = btn.dataset.stab;
+      hubBody.querySelectorAll('.skill-tab-panel').forEach(p => {
+        p.classList.toggle('hidden', p.dataset.spanel !== target);
+      });
+    };
+  });
+
+  // ── 启用/禁用 Toggle ──
+  hubBody.querySelectorAll('.skill-toggle-cb').forEach(cb => {
+    cb.onchange = async () => {
+      const name = cb.dataset.skill;
+      await fetch(`/api/skills/${encodeURIComponent(name)}/toggle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: cb.checked }),
+      });
+      await loadHub();
+    };
+  });
+
+  // ── 挂载 Checkbox ──
+  hubBody.querySelectorAll('.skill-mount-cb').forEach(cb => {
+    cb.onchange = async () => {
+      const name = cb.dataset.skill;
+      const mount = cb.dataset.mount;
+      await fetch(`/api/skills/${encodeURIComponent(name)}/mounts`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ [mount]: cb.checked }),
+      });
+    };
+  });
+
+  // ── 卸载按钮 ──
+  hubBody.querySelectorAll('.skill-uninstall-btn').forEach(btn => {
+    btn.onclick = async () => {
+      const name = btn.dataset.skill;
+      if (!confirm(`确认卸载 skill: ${name}？`)) return;
+      await fetch(`/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      await loadHub();
+    };
+  });
+
+  // ── 市场源切换 ──
+  let currentMarketSrc = 'myteam-official';
+  let marketCache = {};
+
+  async function loadMarket(src) {
+    currentMarketSrc = src;
+    hubBody.querySelectorAll('.skill-src-btn').forEach(b => b.classList.toggle('active', b.dataset.src === src));
+    const listEl = document.getElementById('skillMarketList');
+    if (!listEl) return;
+    if (marketCache[src]) { renderMarketList(marketCache[src], listEl); return; }
+    listEl.innerHTML = '<div class="hub-loading">加载中…</div>';
+    try {
+      const data = await fetch(`/api/skills/registry?source=${encodeURIComponent(src)}`).then(r => r.json());
+      if (data.error) throw new Error(data.error);
+      marketCache[src] = data.skills || [];
+      renderMarketList(marketCache[src], listEl);
+    } catch (err) {
+      listEl.innerHTML = `<div class="hub-empty">加载失败：${esc(err.message)}</div>`;
+    }
+  }
+
+  function renderMarketList(skills, container, filter = '') {
+    const lower = filter.toLowerCase();
+    const filtered = filter ? skills.filter(s =>
+      s.name.includes(lower) || (s.description || '').toLowerCase().includes(lower) ||
+      (s.category || '').toLowerCase().includes(lower)
+    ) : skills;
+
+    container.innerHTML = filtered.length ? filtered.map(s => `
+      <div class="skill-card ${s.installed ? 'installed' : ''}">
+        <div class="skill-card-header">
+          <span class="skill-card-name">${esc(s.name)}</span>
+          <span class="skill-card-cat">${esc(s.category || 'general')}</span>
+          <div class="skill-card-actions">
+            <button class="skill-install-btn ${s.installed ? 'installed' : ''}"
+              data-skill="${esc(s.name)}" data-source="${esc(currentMarketSrc)}"
+              ${s.installed ? 'disabled' : ''}>
+              ${s.installed ? '✓ 已安装' : '⬇ 安装'}
+            </button>
+          </div>
+        </div>
+        <div class="skill-card-desc">${esc((s.description || s.trigger || '').slice(0, 150))}</div>
+      </div>`).join('')
+      : `<div class="hub-empty">没有匹配"${esc(filter)}"的 skill</div>`;
+
+    // 绑定安装按钮
+    container.querySelectorAll('.skill-install-btn:not([disabled])').forEach(btn => {
+      btn.onclick = async () => {
+        const name = btn.dataset.skill;
+        const source = btn.dataset.source;
+        btn.disabled = true;
+        btn.textContent = '安装中…';
+        try {
+          const res = await fetch('/api/skills/install', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source, name }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || '安装失败');
+          btn.textContent = '✓ 已安装';
+          btn.classList.add('installed');
+          // 更新缓存
+          if (marketCache[source]) {
+            const entry = marketCache[source].find(s => s.name === name);
+            if (entry) entry.installed = true;
+          }
+          addSystemMsg(`✓ Skill "${name}" 安装成功`);
+        } catch (err) {
+          btn.disabled = false;
+          btn.textContent = '⬇ 安装';
+          addSystemMsg(`✗ 安装失败：${err.message}`);
+        }
+      };
+    });
+  }
+
+  hubBody.querySelectorAll('.skill-src-btn').forEach(btn => {
+    btn.onclick = () => loadMarket(btn.dataset.src);
+  });
+
+  hubBody.querySelector('.skill-search-input')?.addEventListener('input', e => {
+    const listEl = document.getElementById('skillMarketList');
+    if (!listEl || !marketCache[currentMarketSrc]) return;
+    renderMarketList(marketCache[currentMarketSrc], listEl, e.target.value);
+  });
 }
 
 function renderHubLessons() {
@@ -2808,6 +2974,13 @@ function showCreateAgentDialog(availableAgents) {
       const rawKey = keyInp.value.trim();
       const key = rawKey.toLowerCase().replace(/^@+/, '').replace(/[^a-z0-9_-]+/g, '-');
       if (!key) { keyInp.focus(); keyInp.style.borderColor = 'var(--red)'; return; }
+      // 拦截疑似 API key（≥24 位纯十六进制）误填到 key 字段
+      if (/^[0-9a-f]{24,}$/.test(key)) {
+        keyInp.style.borderColor = 'var(--red)';
+        keyInp.title = 'Key 不能是 API 密钥，请填写简短的英文标识（如 codex-dev）';
+        keyInp.focus();
+        return;
+      }
       const idx = baseSel.value;
       const baseAgent = (idx !== '' && availableAgents[idx]) || null;
       const label = labelInp.value.trim() || (baseAgent ? `${baseAgent.label} (变体)` : key);

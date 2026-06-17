@@ -1,89 +1,25 @@
-﻿# myteamOUO
+# myteamOUO
 
-Lightweight local-first A2A (Agent-to-Agent) collaboration cockpit. No cloud, no database, no complex framework — just agents, tasks, review gates, and lessons, all from your local terminal.
+myteamOUO 是一个本地优先的 A2A（Agent-to-Agent）协作控制台：不依赖云端数据库，不引入复杂框架，用一个 Node HTTP 服务把多个本机 agent CLI、任务拆解、执行、review gate、skills、shell、产物和 lessons 串起来。
 
-Based on [clowder-ai](https://github.com/zts212653/clowder-ai) architecture, inspired by [LobsterAI](https://github.com/netease-youdao/LobsterAI).
+项目参考了 [clowder-ai](https://github.com/zts212653/clowder-ai) 的 A2A 协作架构，也吸收了 [LobsterAI](https://github.com/netease-youdao/LobsterAI) 的 Skills 管理、命令安全和子代理追踪思路。
 
-## Quick Start
+## 快速启动
 
 ```bash
 git clone https://github.com/jhryo25/myteamOUO.git
 cd myteamOUO
-# configure .env with agent CLI paths
 cp .env.example .env
-# start the server
 node server.mjs --port 7878
 ```
 
-Open http://localhost:7878 in browser.
+然后打开：
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                   Browser (localhost:7878)              │
-│  Chat | Tasks | Skills | Shell | Artifacts | Sessions  │
-├─────────────────────────────────────────────────────────┤
-│                   server.mjs (HTTP + SSE)               │
-│  agent-utils.mjs (spawn, stream, parse)                │
-│  commandSafety.mjs (shell danger classification)       │
-├─────────────────────────────────────────────────────────┤
-│  codex CLI     │  claude CLI    │  kimi CLI            │
-│  (stdin mode)  │  (stdin mode)  │  (arg mode)          │
-└─────────────────────────────────────────────────────────┘
+```text
+http://localhost:7878
 ```
 
-## Features
-
-### Multi-Agent Collaboration
-- Define agents with role cards, personalities, strengths, and restrictions
-- `@codex`, `@claude`, `@kimi` mention routing in chat
-- Plan mode: goal decomposition into verifiable subtasks (3-7 items)
-- Auto-review gate after each task execution
-- Cross-model A2A chain: agent output `@mentions` trigger follow-up tasks
-
-### Skills Marketplace
-- Installed / Market / Import tabbed management UI
-- Multi-source install: GitHub URL (auto clone + find SKILL.md), remote ZIP, local path
-- Toggle enable/disable, uninstall, mount configuration per skill
-- Skill routing: context-aware skill injection into agent prompts
-- Registered skills: task-planning, cli-execution, review-gate, lesson-capture, html-ui-alignment, shell-exec
-
-### Shell Command Execution
-- Execute PowerShell/cmd commands directly from the UI
-- Three-tier danger classification: safe / caution / destructive
-- Destructive commands trigger a confirmation modal
-- Live SSE streaming of stdout + stderr with exit code display
-- Commands survive page refresh (no abort on SSE disconnect)
-
-### Streaming Chat UX
-- Typewriter effect with markdown streaming
-- Collapsible thinking panel (auto-expand on first chunk, respects user toggle)
-- Sticky scroll: auto-scroll only when user is near the bottom
-- Structured content detection with smart flicker prevention
-- @mention hints, image attachments, session history
-
-### Subagent Session View
-- A2A chain tasks show a 🔍 button to open independent conversation views
-- Real-time SSE streaming of subagent progress (task-start/done/failed)
-- Auto-polling (3s interval) with message deduplication
-- Clickable subagent links in chat from worklist-chain events
-
-### Artifacts & Outputs
-- Auto-extract code blocks, HTML, JSON, markdown from agent output
-- HTML artifacts automatically saved to `.myteam/outputs/` as real files
-- `GET /api/outputs/file?name=` serves HTML with correct Content-Type
-- Artifacts panel with preview, copy, and open-in-browser
-
-### Refresh Resilience
-- `in_progress` tasks restored from `tasks.jsonl` after page refresh
-- Pending tasks in same run as completed tasks shown as running
-- `patchTask(in_progress)` runs before SSE stream starts to prevent race
-- Session history persisted in `.myteam/memory.json`
-
-## Configuration
-
-Edit `.env` to set agent CLI paths:
+`.env` 里配置本机 agent CLI 路径，例如：
 
 ```env
 CODEX_PATH=C:\path\to\codex.exe
@@ -91,56 +27,190 @@ CLAUDE_PATH=C:\path\to\claude.exe
 KIMI_PATH=C:\path\to\kimi.exe
 ```
 
-## API Reference
+## 当前能力
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/status` | Agent connection status |
-| GET | `/api/tasks` | List all tasks |
-| POST | `/api/plan` | Plan goal decomposition (SSE) |
-| POST | `/api/dispatch` | Execute pending tasks (SSE) |
-| GET | `/api/history` | Chat conversation history |
-| GET | `/api/sessions` | Session list |
-| GET | `/api/skills` | Installed skills with routing |
-| POST | `/api/skills/install` | Install from market source |
-| POST | `/api/skills/install-source` | Install from GitHub/URL/local |
-| POST | `/api/shell/exec` | Execute shell command |
-| POST | `/api/shell/exec-confirm` | Confirm dangerous command |
-| GET | `/api/shell/stream` | Shell output SSE stream |
-| GET | `/api/chain-task/messages` | Subagent conversation messages |
-| GET | `/api/chain-task/stream` | Subagent SSE stream |
-| GET | `/api/outputs` | List generated HTML files |
-| GET | `/api/outputs/file` | Serve generated HTML |
-| GET | `/api/running` | Active child processes |
-| POST | `/api/abort` | Stop all running processes |
-| GET | `/api/artifacts` | Chat-extracted artifacts |
+### 多 Agent 协作
 
-## File Structure
+- 支持 `@codex`、`@claude`、`@kimi` mention 路由。
+- 每个 agent 可配置角色卡、性格、擅长项和限制。
+- 对话模式支持流式输出、thinking 面板、图片附件和历史会话。
+- 拆任务模式会把目标拆成可验收的 3-7 个子任务。
+- 执行任务后自动进入 reviewer gate，降低单模型自检盲区。
+- agent 输出中出现新的 `@mention` 时，可自动创建 A2A 链式子任务。
 
+### Skills 市场与导入
+
+- 顶部 `Skills` 入口提供已安装、市场、导入三个视图。
+- 官方市场优先读取当前 checkout 的本地 `skills-registry/index.json`，本地缺失时再回退远程。
+- 支持从官方市场、clowder-ai manifest、GitHub 仓库、远程 ZIP、本地目录或本地 ZIP 安装 skill。
+- 支持启用/禁用、卸载、挂载信息展示。
+- 当前官方 registry 包含：
+  - `task-planning`
+  - `cli-execution`
+  - `review-gate`
+  - `lesson-capture`
+  - `html-ui-alignment`
+  - `shell-exec`
+
+### Shell 执行
+
+- 顶部 `Shell` 入口可执行 PowerShell/cmd 命令。
+- `commandSafety.mjs` 会把命令分成 `safe`、`caution`、`destructive`。
+- 删除、强推、权限修改、进程终止、注册表修改等命令会触发确认。
+- stdout/stderr/exit code 通过 SSE 实时返回。
+- 前端断开或刷新时不主动杀掉后端命令。
+
+### 子代理会话
+
+- A2A 链式任务会在任务行显示子代理入口。
+- `worklist-chain` 事件会在聊天区插入可点击的子代理链接。
+- 子代理视图可查看 `task-start`、`task-done`、`task-failed` 事件。
+- 后端暂用内存 Map 保存链式任务消息；刷新服务后不会保留该 Map。
+
+### 产物与输出
+
+- 自动提取 agent 输出中的代码块、HTML、JSON、Markdown 和 URL。
+- HTML 产物会保存到 `.myteam/outputs/`。
+- 产物文件名会做 `basename` 和字符清理，避免路径穿越。
+- `/api/outputs/file?name=` 只允许安全文件名，非法路径返回 400。
+- 产物面板支持预览、复制和浏览器打开。
+
+### 刷新恢复
+
+- 刷新后会通过 `/api/running` 和 `/api/tasks` 恢复运行态。
+- `in_progress` 任务可从 `tasks.jsonl` 恢复。
+- 同一个 run 里已有 done 且仍有 pending 的任务，会恢复为可继续的运行提示。
+- 恢复逻辑会补齐 `startedAt`，避免计时出现 NaN。
+
+## 架构概览
+
+```text
+Browser (localhost:7878)
+  ├─ Chat / Sessions / Tasks / Hub
+  ├─ Skills / Shell / Artifacts / Subagent View
+  └─ SSE streaming UI
+
+server.mjs
+  ├─ REST API + SSE
+  ├─ agent 调用、任务执行、review gate
+  ├─ skill registry / install / import
+  ├─ shell execution
+  └─ artifact / output serving
+
+agent-utils.mjs
+  ├─ CLI 配置与启动检查
+  ├─ prompt 构造
+  ├─ parser / JSON 提取
+  └─ task JSONL 读写
+
+commandSafety.mjs
+  └─ shell 命令风险分类
+
+.myteam/
+  ├─ tasks.jsonl
+  ├─ lessons.jsonl
+  ├─ invocations.jsonl
+  ├─ memory.json
+  ├─ skills/
+  └─ outputs/
 ```
+
+## API 摘要
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/status` | agent 连接状态 |
+| GET | `/api/tasks` | 任务列表 |
+| POST | `/api/plan` | 拆任务，SSE 返回 |
+| POST | `/api/dispatch` | 执行 pending 任务，SSE 返回 |
+| GET | `/api/running` | 当前运行中的子进程 |
+| POST | `/api/abort` | 停止指定 session/run 的子进程 |
+| GET | `/api/history` | 会话历史 |
+| GET/POST | `/api/sessions` | 会话列表、新建、切换 |
+| GET | `/api/skills` | 已安装 skills 和路由推荐 |
+| GET | `/api/skills/registry` | skill 市场清单 |
+| POST | `/api/skills/install` | 从市场安装 skill |
+| POST | `/api/skills/install-source` | 从 GitHub/URL/本地安装 skill |
+| POST | `/api/shell/exec` | 执行 safe shell 命令 |
+| POST | `/api/shell/exec-confirm` | 确认后执行 caution/destructive 命令 |
+| GET | `/api/shell/stream` | shell 输出 SSE |
+| GET | `/api/artifacts` | 对话中提取的产物 |
+| GET | `/api/outputs` | 已保存 HTML 输出 |
+| GET | `/api/outputs/file` | 安全读取 HTML 输出 |
+| GET | `/api/chain-task/messages` | 子代理任务消息 |
+| GET | `/api/chain-task/stream` | 子代理任务 SSE |
+
+## 文件结构
+
+```text
 myteamOUO/
-├── server.mjs              # HTTP server + all API endpoints
-├── agent-utils.mjs         # Agent spawn, stream, parse utilities
-├── commandSafety.mjs       # Shell command danger classification
-├── plan.mjs                # CLI: goal decomposition
-├── dispatch.mjs            # CLI: task execution
+├── server.mjs
+├── agent-utils.mjs
+├── commandSafety.mjs
+├── plan.mjs
+├── dispatch.mjs
 ├── web/
-│   ├── app.html            # Single-page app shell
-│   ├── app.js              # All frontend logic
-│   └── app.css             # All styles
+│   ├── app.html
+│   ├── app.js
+│   └── app.css
 ├── skills-registry/
-│   └── index.json          # Official skill marketplace index
-├── .myteam/                # Local workspace (gitignored)
-│   ├── tasks.jsonl         # Task persistence
-│   ├── memory.json         # Session/chat persistence
-│   ├── lessons.jsonl       # Failure lessons
-│   ├── skills/             # Installed skill SKILL.md files
-│   └── outputs/            # Auto-saved HTML files
-└── .env                    # Agent CLI configuration
+│   ├── index.json
+│   ├── task-planning/SKILL.md
+│   ├── cli-execution/SKILL.md
+│   ├── review-gate/SKILL.md
+│   ├── lesson-capture/SKILL.md
+│   ├── html-ui-alignment/SKILL.md
+│   └── shell-exec/SKILL.md
+├── docs/
+├── .myteam/
+│   ├── tasks.jsonl
+│   ├── lessons.jsonl
+│   ├── invocations.jsonl
+│   ├── memory.json
+│   ├── skills/
+│   └── outputs/
+└── .env
 ```
 
-## Credits
+## 本轮修复重点（2026-06-17）
 
-Inspired by and aligned with:
-- [clowder-ai](https://github.com/zts212653/clowder-ai) — A2A architecture, skill manifest, cross-model review
-- [LobsterAI](https://github.com/netease-youdao/LobsterAI) — Skill marketplace UI, subagent tracking, command safety
+- 补齐 `skills-registry/shell-exec/SKILL.md`，修复官方市场中存在坏条目的问题。
+- 官方市场读取当前 checkout 的本地 registry，避免本地开发时依赖 GitHub main。
+- 本地 registry JSON 解析前去掉 BOM，避免 `JSON.parse` 失败。
+- 修复前端 Skills 市场按钮调用错接口的问题。
+- 修复 `server.mjs` 中未导入 `dirname` 和不存在的 `chr()`。
+- 远程 ZIP 下载改用 Buffer，避免二进制损坏。
+- skill name、artifact 文件名、outputs 文件名统一做安全清理。
+- `.myteam/outputs/` 和 `.myteam/.tmp-skill-*` 已加入 `.gitignore`。
+- 刷新恢复运行态时补齐 `startedAt`，避免计时异常。
+
+## 验证
+
+本轮已验证：
+
+```bash
+node --check server.mjs
+node --check web/app.js
+git diff --check
+```
+
+并用本地 `7879` 临时服务验证：
+
+- `/api/skills/registry?source=myteam-official` 能读到 `shell-exec`
+- `/api/skills/install` 能安装 `shell-exec`
+- `/api/skills/install-source` 能从本地目录安装 `shell-exec`
+- `/api/shell/exec` + `/api/shell/stream` 能返回 `OK`
+- `/api/outputs/file?name=bad%5Cname` 返回 400
+
+## 运行时数据
+
+以下文件属于本地运行时数据，默认不提交：
+
+- `.myteam/tasks.jsonl`
+- `.myteam/lessons.jsonl`
+- `.myteam/invocations.jsonl`
+- `.myteam/memory.json`
+- `.myteam/skills/`
+- `.myteam/outputs/`
+
+本轮 review 经验已写入 `.myteam/lessons.jsonl`，用于本地长期记忆。

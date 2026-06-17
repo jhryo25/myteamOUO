@@ -18,6 +18,8 @@ reports/
 .myteam/agents.json
 .myteam/settings.json
 .myteam/uploads/
+.myteam/outputs/
+.myteam/.tmp-skill-*
 .myteam/skills/
 .myteam/skills-state.json
 .myteam/avatars/

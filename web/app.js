@@ -1008,7 +1008,7 @@ function renderTasks(tasks) {
         ? `<div class="task-error-text">✗ ${esc(task.error)}</div>` : '';
 
       item.innerHTML = `
-        <div class="task-row">
+        <div class="task-row" data-task-id="${esc(task.id)}" data-parent-task-id="${esc(task.parent_task_id || '')}" data-chain-depth="${esc(task.chain_depth || 0)}">
           ${bulkMode ? `<input type="checkbox" class="task-bulk-cb" data-task-id="${esc(task.id)}" ${selectedTaskIds.has(task.id) ? 'checked' : ''}>` : ''}
           <span class="task-status-dot ${dotCls}"></span>
           <span class="task-row-title" title="${esc(task.title)}">${esc(task.title)}</span>
@@ -3579,12 +3579,18 @@ async function restoreRunningState() {
       fetch('/api/running'),
       fetch('/api/tasks')
     ]);
-    const { running } = await runningRes.json();
-    const { tasks } = await tasksRes.json();
+    const { running = [] } = await runningRes.json();
+    const { tasks = [] } = await tasksRes.json();
     const inProgress = tasks.filter(t => t.status === 'in_progress');
     for (const t of inProgress) {
       if (!running.some(r => r.sessionId === t.run_id)) {
-        running.push({ sessionId: t.run_id, agentKey: t.executed_by || t.agent, mode: 'dispatch', taskTitle: t.title });
+        running.push({
+          sessionId: t.run_id,
+          agentKey: t.executed_by || t.agent,
+          mode: 'dispatch',
+          taskTitle: t.title,
+          startedAt: t.started_at || t.updated_at || new Date().toISOString(),
+        });
       }
     }
     const activeRunIds = new Set(running.map(r => r.sessionId));
@@ -3594,7 +3600,13 @@ async function restoreRunningState() {
       if (pendingInRun.length > 0 && !activeRunIds.has(d.run_id)) {
         activeRunIds.add(d.run_id);
         const firstPending = pendingInRun[0];
-        running.push({ sessionId: firstPending.run_id, agentKey: firstPending.agent, mode: 'dispatch', taskTitle: firstPending.title });
+        running.push({
+          sessionId: firstPending.run_id,
+          agentKey: firstPending.agent,
+          mode: 'dispatch',
+          taskTitle: firstPending.title,
+          startedAt: firstPending.started_at || firstPending.updated_at || new Date().toISOString(),
+        });
       }
     }
     if (!running || !running.length) return;
@@ -3607,7 +3619,7 @@ async function restoreRunningState() {
           mode: r.mode,
           activeAgent: r.agentKey,
           clientRunId: r.clientRunId,
-          startedAt: new Date(r.startedAt).getTime(),
+          startedAt: r.startedAt ? new Date(r.startedAt).getTime() : Date.now(),
         });
       }
       
@@ -3620,7 +3632,7 @@ async function restoreRunningState() {
         });
         // 恢复已消耗的时间
         if (runningState) {
-          runningState.startedAt = new Date(r.startedAt).getTime();
+          runningState.startedAt = r.startedAt ? new Date(r.startedAt).getTime() : Date.now();
         }
       }
     });
@@ -4058,7 +4070,7 @@ async function loadMarketSkills() {
       var installed = s.installed;
       return "<div class=\"sv-card "+(installed?"installed":"")+"\"><div class=\"sv-card-header\"><span class=\"sv-card-name\">"+esc(s.name)+"</span><span class=\"sv-card-cat\">"+esc(s.category||"general")+"</span><div class=\"sv-card-actions\"><button class=\"sv-install-btn "+(installed?"installed":"")+"\" data-skill=\""+esc(s.name)+"\" data-source=\""+esc(currentSource)+"\" "+(installed?"disabled":"")+">"+(installed?"Installed":"Install")+"</button></div></div><div class=\"sv-card-desc\">"+esc((s.description||s.trigger||"").slice(0,150))+"</div></div>";
     }).join("");
-    svMarketList.querySelectorAll(".sv-install-btn:not([disabled])").forEach(btn => { btn.addEventListener("click", async () => { var n=btn.dataset.skill; btn.disabled=true; btn.textContent="Installing..."; try { await fetch("/api/skills/install-source", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({source:btn.dataset.source,name:n}) }); btn.textContent="Installed"; btn.classList.add("installed"); loadInstalledSkills(); } catch(e) { btn.disabled=false; btn.textContent="Install"; alert("Install failed: "+e.message); } }); });
+    svMarketList.querySelectorAll(".sv-install-btn:not([disabled])").forEach(btn => { btn.addEventListener("click", async () => { var n=btn.dataset.skill; btn.disabled=true; btn.textContent="Installing..."; try { var res = await fetch("/api/skills/install", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({source:btn.dataset.source,name:n}) }); var data = await res.json(); if (!res.ok || !data.ok) throw new Error(data.error || "install failed"); btn.textContent="Installed"; btn.classList.add("installed"); loadInstalledSkills(); } catch(e) { btn.disabled=false; btn.textContent="Install"; alert("Install failed: "+e.message); } }); });
   } catch(e) { svMarketList.innerHTML = "<div class=\"sv-empty\">Load failed: "+esc(e.message)+"</div>"; }
 }
 document.getElementById("svImportGithubBtn") && document.getElementById("svImportGithubBtn").addEventListener("click", () => doImport({url:document.getElementById("svImportGithub").value.trim()}));
@@ -4086,7 +4098,8 @@ if (typeof loadTasks === "function") {
 function injectSubagentButtons() {
   document.querySelectorAll(".task-row").forEach(row => {
     if (row.querySelector(".task-subagent-btn")) return;
-    var id = row.querySelector("[data-task-id]")?.dataset?.taskId;
+    if (!row.dataset.parentTaskId && Number(row.dataset.chainDepth || 0) <= 0) return;
+    var id = row.dataset.taskId || row.querySelector("[data-task-id]")?.dataset?.taskId;
     if (!id) return;
     var titleEl = row.querySelector(".task-row-title");
     var agentEl = row.querySelector(".task-row-agent");

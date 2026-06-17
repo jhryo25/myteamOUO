@@ -1,4 +1,4 @@
-// ── 工具 ─────────────────────────────────────────────────────
+﻿// ── 工具 ─────────────────────────────────────────────────────
 function esc(s) {
   return String(s||'')
     .replace(/&/g,'&amp;').replace(/</g,'&lt;')
@@ -165,6 +165,15 @@ function addSystemMsg(text) {
   const row = document.createElement('div');
   row.innerHTML = `<div class="bubble system-bubble">${esc(text)}</div>`;
   chatEl.appendChild(row);
+  scrollChat();
+}
+
+function addSubagentLink(taskId, title, agentKey) {
+  const row = document.createElement('div');
+  const link = esc(title || taskId);
+  row.innerHTML = '<div class="bubble system-bubble subagent-link-bubble">-> ' + link + '<button class="subagent-view-btn" data-task-id="' + esc(taskId) + '" data-title="' + esc(title) + '" data-agent="' + esc(agentKey || '') + '">View subagent</button></div>';
+  chatEl.appendChild(row);
+  row.querySelector('.subagent-view-btn').onclick = () => window.openSubagentSession && window.openSubagentSession(taskId, title, agentKey);
   scrollChat();
 }
 
@@ -409,7 +418,6 @@ function _flushTyper(bubble) {
   st.displayed = st.pending.slice(0, next);
   bubble.dataset.raw = st.displayed;
   bubble.innerHTML = streamRender(st.displayed) + '<span class="stream-cursor">▊</span>';
-  scrollChat();
   st.rafId = setTimeout(() => _flushTyper(bubble), TYPER_TICK_MS);
 }
 
@@ -508,7 +516,8 @@ function finishTyping(stats = null) {
 }
 
 function scrollChat() {
-  chatEl.scrollTop = chatEl.scrollHeight;
+  const dist = chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight;
+  if (dist < 120) chatEl.scrollTop = chatEl.scrollHeight;
 }
 
 // ── 结构化气泡：plan 任务列表 ─────────────────────────────────
@@ -3535,6 +3544,7 @@ async function loadHistory({ older = false } = {}) {
     if (requestedSessionId && requestedSessionId !== currentSessionId) return;
     if (sessionId) currentSessionId = sessionId;
     if (history && history.length) {
+      hideWelcome();
       if (older) {
         history.slice().reverse().forEach(h => renderHistoryEntry(h, true));
         chatEl.scrollTop = prevTop + (chatEl.scrollHeight - prevHeight);
@@ -3565,8 +3575,28 @@ async function loadHistory({ older = false } = {}) {
 // 刷新后恢复运行中任务状态
 async function restoreRunningState() {
   try {
-    const res = await fetch('/api/running');
-    const { running } = await res.json();
+    const [runningRes, tasksRes] = await Promise.all([
+      fetch('/api/running'),
+      fetch('/api/tasks')
+    ]);
+    const { running } = await runningRes.json();
+    const { tasks } = await tasksRes.json();
+    const inProgress = tasks.filter(t => t.status === 'in_progress');
+    for (const t of inProgress) {
+      if (!running.some(r => r.sessionId === t.run_id)) {
+        running.push({ sessionId: t.run_id, agentKey: t.executed_by || t.agent, mode: 'dispatch', taskTitle: t.title });
+      }
+    }
+    const activeRunIds = new Set(running.map(r => r.sessionId));
+    const doneTasks = tasks.filter(t => t.status === 'done');
+    for (const d of doneTasks) {
+      const pendingInRun = tasks.filter(t => t.run_id === d.run_id && t.status === 'pending');
+      if (pendingInRun.length > 0 && !activeRunIds.has(d.run_id)) {
+        activeRunIds.add(d.run_id);
+        const firstPending = pendingInRun[0];
+        running.push({ sessionId: firstPending.run_id, agentKey: firstPending.agent, mode: 'dispatch', taskTitle: firstPending.title });
+      }
+    }
     if (!running || !running.length) return;
     
     running.forEach(r => {
@@ -3875,3 +3905,199 @@ function injectArtifactBadges(bubbleEl, artifacts) {
   });
 }
 window.injectArtifactBadges = injectArtifactBadges;
+
+// ─── Shell execution ───────────────────────────────────────────
+(function() {
+const shellBtn = document.getElementById("shellPageBtn");
+const shellOverlay = document.getElementById("shellModalOverlay");
+const shellLevelEl = document.getElementById("shellModalLevel");
+const shellCmdEl = document.getElementById("shellModalCmd");
+const shellDeny = document.getElementById("shellModalDeny");
+const shellAllow = document.getElementById("shellModalAllow");
+let pendingShellCmd = null;
+shellBtn && shellBtn.addEventListener("click", () => {
+  const cmd = prompt("Enter PowerShell command:");
+  if (!cmd || !cmd.trim()) return;
+  execShell(cmd.trim());
+});
+window.execShell = execShell;
+async function execShell(command) {
+  const res = await fetch("/api/shell/exec", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({command}) });
+  const data = await res.json();
+  if (data.ok) { addShellResultCard(data.runId, data.command); streamShellResult(data.runId); return; }
+  if (data.needConfirm) { pendingShellCmd = data.command; showShellConfirm(data.level, data.reason, data.command); return; }
+  addSystemMsg("Shell error: " + (data.error || "unknown"));
+}
+function showShellConfirm(level, reason, command) {
+  shellCmdEl.textContent = command;
+  shellLevelEl.textContent = level.toUpperCase() + (reason ? ": " + reason : "");
+  shellLevelEl.className = "shell-modal-level " + (level==="destructive"?"destructive":"caution");
+  shellOverlay.classList.remove("hidden");
+  pendingShellCmd = command;
+}
+shellDeny && shellDeny.addEventListener("click", () => { shellOverlay.classList.add("hidden"); pendingShellCmd = null; addSystemMsg("Shell command cancelled."); });
+shellAllow && shellAllow.addEventListener("click", async () => {
+  shellOverlay.classList.add("hidden");
+  if (!pendingShellCmd) return;
+  const cmd = pendingShellCmd; pendingShellCmd = null;
+  const res = await fetch("/api/shell/exec-confirm", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({command:cmd,confirmed:true}) });
+  const data = await res.json();
+  if (data.ok) { addShellResultCard(data.runId, data.command); streamShellResult(data.runId); }
+});
+function addShellResultCard(runId, command) {
+  hideWelcome();
+  const row = document.createElement("div"); row.className = "bubble-row";
+  row.innerHTML = "<div class=\"avatar system-av\">$</div><div class=\"bubble-content-wrap\" style=\"max-width:85%\"><div class=\"shell-result-block\" id=\"shellBlock-"+runId+"\"><div class=\"shell-result-header\"><span>SHELL</span><span class=\"shell-result-exit\" id=\"shellExit-"+runId+"\">running...</span></div><div class=\"shell-result-body\" id=\"shellStdout-"+runId+"\">"+esc(command)+" ...</div><div class=\"shell-result-body stderr hidden\" id=\"shellStderr-"+runId+"\"></div></div></div>";
+  chatEl.appendChild(row); scrollChat();
+}
+async function streamShellResult(runId) {
+  const es = new EventSource("/api/shell/stream?runId=" + encodeURIComponent(runId));
+  es.onmessage = (e) => { try { const d = JSON.parse(e.data); const so = document.getElementById("shellStdout-"+runId); const se = document.getElementById("shellStderr-"+runId); const ex = document.getElementById("shellExit-"+runId); if (so) so.textContent = d.stdout || "(no output)"; if (se) { if (d.stderr) { se.classList.remove("hidden"); se.textContent = d.stderr; } else se.classList.add("hidden"); } if (ex) { if (d.done) { ex.textContent = "exit " + (d.exitCode!==null?d.exitCode:"?"); ex.style.color = d.exitCode===0?"var(--green)":"var(--red)"; es.close(); } else { ex.textContent = "running... "+((d.stdout||"").length+(d.stderr||"").length)+" chars"; } } } catch {} };
+  es.onerror = () => { es.close(); };
+}
+})();
+
+// ─── Subagent session ───────────────────────────────────────────
+(function() {
+const saBackBtn = document.getElementById("saBackBtn");
+if (!saBackBtn) return;
+const saView = document.getElementById("subagentView");
+const saTitle = document.getElementById("saTitle");
+const saStatus = document.getElementById("saStatus");
+const saMessages = document.getElementById("saMessages");
+const saEmpty = document.getElementById("saEmpty");
+const chatArea = document.querySelector(".chat-area");
+let saPollTimer = null;
+let currentTaskId = null;
+const knownMsgIds = new Set();
+saBackBtn.addEventListener("click", () => hideSubagentView());
+window.openSubagentSession = function(taskId, taskTitle, agentKey) {
+  currentTaskId = taskId;
+  saTitle.textContent = taskTitle || taskId;
+  saStatus.textContent = ""; saStatus.className = "sa-status";
+  saMessages.innerHTML = ""; saEmpty.textContent = "Loading..."; saEmpty.style.display = "block";
+  knownMsgIds.clear();
+  showSubagentView();
+  loadChainMessages(taskId);
+  startPolling(taskId);
+};
+function showSubagentView() { saView.classList.remove("hidden"); chatArea.style.display = "none"; }
+function hideSubagentView() { saView.classList.add("hidden"); chatArea.style.display = ""; stopPolling(); }
+async function loadChainMessages(taskId) {
+  try {
+    const data = await fetch("/api/chain-task/messages?taskId=" + encodeURIComponent(taskId)).then(r=>r.json());
+    if (data.messages) { for (const msg of data.messages) { if (!knownMsgIds.has(msg.timestamp+msg.type)) { knownMsgIds.add(msg.timestamp+msg.type); renderChainMessage(msg); } } }
+  } catch(e) {}
+}
+function startPolling(taskId) { stopPolling(); saPollTimer = setInterval(() => loadChainMessages(taskId), 3000); }
+function stopPolling() { if (saPollTimer) { clearInterval(saPollTimer); saPollTimer = null; } }
+function renderChainMessage(msg) {
+  saEmpty.style.display = "none";
+  const div = document.createElement("div"); div.className = "sa-msg " + (msg.type||"");
+  var h;
+  if (msg.type === "task-start") h = "🚀 " + (msg.agent||"") + " start: " + (msg.title||"");
+  else if (msg.type === "task-done") { h = "✅ " + (msg.agent||"") + " done"; if (msg.summary) h += ": " + esc(msg.summary.slice(0,200)); saStatus.textContent = "✓ Done"; saStatus.className = "sa-status done"; }
+  else if (msg.type === "task-failed") { h = "❌ " + (msg.agent||"") + " failed: " + esc((msg.error||"").slice(0,200)); saStatus.textContent = "✗ Failed"; saStatus.className = "sa-status failed"; }
+  else h = JSON.stringify(msg);
+  div.innerHTML = "<div class=\"sa-system-msg " + ((msg.type==="task-done")?"done":(msg.type==="task-failed")?"failed":"") + "\">" + h + "</div>";
+  saMessages.appendChild(div); saMessages.scrollTop = saMessages.scrollHeight;
+}
+})();
+
+// ─── Skills management ───────────────────────────────────────────
+(function() {
+const svBackBtn = document.getElementById("svBackBtn");
+const skillsPageBtn = document.getElementById("skillsPageBtn");
+const skillsView = document.getElementById("skillsView");
+const chatArea = document.querySelector(".chat-area");
+const svInstalledList = document.getElementById("svInstalledList");
+const svMarketList = document.getElementById("svMarketList");
+const svSourceBtns = document.getElementById("svSourceBtns");
+const svMarketSearch = document.getElementById("svMarketSearch");
+if (!skillsPageBtn) return;
+let currentSource = "myteam-official";
+let marketCache = {};
+skillsPageBtn.addEventListener("click", () => showSkillsView());
+svBackBtn && svBackBtn.addEventListener("click", () => hideSkillsView());
+function showSkillsView() { skillsView.classList.remove("hidden"); chatArea.style.display = "none"; loadInstalledSkills(); loadMarketSources(); }
+function hideSkillsView() { skillsView.classList.add("hidden"); chatArea.style.display = ""; }
+document.querySelectorAll(".sv-tab").forEach(tab => { tab.addEventListener("click", () => { document.querySelectorAll(".sv-tab").forEach(t=>t.classList.remove("active")); tab.classList.add("active"); var p=tab.dataset.stab; document.querySelectorAll(".sv-panel").forEach(p=>p.classList.add("hidden")); if (p==="installed") { document.getElementById("svPanelInstalled").classList.remove("hidden"); loadInstalledSkills(); } if (p==="market") { document.getElementById("svPanelMarket").classList.remove("hidden"); loadMarketSkills(); } if (p==="import") { document.getElementById("svPanelImport").classList.remove("hidden"); } }); });
+async function loadInstalledSkills() {
+  try {
+    const data = await fetch("/api/skills").then(r=>r.json());
+    var skills = data.skills || data || [];
+    if (!skills.length) { svInstalledList.innerHTML = "<div class=\"sv-empty\">No skills installed.</div>"; return; }
+    svInstalledList.innerHTML = skills.map(s => {
+      var enabled = s.enabled !== false;
+      var cat = s.category || "general";
+      var desc = (s.description || s.trigger || "").slice(0,120);
+      return "<div class=\"sv-card " + (enabled?"":"disabled") + "\"><div class=\"sv-card-header\"><span class=\"sv-card-name\">"+esc(s.name)+"</span><span class=\"sv-card-cat\">"+esc(cat)+"</span><div class=\"sv-card-actions\"><label class=\"sv-toggle\"><input type=\"checkbox\" class=\"sv-toggle-cb\" data-skill=\""+esc(s.name)+"\" "+(enabled?"checked":"")+"><span class=\"sv-toggle-track\"><span class=\"sv-toggle-thumb\"></span></span></label><button class=\"sv-uninstall-btn\" data-skill=\""+esc(s.name)+"\">🗑</button></div></div><div class=\"sv-card-desc\">"+esc(desc)+"</div>"+(s.mounts?"<div class=\"sv-card-mounts\">"+Object.entries(s.mounts).filter(([_,v])=>v).map(([k])=>"<span class=\"sv-mount-tag\">"+esc(k)+"</span>").join("")+"</div>":"")+"</div>";
+    }).join("");
+    svInstalledList.querySelectorAll(".sv-toggle-cb").forEach(cb => { cb.addEventListener("change", async () => { var n=cb.dataset.skill; var en=cb.checked; await fetch("/api/skills/"+encodeURIComponent(n)+"/toggle", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({enabled:en}) }); }); });
+    svInstalledList.querySelectorAll(".sv-uninstall-btn").forEach(btn => { btn.addEventListener("click", async () => { var n=btn.dataset.skill; if (!confirm("Uninstall "+n+"?")) return; await fetch("/api/skills/"+encodeURIComponent(n), { method:"DELETE" }); loadInstalledSkills(); }); });
+  } catch(e) { svInstalledList.innerHTML = "<div class=\"sv-empty\">Load failed: "+esc(e.message)+"</div>"; }
+}
+async function loadMarketSources() {
+  try {
+    const data = await fetch("/api/skills/registry?source=myteam-official").then(r=>r.json());
+    var sources = data.sources || ["myteam-official","clowder-ai"];
+    svSourceBtns.innerHTML = sources.map(s=>"<button class=\"sv-src-btn "+(s===currentSource?"active":"")+"\" data-src=\""+esc(s)+"\">"+esc(s)+"</button>").join("");
+    svSourceBtns.querySelectorAll(".sv-src-btn").forEach(btn => { btn.addEventListener("click", () => { currentSource=btn.dataset.src; svSourceBtns.querySelectorAll(".sv-src-btn").forEach(b=>b.classList.toggle("active",b.dataset.src===currentSource)); loadMarketSkills(); }); });
+    svMarketSearch.addEventListener("input", loadMarketSkills);
+    loadMarketSkills();
+  } catch(e) {}
+}
+async function loadMarketSkills() {
+  try {
+    const data = await fetch("/api/skills/registry?source="+encodeURIComponent(currentSource)).then(r=>r.json());
+    var skills = data.skills || []; marketCache[currentSource] = skills;
+    var filter = svMarketSearch.value.toLowerCase();
+    if (filter) skills = skills.filter(s => (s.name||"").toLowerCase().includes(filter) || (s.description||s.trigger||"").toLowerCase().includes(filter));
+    if (!skills.length) { svMarketList.innerHTML = "<div class=\"sv-empty\">"+(filter?"No matches":"No skills")+"</div>"; return; }
+    svMarketList.innerHTML = skills.map(s => {
+      var installed = s.installed;
+      return "<div class=\"sv-card "+(installed?"installed":"")+"\"><div class=\"sv-card-header\"><span class=\"sv-card-name\">"+esc(s.name)+"</span><span class=\"sv-card-cat\">"+esc(s.category||"general")+"</span><div class=\"sv-card-actions\"><button class=\"sv-install-btn "+(installed?"installed":"")+"\" data-skill=\""+esc(s.name)+"\" data-source=\""+esc(currentSource)+"\" "+(installed?"disabled":"")+">"+(installed?"Installed":"Install")+"</button></div></div><div class=\"sv-card-desc\">"+esc((s.description||s.trigger||"").slice(0,150))+"</div></div>";
+    }).join("");
+    svMarketList.querySelectorAll(".sv-install-btn:not([disabled])").forEach(btn => { btn.addEventListener("click", async () => { var n=btn.dataset.skill; btn.disabled=true; btn.textContent="Installing..."; try { await fetch("/api/skills/install-source", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({source:btn.dataset.source,name:n}) }); btn.textContent="Installed"; btn.classList.add("installed"); loadInstalledSkills(); } catch(e) { btn.disabled=false; btn.textContent="Install"; alert("Install failed: "+e.message); } }); });
+  } catch(e) { svMarketList.innerHTML = "<div class=\"sv-empty\">Load failed: "+esc(e.message)+"</div>"; }
+}
+document.getElementById("svImportGithubBtn") && document.getElementById("svImportGithubBtn").addEventListener("click", () => doImport({url:document.getElementById("svImportGithub").value.trim()}));
+document.getElementById("svImportUrlBtn") && document.getElementById("svImportUrlBtn").addEventListener("click", () => doImport({url:document.getElementById("svImportUrl").value.trim()}));
+document.getElementById("svImportPathBtn") && document.getElementById("svImportPathBtn").addEventListener("click", () => { var p=document.getElementById("svImportPath").value.trim(); doImport(p.toLowerCase().endsWith(".zip")?{zip:p}:{path:p}); });
+async function doImport(payload) {
+  var st = document.getElementById("svImportStatus");
+  st.classList.remove("hidden"); st.textContent = "Installing..."; st.className="sv-import-status";
+  try {
+    var res = await fetch("/api/skills/install-source", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload) });
+    var data = await res.json();
+    if (data.ok) { st.textContent = "Installed: "+data.skill.name; st.classList.add("success"); loadInstalledSkills(); }
+    else throw new Error(data.error||"unknown");
+  } catch(e) { st.textContent = "Failed: "+e.message; st.classList.add("error"); }
+}
+})();
+
+// ─── Task sub-agent button ───────────────────────────────────────────
+// inject sub-agent view button into task rows with parent_task_id
+var origLoadTasks = window.loadTasks;
+if (typeof loadTasks === "function") {
+  var orig = loadTasks;
+  loadTasks = async function() { await orig.apply(this, arguments); injectSubagentButtons(); };
+}
+function injectSubagentButtons() {
+  document.querySelectorAll(".task-row").forEach(row => {
+    if (row.querySelector(".task-subagent-btn")) return;
+    var id = row.querySelector("[data-task-id]")?.dataset?.taskId;
+    if (!id) return;
+    var titleEl = row.querySelector(".task-row-title");
+    var agentEl = row.querySelector(".task-row-agent");
+    var title = titleEl?.title || titleEl?.textContent || "";
+    var agent = agentEl?.textContent || "";
+    var btn = document.createElement("button");
+    btn.className = "task-subagent-btn";
+    btn.textContent = "🔍";
+    btn.title = "View subagent";
+    btn.onclick = (e) => { e.stopPropagation(); if (window.openSubagentSession) window.openSubagentSession(id, title, agent); };
+    var actions = row.querySelector(".task-actions");
+    if (actions) actions.insertAdjacentElement("beforebegin", btn);
+  });
+}

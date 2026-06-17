@@ -10,6 +10,7 @@ import { randomUUID, createHash } from 'crypto';
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
 import { loadEnv, buildCliConfig, invokeAgent, extractJson, PARSERS, validatePlanResult, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, buildReviewPrompt, AGENT_KEYS, buildSpawnCommand, checkAgentLaunchable, formatLaunchError, readAgentRegistry, writeAgentRegistry, sanitizeAgentKey, buildRoleCard, validatePhaseTransition, getNextPhase } from './agent-utils.mjs';
+import { getDangerLevel, isDangerousCommand } from './commandSafety.mjs';
 
 let ENV = loadEnv();
 let CLI_CONFIG = buildCliConfig(ENV);
@@ -21,6 +22,7 @@ const SKILLS_STATE_FILE = '.myteam/skills-state.json';
 const INVOCATIONS_FILE = '.myteam/invocations.jsonl';
 const SETTINGS_FILE = '.myteam/settings.json';
 const UPLOADS_DIR = '.myteam/uploads';
+const OUTPUTS_DIR = '.myteam/outputs';
 
 // skill 市场远程源配置
 const SKILL_SOURCES = {
@@ -36,6 +38,129 @@ const SKILL_SOURCES = {
     type: 'manifest',
   },
 };
+
+// A2A chain task store
+const chainTaskMessages = new Map();
+const chainTaskSSE = new Map();
+
+function pushChainMessage(taskId, msg) {
+  if (!chainTaskMessages.has(taskId)) chainTaskMessages.set(taskId, []);
+  chainTaskMessages.get(taskId).push({ ...msg, timestamp: new Date().toISOString() });
+  const listeners = chainTaskSSE.get(taskId);
+  if (listeners) {
+    const sseData = 'data: ' + JSON.stringify(msg) + '\n\n';
+    for (const res of listeners) {
+      try { res.write(sseData); } catch {}
+    }
+  }
+}
+
+function getChainMessages(taskId) {
+  return chainTaskMessages.get(taskId) || [];
+}
+
+const shellResults = new Map();
+
+function executeShell(command, runId) {
+  shellResults.set(runId, { stdout: '', stderr: '', exitCode: null, done: false, startedAt: new Date().toISOString() });
+  const isWin = process.platform === 'win32';
+  const child = spawn(isWin ? 'powershell' : 'sh', [isWin ? '-Command' : '-c', command], {
+    stdio: 'pipe',
+    cwd: process.cwd(),
+    timeout: 30000,
+    windowsHide: true,
+  });
+  child.stdout.on('data', (d) => {
+    const text = d.toString();
+    const cur = shellResults.get(runId);
+    if (cur) { cur.stdout += text; shellResults.set(runId, cur); }
+  });
+  child.stderr.on('data', (d) => {
+    const text = d.toString();
+    const cur = shellResults.get(runId);
+    if (cur) { cur.stderr += text; shellResults.set(runId, cur); }
+  });
+  child.on('close', (code) => {
+    const cur = shellResults.get(runId);
+    if (cur) { cur.exitCode = code; cur.done = true; cur.finishedAt = new Date().toISOString(); shellResults.set(runId, cur); }
+  });
+  child.on('error', (err) => {
+    const cur = shellResults.get(runId);
+    if (cur) { cur.stderr += err.message; cur.exitCode = -1; cur.done = true; cur.finishedAt = new Date().toISOString(); shellResults.set(runId, cur); }
+  });
+}
+
+function findSkillMdInDir(dir) {
+  try {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isFile() && entry.name === 'SKILL.md') return full;
+      if (entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules') {
+        const found = findSkillMdInDir(full);
+        if (found) return found;
+      }
+    }
+  } catch {}
+  return null;
+}
+
+function extractZip(zipPath, destDir) {
+  return new Promise((resolve, reject) => {
+    if (process.platform === "win32") {
+      const cmd = "Expand-Archive -LiteralPath '" + zipPath + "' -DestinationPath '" + destDir + "' -Force";
+      const ps = spawn("powershell", ["-NoProfile", "-Command", cmd], { stdio: "pipe" });
+      ps.on("close", code => code === 0 ? resolve() : reject(new Error("Expand-Archive exit " + code)));
+      ps.stderr.on("data", d => {});
+    } else {
+      const ps = spawn("unzip", ["-o", zipPath, "-d", destDir], { stdio: "pipe" });
+      ps.on("close", code => code === 0 ? resolve() : reject(new Error("unzip exit " + code)));
+      ps.stderr.on("data", d => {});
+    }
+  });
+}
+
+function parseGithubUrl(url) {
+  const m = String(url).match(/github\.com\/([^\/]+)\/([^\/]+?)(?:\.git)?(?:$|\/)/);
+  if (!m) return null;
+  return { owner: m[1], repo: m[2].replace(/\.git$/, "") };
+}
+
+function isRemoteUrl(str) { return /^https?:\/\//.test(str); }
+
+function cloneAndFindSkillMd(gitUrl) {
+  return new Promise((resolve, reject) => {
+    const tmpDir = ".myteam/.tmp-skill-clone-" + randomUUID().slice(0,6);
+    mkdirSync(tmpDir, { recursive: true });
+    const ps = spawn("git", ["clone", "--depth", "1", gitUrl, tmpDir], { stdio: "pipe" });
+    let err = "";
+    ps.stderr.on("data", d => { err += d.toString(); });
+    ps.on("close", code => {
+      if (code !== 0) return reject(new Error("git clone failed: " + err.slice(0,200)));
+      function findSkillMd(dir) {
+        try {
+          for (const entry of readdirSync(dir, { withFileTypes: true })) {
+            const full = join(dir, entry.name);
+            if (entry.isFile() && entry.name === "SKILL.md") return full;
+            if (entry.isDirectory() && !entry.name.startsWith(".") && entry.name !== "node_modules") {
+              const found = findSkillMd(full);
+              if (found) return found;
+            }
+          }
+        } catch {}
+        return null;
+      }
+      const found = findSkillMd(tmpDir);
+      if (!found) {
+        rmSync(tmpDir, { recursive: true, force: true });
+        return reject(new Error("SKILL.md not found in repo"));
+      }
+      const content = readFileSync(found, "utf8");
+      const skillName = basename(dirname(found));
+      resolve({ name: skillName, mdContent: content, tmpDir });
+    });
+  });
+}
+
 const AGENT_STATUS_TTL_MS = 5000;
 let agentStatusCache = { time: 0, agents: null };
 
@@ -688,6 +813,7 @@ function extractArtifacts(text, { sessionId, agent, messageIndex }) {
       source: 'chat-extracted', createdAt: Date.now(),
       preview: content.trim().slice(0, 80),
     });
+    if (type === 'html') saveArtifactFile(artifacts[artifacts.length - 1]);
   }
 
   // 规则 2: <file path="xxx">...</file> 路径标记
@@ -745,6 +871,18 @@ function extractArtifacts(text, { sessionId, agent, messageIndex }) {
   }
 
   return artifacts;
+}
+
+// Save artifacts with HTML content as actual files
+function saveArtifactFile(artifact) {
+  if (artifact.type !== 'html' && artifact.type !== 'markdown' && artifact.type !== 'json') return;
+  mkdirSync(OUTPUTS_DIR, { recursive: true });
+  const ext = artifact.type === 'html' ? '.html' : artifact.type === 'markdown' ? '.md' : '.json';
+  const base = artifact.path || ('artifact-' + artifact.id);
+  const fname = base + ext;
+  const fpath = OUTPUTS_DIR + '/' + fname;
+  writeFileSync(fpath, artifact.content, 'utf8');
+  artifact.savedFile = fname;
 }
 
 function guessFilename(type, lang, idx) {
@@ -2630,9 +2768,9 @@ async function handle(req, res) {
           sseSend(res, 'system', { text: `⚠️ ${task.agent} 不可用，改用 ${agentKey} 执行任务「${task.title}」` });
         }
       }
-      sseSend(res, 'task-start', { id: task.id, title: task.title, agent: agentKey });
       patchTask(task.id, { status: 'in_progress', started_at: new Date().toISOString() });
-
+      sseSend(res, 'task-start', { id: task.id, title: task.title, agent: agentKey });
+      if (depth > 0) pushChainMessage(task.id, { type: 'task-start', agent: agentKey, title: task.title });
       try {
         const skillText = [task.goal, task.title, task.accept, ...(task.steps || [])].join('\n');
         const skillContext = buildSkillContext(selectSkills({ text: skillText, agent: agentKey, phase: 'run' }));
@@ -2649,6 +2787,7 @@ async function handle(req, res) {
         const summary = result ? result.slice(0, 200) : '';
         sseSend(res, 'task-done', { id: task.id, title: task.title, agent: agentKey, summary });
         done++;
+        if (depth > 0) pushChainMessage(task.id, { type: 'task-done', agent: agentKey, title: task.title, summary });
 
         // 推荐下一阶段 skill（对齐 clowder-ai manifest.yaml 的 next 链）
         const currentSkills = selectSkills({ text: skillText, agent: agentKey, phase: 'run' });
@@ -2729,6 +2868,7 @@ async function handle(req, res) {
         appendLesson(task, err);
         sseSend(res, 'task-failed', { id: task.id, title: task.title, agent: agentKey, error: err.message });
         failed++;
+        if (depth > 0) pushChainMessage(task.id, { type: 'task-failed', agent: agentKey, title: task.title, error: err.message });
         return null;
       }
     }
@@ -2739,6 +2879,152 @@ async function handle(req, res) {
 
     sseSend(res, 'done', { done, failed });
     return res.end();
+  }
+
+  if (req.method === 'POST' && pathname === '/api/skills/install-source') {
+    const body = await readBody(req);
+    const { url, path: localPath, zip: zipPath, name } = body;
+    try {
+      let mdContent = '';
+      let skillName = name || '';
+      if (url && parseGithubUrl(url)) {
+        const r = await cloneAndFindSkillMd(url);
+        mdContent = r.mdContent;
+        skillName = skillName || r.name;
+      } else if (url && isRemoteUrl(url)) {
+        const tmpDir = '.myteam/.tmp-skill-dl-' + randomUUID().slice(0,6);
+        mkdirSync(tmpDir, { recursive: true });
+        const zipFile = tmpDir + '/skill.zip';
+        const raw = await httpGet(url);
+        writeFileSync(zipFile, Buffer.from(raw, 'utf8'));
+        await extractZip(zipFile, tmpDir);
+        const found = findSkillMdInDir(tmpDir);
+        if (!found) throw new Error('ZIP has no SKILL.md');
+        mdContent = readFileSync(found, 'utf8');
+        skillName = skillName || basename(dirname(found));
+      } else if (localPath || zipPath) {
+        const src = localPath || zipPath;
+        const absPath = resolve(src);
+        if (!existsSync(absPath)) throw new Error('Path not found');
+        const st = statSync(absPath);
+        if (st.isDirectory()) {
+          const found = findSkillMdInDir(absPath);
+          if (!found) throw new Error('No SKILL.md in dir');
+          mdContent = readFileSync(found, 'utf8');
+          skillName = skillName || basename(dirname(found));
+        } else if (absPath.toLowerCase().endsWith('.zip')) {
+          const tmpDir = '.myteam/.tmp-skill-extract-' + randomUUID().slice(0,6);
+          mkdirSync(tmpDir, { recursive: true });
+          await extractZip(absPath, tmpDir);
+          const found = findSkillMdInDir(tmpDir);
+          if (!found) throw new Error('ZIP has no SKILL.md');
+          mdContent = readFileSync(found, 'utf8');
+          skillName = skillName || basename(dirname(found));
+        } else {
+          throw new Error('Need dir or .zip');
+        }
+      } else {
+        throw new Error('No install source');
+      }
+      if (!skillName) skillName = 'unnamed';
+      const destDir = SKILLS_DIR + '/' + skillName;
+      mkdirSync(destDir, { recursive: true });
+      writeFileSync(destDir + '/SKILL.md', mdContent, 'utf8');
+      const state = readSkillsState();
+      state[skillName] = { enabled: true, source: 'local', installedAt: new Date().toISOString() };
+      writeSkillsState(state);
+      const skill = readSkillFromDir(SKILLS_DIR, skillName);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, skill }));
+    } catch (err) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'Install failed: ' + err.message }));
+    }
+  }
+
+  if (req.method === 'POST' && pathname === '/api/shell/exec') {
+    const body = await readBody(req);
+    const command = (body.command || '').trim();
+    if (!command) { res.writeHead(400); return res.end(JSON.stringify({ error: 'command required' })); }
+    const danger = getDangerLevel(command);
+    if (danger.level !== 'safe') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: false, needConfirm: true, level: danger.level, reason: danger.reason, command }));
+    }
+    const runId = randomUUID().slice(0, 8);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, runId, command, level: 'safe' }));
+    executeShell(command, runId);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/shell/exec-confirm') {
+    const body = await readBody(req);
+    const command = (body.command || '').trim();
+    if (!command || !body.confirmed) { res.writeHead(400); return res.end(JSON.stringify({ error: 'command and confirmed required' })); }
+    const runId = randomUUID().slice(0, 8);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, runId, command }));
+    executeShell(command, runId);
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/shell/stream') {
+    const runId = url.searchParams.get('runId') || '';
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'Access-Control-Allow-Origin': '*' });
+    const interval = setInterval(() => {
+      const data = shellResults.get(runId);
+      if (data) { res.write('data: ' + JSON.stringify(data) + '\n\n'); if (data.done) { clearInterval(interval); shellResults.delete(runId); res.end(); } }
+    }, 500);
+    req.on('close', () => { clearInterval(interval); });
+    return;
+  }
+ 
+  if (req.method === 'GET' && pathname === '/api/outputs') {
+    const list = existsSync(OUTPUTS_DIR) ? readdirSync(OUTPUTS_DIR).filter(f => f.endsWith('.html')) : [];
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ files: list }));
+  }
+
+  if (req.method === 'GET' && pathname === '/api/outputs/file') {
+    const fname = url.searchParams.get('name') || '';
+    if (!fname || fname.includes('..') || fname.includes('/') || fname.includes(chr(92))) {
+      res.writeHead(400); return res.end('invalid name');
+    }
+    const fpath = OUTPUTS_DIR + '/' + fname;
+    if (!existsSync(fpath)) { res.writeHead(404); return res.end('Not Found'); }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    return res.end(readFileSync(fpath, 'utf8'));
+  }
+
+  if (req.method === 'GET' && pathname === '/api/chain-task/messages') {
+    const taskId = url.searchParams.get('taskId') || '';
+    const messages = getChainMessages(taskId);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ taskId, messages }));
+  }
+
+  if (req.method === 'GET' && pathname === '/api/chain-task/stream') {
+    const taskId = url.searchParams.get('taskId') || '';
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+    });
+    if (!chainTaskSSE.has(taskId)) chainTaskSSE.set(taskId, new Set());
+    chainTaskSSE.get(taskId).add(res);
+    const existing = getChainMessages(taskId);
+    if (existing.length > 0) {
+      for (const msg of existing) {
+        res.write('data: ' + JSON.stringify(msg) + '\n\n');
+      }
+    }
+    res.write('data: ' + JSON.stringify({ type: 'connected', taskId }) + '\n\n');
+    req.on('close', () => {
+      if (chainTaskSSE.has(taskId)) chainTaskSSE.get(taskId).delete(res);
+    });
+    return;
   }
 
   // 404

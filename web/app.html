@@ -18,6 +18,8 @@
   </div>
   <button class="artifacts-btn" id="artifactsBtn" title="📁 产物面板">📁</button>
   <button class="hub-btn" id="hubBtn" title="打开 Hub">Hub</button>
+  <button class="skills-page-btn" id="skillsPageBtn" title="Skills 管理">Skills</button>
+  <button class="shell-page-btn" id="shellPageBtn" title="Shell 执行">Shell</button>
   <button class="settings-btn" id="settingsBtn" title="Agent 配置">⚙</button>
 </div>
 
@@ -140,6 +142,93 @@
         <button class="send-btn" id="sendBtn" title="发送">➤</button>
         <button class="stop-btn hidden" id="stopBtn" title="停止">■</button>
       </div>
+    </div>
+  </div>
+
+  <!-- ── Skills 管理视图（替换聊天区） ── -->
+  <div class="skills-view hidden" id="skillsView">
+    <div class="skills-view-header">
+      <div class="skills-view-title">
+        <button class="sv-back-btn" id="svBackBtn" title="返回聊天">← 返回</button>
+        <span class="sv-title-text">🧩 Skills 管理</span>
+      </div>
+      <div class="skills-tabs">
+        <button class="sv-tab active" data-stab="installed">已安装</button>
+        <button class="sv-tab" data-stab="market">市场</button>
+        <button class="sv-tab" data-stab="import">导入</button>
+      </div>
+    </div>
+    <div class="skills-view-body">
+      <!-- 已安装 Tab -->
+      <div class="sv-panel" id="svPanelInstalled">
+        <div class="sv-list" id="svInstalledList">
+          <div class="sv-empty">加载中…</div>
+        </div>
+      </div>
+      <!-- 市场 Tab -->
+      <div class="sv-panel hidden" id="svPanelMarket">
+        <div class="sv-market-bar">
+          <div class="sv-source-btns" id="svSourceBtns"></div>
+          <input class="sv-search-input" id="svMarketSearch" placeholder="搜索 market skill…">
+        </div>
+        <div class="sv-list" id="svMarketList">
+          <div class="sv-empty">加载中…</div>
+        </div>
+      </div>
+      <!-- 导入 Tab -->
+      <div class="sv-panel hidden" id="svPanelImport">
+        <div class="sv-import-section">
+          <div class="sv-import-group">
+            <label class="sv-import-label">GitHub 仓库</label>
+            <div class="sv-import-row">
+              <input class="sv-import-input" id="svImportGithub" placeholder="https://github.com/user/repo">
+              <button class="sv-import-btn" data-src="github" id="svImportGithubBtn">安装</button>
+            </div>
+            <div class="sv-import-tip">输入 GitHub 仓库地址，自动克隆并查找 SKILL.md</div>
+          </div>
+          <div class="sv-import-group">
+            <label class="sv-import-label">远程 ZIP URL</label>
+            <div class="sv-import-row">
+              <input class="sv-import-input" id="svImportUrl" placeholder="https://example.com/skill.zip">
+              <button class="sv-import-btn" data-src="url" id="svImportUrlBtn">安装</button>
+            </div>
+          </div>
+          <div class="sv-import-group">
+            <label class="sv-import-label">本地路径 / 文件夹</label>
+            <div class="sv-import-row">
+              <input class="sv-import-input" id="svImportPath" placeholder="C:\path\to\skill 或 .zip">
+              <button class="sv-import-btn" data-src="path" id="svImportPathBtn">安装</button>
+            </div>
+            <div class="sv-import-tip">输入本地目录路径或 .zip 文件路径</div>
+          </div>
+        </div>
+        <div class="sv-import-status hidden" id="svImportStatus"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- shell confirm modal -->
+  <div class="shell-modal-overlay hidden" id="shellModalOverlay">
+    <div class="shell-modal">
+      <div class="shell-modal-title">Shell Permission Required</div>
+      <div class="shell-modal-level" id="shellModalLevel"></div>
+      <div class="shell-modal-cmd" id="shellModalCmd"></div>
+      <div class="shell-modal-actions">
+        <button class="shell-modal-deny" id="shellModalDeny">Cancel</button>
+        <button class="shell-modal-allow" id="shellModalAllow">Execute</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 子代理会话视图（覆盖聊天区） ── -->
+  <div class="subagent-view hidden" id="subagentView">
+    <div class="subagent-header">
+      <button class="sa-back-btn" id="saBackBtn">← 返回</button>
+      <span class="sa-title" id="saTitle">子代理会话</span>
+      <span class="sa-status" id="saStatus"></span>
+    </div>
+    <div class="subagent-messages" id="saMessages">
+      <div class="sa-empty" id="saEmpty">加载中…</div>
     </div>
   </div>
 

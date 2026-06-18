@@ -1281,13 +1281,72 @@ function sseInit(res) {
 }
 
 function sseSend(res, event, data) {
-  res.write(`event: ${event}\n`);
-  res.write(`data: ${JSON.stringify(data)}\n\n`);
+  const payload = `event: ${event}\n` + `data: ${JSON.stringify(data)}\n\n`;
+  try { res.write(payload); } catch { /* client gone */ }
+  // also broadcast to the session bus so reconnected clients get the same event
+  if (res._sessionId) busBroadcast(res._sessionId, event, data);
 }
 
 // ── 活跃子进程追踪（用于 abort + 刷新恢复） ──────────────────────────────
 const activeChildren = new Map(); // id → { child, sessionId, clientRunId, aborted, agentKey, mode, taskTitle, startedAt }
 let childIdSeq = 0;
+
+// -- per-session SSE broadcast bus (for refresh reconnect) --
+// Each running session gets a bus: listeners (Set<res>) + a ring buffer of
+// recent SSE events so a freshly-reconnected client can replay them.
+const sessionBuses = new Map(); // sessionId -> { listeners, buffer, agentKey, label, startedAt }
+const SESSION_BUFFER_MAX = 500;
+
+function getOrCreateBus(sessionId, agentKey = '', label = '') {
+  if (!sessionId) return null;
+  if (!sessionBuses.has(sessionId)) {
+    sessionBuses.set(sessionId, {
+      listeners: new Set(),
+      buffer: [],
+      agentKey,
+      label,
+      startedAt: Date.now(),
+    });
+  }
+  const bus = sessionBuses.get(sessionId);
+  if (agentKey && !bus.agentKey) bus.agentKey = agentKey;
+  if (label && !bus.label) bus.label = label;
+  return bus;
+}
+
+// Broadcast an SSE event to all listeners of a session and buffer it for replay.
+function busBroadcast(sessionId, event, data) {
+  const bus = sessionBuses.get(sessionId);
+  if (!bus) return;
+  const payload = `event: ${event}\n` + `data: ${JSON.stringify(data)}\n\n`;
+  bus.buffer.push(payload);
+  if (bus.buffer.length > SESSION_BUFFER_MAX) bus.buffer.shift();
+  for (const res of bus.listeners) {
+    try { res.write(payload); } catch { /* client gone */ }
+  }
+}
+
+function busAttach(sessionId, res) {
+  const bus = sessionBuses.get(sessionId);
+  if (!bus) return false;
+  // replay buffered events
+  for (const p of bus.buffer) {
+    try { res.write(p); } catch { return false; }
+  }
+  bus.listeners.add(res);
+  return true;
+}
+
+function busDetach(sessionId, res) {
+  const bus = sessionBuses.get(sessionId);
+  if (!bus) return;
+  bus.listeners.delete(res);
+  // teardown the bus when no child is running and no listeners remain
+  const stillRunning = [...activeChildren.values()].some(r => r.sessionId === sessionId && !r.aborted);
+  if (!stillRunning && bus.listeners.size === 0) {
+    sessionBuses.delete(sessionId);
+  }
+}
 
 function abortChildren({ sessionId = '', clientRunId = '' } = {}) {
   if (!sessionId && !clientRunId) return 0;
@@ -1310,6 +1369,12 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', { skipRoleCard = fa
   const invocationId = randomUUID().slice(0, 8);
   const startedAt = Date.now();
   const startedIso = new Date(startedAt).toISOString();
+  // tag res with sessionId so sseSend broadcasts to the session bus, and
+  // create the bus so a refreshed client can reconnect to this live stream.
+  if (sessionId) {
+    res._sessionId = sessionId;
+    getOrCreateBus(sessionId, agentKey, label);
+  }
 
   const finishInvocation = (status, extra = {}) => {
     appendInvocation({
@@ -1829,6 +1894,25 @@ async function handle(req, res) {
   }
 
   // GET /api/running — 返回当前活跃的子进程信息（用于刷新后恢复状态）
+  // GET /api/sessions/:id/stream - reconnect to a running session live SSE stream
+  // (replays buffered events + subscribes to future output after a page refresh)
+  {
+    const m = pathname.match(/^\/api\/sessions\/([\w-]+)\/stream$/);
+    if (req.method === 'GET' && m) {
+      const sid = m[1];
+      sseInit(res);
+      const attached = busAttach(sid, res);
+      if (!attached) {
+        sseSend(res, 'nostream', { sessionId: sid });
+        return res.end();
+      }
+      const cleanup = () => busDetach(sid, res);
+      req.on('close', cleanup);
+      req.on('aborted', cleanup);
+      return;
+    }
+  }
+
   if (req.method === 'GET' && pathname === '/api/running') {
     const running = [];
     for (const [cid, record] of activeChildren) {
@@ -2654,15 +2738,17 @@ async function handle(req, res) {
       // 教训2: 严格验证，防止幻觉数据写入 tasks.jsonl
       const validation = validatePlanResult(data);
       if (!validation.ok) {
-        // 把失败现场写入 session 历史，刷新后还能看到
+        console.error('[plan] extractJson failed. raw length:', raw.length);
+        console.error('[plan] raw output (first 2000 chars):\n' + raw.slice(0, 2000));
+        const reason = raw.trim() ? validation.reason : validation.reason + ' (agent output empty - likely only thinking stream or CLI error)';
         session.history.push({
           role: 'system',
-          text: `拆任务失败：${validation.reason}\n原始输出（前 400 字）：\n${raw.slice(0, 400)}`,
+          text: `plan failed: ${reason}\nraw (first 400):\n${raw.slice(0, 400)}`,
           agent: agentKey,
           kind: 'plan-error',
         });
         saveSessions();
-        sseSend(res, 'error', { message: `任务解析失败（${validation.reason}）`, raw: raw.slice(0, 400) });
+        sseSend(res, 'error', { message: `plan parse failed (${reason})`, raw: raw.slice(0, 400) });
         return res.end();
       }
       const runId = randomUUID().slice(0, 8);

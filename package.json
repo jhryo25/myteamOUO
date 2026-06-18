@@ -8,5 +8,20 @@
   },
   "engines": {
     "node": ">=18"
-  }
+  },
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jhryo25/myteamOUO.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/jhryo25/myteamOUO/issues"
+  },
+  "homepage": "https://github.com/jhryo25/myteamOUO#readme"
 }

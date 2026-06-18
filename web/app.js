@@ -1,4 +1,4 @@
-﻿// ── 工具 ─────────────────────────────────────────────────────
+// ── 工具 ─────────────────────────────────────────────────────
 function esc(s) {
   return String(s||'')
     .replace(/&/g,'&amp;').replace(/</g,'&lt;')
@@ -387,9 +387,10 @@ function streamRender(raw) {
     const lastFence = s.lastIndexOf('```');
     s = s.slice(0, lastFence) + '\n_⏳ 正在生成代码块…_';
   }
-  // 隐藏看起来像 JSON 大对象的内容（如 plan agent 输出）
-  if (/^\s*[{[]/.test(s.trim()) && !/[}\]]\s*$/.test(s.trim())) {
-    return '<span class="stream-pending">⏳ 正在生成结构化内容…</span>';
+  // structured content (JSON/plan): sticky placeholder during streaming to avoid flicker
+  if (streamRender._isStructured || /^\s*[{[]/.test(s.trim())) {
+    if (/^\s*[{[]/.test(s.trim())) streamRender._isStructured = true;
+    return '<span class="stream-pending">' + '\u23f3 \u6b63\u5728\u751f\u6210\u7ed3\u6784\u5316\u5185\u5bb9\u2026' + '</span>';
   }
   return s
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -441,7 +442,8 @@ function appendThinking(text) {
   const cnt   = wrap.querySelector('[id^="cnt-"]');
   const prev  = wrap.querySelector('[id^="prev-"]');
   if (!panel || !body) return;
-  panel.classList.remove('hidden');
+  // panel stays hidden during streaming; revealed in finishTyping
+  // panel.classList.remove('hidden');
   body.dataset.raw = (body.dataset.raw || '') + text;
   body.textContent = body.dataset.raw;
   const len = (body.dataset.raw || '').length;
@@ -511,6 +513,28 @@ function finishTyping(stats = null) {
     const actions = wrap.querySelector('.bubble-actions');
     if (actions) wrap.insertBefore(meta, actions);
     else wrap.appendChild(meta);
+  }
+  // Reveal thinking panel after agent finishes generating (collapsed by default)
+  const thinkPanel = wrap ? wrap.querySelector('.thinking-panel') : null;
+  const thinkBody  = wrap ? wrap.querySelector('.thinking-body')  : null;
+  const thinkToggle = wrap ? wrap.querySelector('.thinking-toggle') : null;
+  if (thinkPanel && thinkBody && (thinkBody.dataset.raw || '').trim()) {
+    thinkPanel.classList.remove('hidden');
+    // ensure collapsed (thumbnail) state: body hidden, toggle not expanded
+    thinkBody.classList.add('hidden');
+    if (thinkToggle) {
+      thinkToggle.setAttribute('aria-expanded', 'false');
+      const chev = thinkToggle.querySelector('.thinking-chevron');
+      if (chev) chev.textContent = '\u203a';
+    }
+    const thinkCnt  = wrap.querySelector('[id^="cnt-"]');
+    const thinkPrev = wrap.querySelector('[id^="prev-"]');
+    if (thinkCnt) thinkCnt.textContent = thinkBody.dataset.raw.length + ' \u5b57';
+    if (thinkPrev) {
+      thinkPrev.style.display = '';
+      const lastChunk = (thinkBody.dataset.raw || '').split(/\n+/).filter(Boolean).slice(-1)[0] || '';
+      thinkPrev.textContent = lastChunk.slice(0, 80) + (lastChunk.length > 80 ? '\u2026' : '');
+    }
   }
   agentTypingBubble = null;
 }
@@ -3572,6 +3596,55 @@ async function loadHistory({ older = false } = {}) {
   await restoreRunningState();
 })();
 
+// Reconnect to a running session live SSE stream after a page refresh.
+// Replays buffered events + subscribes to future output, feeding chunks
+// into a freshly created typing bubble so the user sees ongoing progress.
+async function reconnectSessionStream(sessionId, agentKey, taskTitle) {
+  if (!sessionId) return;
+  // only reconnect for the currently visible session
+  if (sessionId !== currentSessionId) return;
+  try {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/stream`);
+    if (!res.ok || !res.body) return;
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    let bubble = null;
+    const ensureBubble = (agent) => {
+      if (bubble) return bubble;
+      setActiveAgent(agent || agentKey);
+      bubble = startAgentBubble(agent || agentKey, sessionId);
+      showRunningPanel({ agent: agent || agentKey, mode: 'reconnect', taskTitle: taskTitle || '' });
+      return bubble;
+    };
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split('\n\n');
+      buf = parts.pop();
+      for (const block of parts) {
+        let event = 'message', data = '';
+        for (const line of block.split('\n')) {
+          if (line.startsWith('event: ')) event = line.slice(7).trim();
+          if (line.startsWith('data: '))  data  = line.slice(6).trim();
+        }
+        let parsed;
+        try { parsed = JSON.parse(data); } catch { continue; }
+        if (event === 'nostream') { break; }
+        if (event === 'start') { ensureBubble(parsed.agent || agentKey); continue; }
+        if (event === 'status') { ensureBubble(parsed.agent || agentKey); updateAgentStatus(parsed.text); continue; }
+        if (event === 'chunk' && parsed.text) { ensureBubble(parsed.agent || agentKey); appendTyping(parsed.text); bumpRunningChars('chunk', (parsed.text||'').length); continue; }
+        if (event === 'thinking' && parsed.text) { appendThinking(parsed.text); bumpRunningChars('thinking', (parsed.text||'').length); continue; }
+        if (event === 'done') { finishTyping(collectFinishStats()); hideRunningPanel(); loadSessions(); break; }
+        if (event === 'error') { finishTyping(); hideRunningPanel(); addSystemMsg(`? ${parsed.message||''}`); break; }
+      }
+    }
+  } catch (e) {
+    console.warn('reconnect stream failed:', e);
+  }
+}
+
 // 刷新后恢复运行中任务状态
 async function restoreRunningState() {
   try {
@@ -3637,6 +3710,12 @@ async function restoreRunningState() {
       }
     });
     updateVisibleRunState();
+    // Reconnect to any running session live SSE stream so ongoing output
+    // continues flowing after a page refresh (replays buffered events).
+    const currentRun = running.find(r => r.sessionId === currentSessionId);
+    if (currentRun) {
+      reconnectSessionStream(currentRun.sessionId, currentRun.agentKey, currentRun.taskTitle);
+    }
   } catch (e) {
     console.warn('恢复运行状态失败:', e);
   }

@@ -153,3 +153,103 @@ badNameStatus=400
 - 子代理消息如果要跨服务重启保留，可落到 `.myteam/chain-messages.jsonl`。
 - Shell 执行建议增加 allowlist 工作目录和更细的 Windows 命令拆分策略。
 - 若 Browser 插件可用，补一轮页面级验证：打开 Skills、安装 market skill、执行 safe shell、打开 artifacts panel。
+
+
+## 本轮已完成（2026-06-18）
+
+本次 session 修复了运行时稳定性问题并添加了实时重连能力，同时制定了与 LobsterAI 协作架构对齐的优先级路线图。
+
+### 1. PowerShell spawn 修复（EPERM）
+
+.cmd 文件的 spawn 从 cmd.exe /c 改为 powershell -NoProfile -Command，解决了 Windows 下 codex.cmd 等 .cmd 文件 spawn 时 EPERM 错误。
+
+**文件**：agent-utils.mjs → buildSpawnCommand()
+
+### 2. 流式输出闪烁修复
+
+- streamRender 的 JSON 检测改为 **sticky** 模式：一旦判定为结构化内容，整个流式期间稳定显示占位提示，不再每帧 flip
+- 思考面板在流式期间保持折叠，agent 完成后以**紧凑缩略态**显示（toggle 栏 + 单行预览），点击才展开完整思考内容
+- 流式气泡添加 min-height，避免布局跳动
+
+**文件**：web/app.js / web/app.css
+
+### 3. 刷新后运行任务恢复（SSE 重连总线）
+
+刷新前正在运行的 agent 任务，现在刷新后**不会丢失**。
+
+**实现**：服务端新增 per-session SSE 广播总线（sessionBuses），streamAgent 产出的每个事件广播给 session 所有监听者并缓存最近 500 条。新增 GET /api/sessions/:id/stream 重连端点，先回放缓存再订阅后续。前端 restoreRunningState 检测到运行中 session 时自动重连并重建 typing bubble。
+
+**文件**：server.mjs / web/app.js
+
+### 4. 拆任务 JSON 解析增强（多策略提取）
+
+extractJson 从单策略括号匹配重写为多策略恢复：
+1. 扫描所有平衡的 {...} 候选块，逐个试 JSON.parse
+2. 对失败候选调用 repairJson 去尾随逗号、闭合字符串、平衡括号
+3. 首 { 到尾 } 截取再试
+
+覆盖 markdown 代码块包裹、散文夹 JSON、尾随逗号等场景。
+
+**文件**：agent-utils.mjs
+
+---
+
+## LobsterAI 对齐优先级路线图
+
+已拉取 netease-youdao/LobsterAI 参考仓库（本地 F:\py project\LobsterAI-ref），对比分析后制定以下对齐优先级。
+
+**核心差异**：LobsterAI 通过 OpenClaw runtime 的 tool-call 协议（sessions_spawn / sessions_resume）派生和管理子 agent，myteam 当前通过文本 JSON 解析 + 服务端编排。
+
+### P0 — 任务登记从文本解析改为结构化输出（根源修复）
+
+当前 PLAN_PROMPT 让 codex 吐文本 JSON，extractJson 再提取——LobsterAI 没有这一步，它的 spawn 参数天然结构化。codex CLI 具备 --output-schema 选项（需验证模型兼容性）。
+
+**改动**：plan 阶段让 agent 输出符合 JSON schema 的结构化数据，服务端直接从结构化字段读取，彻底删除 extractJson + validatePlanResult。如 schema 模式不可用则走 tool-call 方式。
+
+### P1 — 子 agent 派生改为 spawn 协议
+
+当前 dispatch 是服务端 for 循环串行 streamAgent。LobsterAI 是主 agent 在对话中自主决定何时派出、派给谁，子结果通过 tool_result 协议回流。
+
+**改动**：dispatch 从服务端编排改为主 agent 自主编排——主 agent 调用 spawn_subagent 工具，服务端退化为 runtime 适配层。收益：主 agent 可根据上游结果动态决策。
+
+### P2 — Continuity Capsule（跨 turn / 跨 agent 上下文接力）
+
+LobsterAI 的 CoworkContinuityCapsule 从消息流提取 currentObjective / decisions / completedFacts / recentFailures / nextSteps / touchedFiles，在 context compaction 和跨 agent 交接时注入。
+
+**改动**：抄 coworkContinuityCapsule.ts 的正则提取逻辑（已含中英双语 RE），为 dispatch 的 task 间交接、reviewer 审查生成胶囊。改动中等，收益大。
+
+### P3 — Top-K Evidence 检索注入
+
+LobsterAI 每次续写前从历史消息检索 top-3 最相关证据片段（文件路径 / 命令 / 错误），避免全量历史注入。
+
+**改动**：给 streamAgent prompt 构造加一层 evidence 检索，按 task 关键词从 session history 捞最相关 N 条。局部改动，可独立实施。
+
+### P4 — Workspace Rehydration（工作区状态快照）
+
+LobsterAI spawn 子 agent 前跑 git status / git log --stat 提取工作区状态，组成 workspace bridge 注入。
+
+**改动**：dispatch 每个 task 前生成工作区快照注入 buildExecPrompt。改动小，抄 LobsterAI 的 git 命令即可。
+
+### P5 — Subagent 可视化与生命周期管理
+
+LobsterAI 的 subagentTracker 维护 toolCallId -> status(running/done/error) 状态机 + 消息缓存 + DB。前端展示每个子 agent 进度。
+
+**改动**：配合 P1，给每个 spawn 建结构化 run 记录，前端做子 agent 列表 + 进度条。P1 的自然延伸。
+
+### 建议执行顺序
+
+P0 → P2 → P4 → P1 → P3 → P5
+
+- P0 先根除解析失败这个最痛的点
+- P2/P4 能直接抄 LobsterAI 代码、改动中等但立刻提升交接质量
+- P1 架构级大改，放后面
+- P3/P5 锦上添花
+
+---
+
+## 注意事项（更新）
+
+- codex exec --output-schema 实测未生效（kimi-k2.6 模型下不约束输出），P0 前需先验证模型兼容性。
+- 项目目录残留 _*.cjs / _*.js / test_extract.cjs / app_clean_head.tmp.js 临时文件（沙箱禁止删除），需要手动清理。
+- 临时验证目录 .tmp-plan-schema 包含计划 schema 定义和实测输出，可用于后续 P0 验证。
+- LobsterAI 克隆到 F:\py project\LobsterAI-ref，方便后续对照开发。

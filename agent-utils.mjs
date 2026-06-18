@@ -347,9 +347,15 @@ export const PARSERS = { codex: parseCodex, claude: parseClaude, kimi: parseKimi
 
 export function buildSpawnCommand(cfg, args) {
   const isCmd = cfg.path.toLowerCase().endsWith('.cmd');
+  if (isCmd) {
+    return {
+      spawnPath: 'powershell',
+      spawnArgs: ['-NoProfile', '-Command', "& '" + cfg.path + "' " + args.map(a => "'" + a.replace(/'/g, "''") + "'").join(' ')],
+    };
+  }
   return {
-    spawnPath: isCmd ? 'cmd.exe' : cfg.path,
-    spawnArgs: isCmd ? ['/c', cfg.path, ...args] : args,
+    spawnPath: cfg.path,
+    spawnArgs: args,
   };
 }
 
@@ -525,53 +531,78 @@ export function invokeAgent(CLI_CONFIG, agentKey, prompt, { silent = false, time
 // 教训2 (02-cli-engineering): AI 会产生幻觉，解析结果要做二次验证。
 // IMP-005: 修复贪心匹配问题，使用括号配对算法找到第一个完整的 JSON 对象
 export function extractJson(text) {
-  const cleaned = text.replace(/```(?:json)?\s*/g, '').replace(/```/g, '');
-  
-  // 找到第一个 { 的位置
-  const startIdx = cleaned.indexOf('{');
-  if (startIdx === -1) return null;
-  
-  // 使用栈匹配括号，找到对应的 }
-  let depth = 0;
-  let inString = false;
-  let escapeNext = false;
-  
-  for (let i = startIdx; i < cleaned.length; i++) {
-    const char = cleaned[i];
-    
-    if (escapeNext) {
-      escapeNext = false;
-      continue;
-    }
-    
-    if (char === '\\') {
-      escapeNext = true;
-      continue;
-    }
-    
-    if (char === '"') {
-      inString = !inString;
-      continue;
-    }
-    
-    if (inString) continue;
-    
-    if (char === '{') depth++;
-    else if (char === '}') {
-      depth--;
-      if (depth === 0) {
-        // 找到匹配的 }，尝试解析
-        const jsonStr = cleaned.slice(startIdx, i + 1);
-        try {
-          return JSON.parse(jsonStr);
-        } catch {
-          return null;
+  if (!text || typeof text !== 'string') return null;
+  // strip markdown code fences and common wrapper noise
+  let cleaned = text.replace(/```(?:json|JSON)?\s*/g, '```').replace(/```/g, '');
+  // Strategy 1: find ALL balanced {...} candidates and try JSON.parse on each.
+  // Handles JSON surrounded by prose, multiple blocks, trailing content.
+  const candidates = [];
+  for (let start = 0; start < cleaned.length; start++) {
+    if (cleaned[start] !== '{') continue;
+    let d = 0, inStr = false, esc = false;
+    for (let i = start; i < cleaned.length; i++) {
+      const c = cleaned[i];
+      if (esc) { esc = false; continue; }
+      if (c === '\\') { esc = true; continue; }
+      if (c === '"') { inStr = !inStr; continue; }
+      if (inStr) continue;
+      if (c === '{') d++;
+      else if (c === '}') {
+        d--;
+        if (d === 0) {
+          const candidate = cleaned.slice(start, i + 1);
+          try { return JSON.parse(candidate); }
+          catch { candidates.push(candidate); }
+          break;
         }
       }
     }
   }
-  
+  // Strategy 2: try repairing truncated JSON by closing open braces/brackets.
+  for (const cand of candidates) {
+    const repaired = repairJson(cand);
+    if (repaired) {
+      try { return JSON.parse(repaired); } catch {}
+    }
+  }
+  // Strategy 3: take from first { to last } and attempt repair
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    const blob = cleaned.slice(firstBrace, lastBrace + 1);
+    try { return JSON.parse(blob); } catch {}
+    const repaired = repairJson(blob);
+    if (repaired) { try { return JSON.parse(repaired); } catch {} }
+  }
   return null;
+}
+
+// Best-effort repair of truncated/malformed JSON: trim trailing commas,
+// close unterminated strings, and balance braces/brackets.
+function repairJson(s) {
+  let t = s;
+  // remove trailing commas before } or ]
+  t = t.replace(/,\s*([}\]])/g, '$1');
+  // balance brackets
+  let braces = 0, brackets = 0, inStr = false, esc = false;
+  let lastQuoteIdx = -1;
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (esc) { esc = false; continue; }
+    if (c === '\\') { esc = true; continue; }
+    if (c === '"') { inStr = !inStr; lastQuoteIdx = i; continue; }
+    if (inStr) continue;
+    if (c === '{') braces++;
+    else if (c === '}') braces--;
+    else if (c === '[') brackets++;
+    else if (c === ']') brackets--;
+  }
+  // if a string is still open, close it
+  if (inStr) t += '"';
+  // close unbalanced brackets/braces
+  while (brackets > 0) { t += ']'; brackets--; }
+  while (braces > 0) { t += '}'; braces--; }
+  return t;
 }
 
 // 教训2: 对 plan 结果做严格验证，tasks 非空且每条必含 title，防止幻觉写入

@@ -40,6 +40,7 @@ Kimi Code CLI 0.14+ 使用 `--prompt ... --output-format stream-json`；旧配�
 - 每个 agent 可配置角色卡、性格、擅长项和限制。
 - 对话模式支持流式输出、thinking 面板、图片附件和历史会话。
 - 拆任务模式会把目标拆成可验收的 3-7 个子任务。
+- 拆任务前后端都会选择真实可启动的 agent；所选 CLI 不可用时服务端自动回退到第一个可用 agent。
 - 执行任务后自动进入 reviewer gate，降低单模型自检盲区。
 - agent 输出中出现新的 `@mention` 时，可自动创建 A2A 链式子任务。
 

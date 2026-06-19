@@ -9,6 +9,15 @@ import { repository } from './storage.mjs';
 export const AGENT_KEYS = ['codex', 'claude', 'kimi'];
 export const AGENTS_FILE = '.myteam/agents.json';
 
+export function selectRunnableAgent(statuses = [], preferredAgent = '') {
+  const preferred = String(preferredAgent || '');
+  return statuses.find((agent) => agent.key === preferred && agent.available)
+    || statuses.find((agent) => agent.available)
+    || statuses.find((agent) => agent.key === preferred)
+    || statuses[0]
+    || null;
+}
+
 const DEFAULT_AGENT_DEFS = [
   {
     key: 'codex',

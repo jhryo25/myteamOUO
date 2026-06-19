@@ -341,3 +341,10 @@ P0 → P2 → P4 → P1 → P3 → P5
 - 根因：轻量检测只执行 `--help`，而默认调用模板仍使用 Kimi 旧版 `--print` 参数。
 - 修复：默认模板改为 `--prompt {prompt} --output-format stream-json`；加载旧 `agents.json` 时自动移除遗留 `--print`。
 - 验证：本机 Kimi Code CLI 0.14.0 真实调用返回 `KIMI_OK`。
+
+### 拆任务闭环修复（2026-06-19）
+
+- 现象：聊天可自动使用 Kimi，但拆任务在前端选择为空或仍指向失效 Codex 时持续失败。
+- 根因：`doPlan()` 把空选择硬编码回退到 Codex，`/api/plan` 也直接信任前端 agent，没有复用聊天模式的可用性选择。
+- 修复：前端默认选第一个 `available` agent；服务端再次执行可用性解析，失效 agent 自动回退到 Kimi 并通过 SSE 告知。
+- 验证：隔离 API 与真实 UI 均生成 5 个任务卡，`structuredMode=native`，无拆任务错误。

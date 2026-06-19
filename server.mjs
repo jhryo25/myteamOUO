@@ -9,7 +9,7 @@ import { resolve, basename, dirname, extname, join, sep, relative } from 'path';
 import { randomUUID, createHash } from 'crypto';
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
-import { loadEnv, buildCliConfig, invokeAgent, extractJson, PARSERS, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, buildReviewPrompt, AGENT_KEYS, buildSpawnCommand, checkAgentLaunchable, formatLaunchError, readAgentRegistry, writeAgentRegistry, sanitizeAgentKey, buildRoleCard, validatePhaseTransition, getNextPhase } from './agent-utils.mjs';
+import { loadEnv, buildCliConfig, invokeAgent, extractJson, PARSERS, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, buildReviewPrompt, AGENT_KEYS, buildSpawnCommand, checkAgentLaunchable, formatLaunchError, readAgentRegistry, writeAgentRegistry, sanitizeAgentKey, buildRoleCard, validatePhaseTransition, getNextPhase, selectRunnableAgent } from './agent-utils.mjs';
 import { getDangerLevel } from './commandSafety.mjs';
 import { repository } from './storage.mjs';
 import {
@@ -380,10 +380,7 @@ function stripSensitive(agent) {
 async function resolveRunnableAgent(preferredAgent) {
   const statuses = await getAgentStatuses();
   const preferred = agentKeys().includes(preferredAgent) ? preferredAgent : '';
-  const chosen = statuses.find(a => a.key === preferred && a.available)
-    || statuses.find(a => a.available)
-    || statuses.find(a => a.key === preferred)
-    || statuses[0];
+  const chosen = selectRunnableAgent(statuses, preferred);
   return { agentKey: chosen?.key || preferred || agentKeys()[0] || 'codex', status: chosen };
 }
 
@@ -2900,7 +2897,8 @@ async function handle(req, res) {
     const body = await readBody(req);
     const goal = (body.goal || '').trim();
     const clientRunId = String(body.clientRunId || '');
-    const agentKey = body.agent || agentKeys()[0] || 'codex';
+    const requestedAgent = body.agent || '';
+    const { agentKey, status: agentStatus } = await resolveRunnableAgent(requestedAgent);
     const attachments = Array.isArray(body.attachments) ? body.attachments : [];
     if (!goal && !attachments.length) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -2919,9 +2917,11 @@ async function handle(req, res) {
     sseSend(res, 'start', { goal, agent: agentKey, sessionId: session.id });
 
     try {
-      const agentStatus = (await getAgentStatuses()).find(a => a.key === agentKey);
       if (!agentStatus?.available) {
         throw new Error(`${agentKey} 不可用：${agentStatus?.error || '没有可启动的 agent'}。请在右上角 Agent 配置里换成可启动的 CLI。`);
+      }
+      if (requestedAgent && requestedAgent !== agentKey) {
+        sseSend(res, 'status', { agent: agentKey, phase: 'fallback', text: `${requestedAgent} 不可用，已自动改用 ${agentKey} 拆任务` });
       }
       const effectiveGoal = goal || '请根据上传的图片内容制定合理的执行计划';
       const skillContext = buildSkillContext(selectSkills({ text: effectiveGoal, agent: agentKey, phase: 'plan' }));

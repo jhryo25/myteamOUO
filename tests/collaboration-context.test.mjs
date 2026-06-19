@@ -19,7 +19,7 @@ import {
   appendSubagentMessage,
   listSubagentMessages,
 } from '../collaboration-context.mjs';
-import { readAgentRegistry } from '../agent-utils.mjs';
+import { readAgentRegistry, selectRunnableAgent } from '../agent-utils.mjs';
 
 const samplePlan = {
   goal: '完成协作上下文',
@@ -162,4 +162,14 @@ test('Kimi 0.14 invocation template omits removed --print flag', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('plan agent selection falls back to the first launchable CLI', () => {
+  const statuses = [
+    { key: 'codex', available: false, error: 'missing' },
+    { key: 'claude', available: false, error: 'missing' },
+    { key: 'kimi', available: true, error: '' },
+  ];
+  assert.equal(selectRunnableAgent(statuses, 'codex').key, 'kimi');
+  assert.equal(selectRunnableAgent(statuses, '').key, 'kimi');
 });

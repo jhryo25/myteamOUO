@@ -1631,7 +1631,10 @@ async function doChat(message, sessionId = currentSessionId) {
 
 // ── plan 模式 ─────────────────────────────────────────────────
 async function doPlan(goal) {
-  const agent = getRadio('planAgentGroup') || 'codex';
+  const agent = getRadio('planAgentGroup')
+    || mentionAgents.find((item) => item.available)?.key
+    || mentionAgents[0]?.key
+    || 'codex';
 
   let attachments = [];
   try {

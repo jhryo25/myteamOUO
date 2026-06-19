@@ -10,6 +10,7 @@ myteamOUO 是一个本地优先的 A2A（Agent-to-Agent）协作控制台：不�
 git clone https://github.com/jhryo25/myteamOUO.git
 cd myteamOUO
 cp .env.example .env
+npm install
 node server.mjs --port 7878
 ```
 
@@ -26,6 +27,8 @@ CODEX_PATH=C:\path\to\codex.exe
 CLAUDE_PATH=C:\path\to\claude.exe
 KIMI_PATH=C:\path\to\kimi.exe
 ```
+
+运行环境要求 Node.js `22.5+`。项目使用 Node 内置 `node:sqlite`，无需额外安装 SQLite。
 
 ## 当前能力
 
@@ -56,16 +59,49 @@ KIMI_PATH=C:\path\to\kimi.exe
 
 - 顶部 `Shell` 入口可执行 PowerShell/cmd 命令。
 - `commandSafety.mjs` 会把命令分成 `safe`、`caution`、`destructive`。
-- 删除、强推、权限修改、进程终止、注册表修改等命令会触发确认。
+- 删除、强推、权限修改、进程终止、注册表修改等命令会创建服务端审批，批准后的操作指纹必须与原请求完全匹配。
 - stdout/stderr/exit code 通过 SSE 实时返回。
 - 前端断开或刷新时不主动杀掉后端命令。
 
+### 权限与审计
+
+- shell、skill 安装/卸载、配置写入和任务 dispatch 统一进入风险策略层。
+- 审批支持批准一次、会话批准、拒绝和 15 分钟过期；不提供永久授权。
+- Hub 的「审批」Tab 展示待处理审批和脱敏审计记录。
+- 审计不会保存 Token、Secret、API Key、Cookie 或完整环境变量。
+- 权限层只覆盖 myteam 自己管理的入口，不声称逐项控制外部 CLI 内部工具调用。
+
+### SQLite 持久化
+
+- `.myteam/myteam.sqlite` 是 sessions/messages、tasks、lessons、invocations、subagents、approvals、audit 和 schedules 的权威存储。
+- 数据库启用 WAL、外键、事务和版本化 migration。
+- 首次启动会先把旧 JSON/JSONL 复制到 `.myteam/migrations/legacy-*`，再幂等导入数据库。
+- 迁移失败会停止写入并保留原始数据，不会静默创建空状态覆盖旧数据。
+
+### 定时任务
+
+- Hub 的「定时」Tab 支持五段 Cron、时区、启停、删除、手动运行和运行历史。
+- 每个计划可绑定 agent、执行模式和 session 策略。
+- 触发后默认进入 `waiting_approval`，批准后才启动 agent。
+- 同一计划禁止并发重入；服务停机期间错过的触发记录为 `skipped`，不会集中补跑。
+
 ### 子代理会话
 
-- A2A 链式任务会在任务行显示子代理入口。
+- 主 agent 可通过结构化 `<spawn_subagent>{...}</spawn_subagent>` 协议动态派生后续 agent。
+- 没有结构化块时仍兼容旧的 `@mention` 链式任务。
+- 每个派生 run 持久化 `running / done / error` 状态和消息。
+- Hub 的「子代理」Tab 展示运行统计、列表和详情入口。
 - `worklist-chain` 事件会在聊天区插入可点击的子代理链接。
 - 子代理视图可查看 `task-start`、`task-done`、`task-failed` 事件。
-- 后端暂用内存 Map 保存链式任务消息；刷新服务后不会保留该 Map。
+
+### LobsterAI 协作上下文对齐
+
+- Plan 使用 JSON Schema；Codex 优先启用 `--output-schema`，其他 CLI 和不兼容模型走统一 schema 规范化兜底。
+- Continuity Capsule 从 session 历史提取目标、约束、决策、完成事实、文件、验证、失败和下一步。
+- Top-K Evidence 按任务关键词检索最相关的 3 条历史证据，不再全量注入历史。
+- Workspace Bridge 在任务执行前读取 `git status`、最新 commit stat 和工作区 diff stat。
+- 三类上下文同时注入执行 agent 和 reviewer，支持跨 turn、跨 agent 接力。
+- 结构化 subagent run/message 已进入 SQLite；旧链式任务 Map 仍只作为当前进程的实时缓存。
 
 ### 产物与输出
 
@@ -78,7 +114,7 @@ KIMI_PATH=C:\path\to\kimi.exe
 ### 刷新恢复
 
 - 刷新后会通过 `/api/running` 和 `/api/tasks` 恢复运行态。
-- `in_progress` 任务可从 `tasks.jsonl` 恢复。
+- `in_progress` 任务可从 SQLite 恢复。
 - 同一个 run 里已有 done 且仍有 pending 的任务，会恢复为可继续的运行提示。
 - 恢复逻辑会补齐 `startedAt`，避免计时出现 NaN。
 
@@ -97,20 +133,23 @@ server.mjs
   ├─ shell execution
   └─ artifact / output serving
 
+storage.mjs / governance.mjs / scheduler.mjs
+  ├─ SQLite repository、migration、旧数据导入
+  ├─ 审批指纹、风险策略、脱敏审计
+  └─ Cron 调度、审批暂停、运行历史
+
 agent-utils.mjs
   ├─ CLI 配置与启动检查
   ├─ prompt 构造
   ├─ parser / JSON 提取
-  └─ task JSONL 读写
+  └─ task repository 读写
 
 commandSafety.mjs
   └─ shell 命令风险分类
 
 .myteam/
-  ├─ tasks.jsonl
-  ├─ lessons.jsonl
-  ├─ invocations.jsonl
-  ├─ memory.json
+  ├─ myteam.sqlite
+  ├─ migrations/
   ├─ skills/
   └─ outputs/
 ```
@@ -139,6 +178,15 @@ commandSafety.mjs
 | GET | `/api/outputs/file` | 安全读取 HTML 输出 |
 | GET | `/api/chain-task/messages` | 子代理任务消息 |
 | GET | `/api/chain-task/stream` | 子代理任务 SSE |
+| GET | `/api/subagents` | 按 session 查询持久化 subagent runs 和状态汇总 |
+| GET | `/api/subagents/:id/messages` | 查询指定 subagent run 的持久化消息 |
+| GET | `/api/approvals` | 查询审批，可按 status 过滤 |
+| POST | `/api/approvals/:id/decision` | 批准一次、会话批准或拒绝 |
+| GET | `/api/audit` | 查询脱敏审计事件 |
+| GET/POST | `/api/schedules` | 查询或创建 Cron 计划 |
+| PATCH/DELETE | `/api/schedules/:id` | 更新、启停或删除计划 |
+| POST | `/api/schedules/:id/run` | 手动触发并进入待审批状态 |
+| GET | `/api/schedule-runs` | 查询定时任务运行历史 |
 
 ## 文件结构
 
@@ -147,6 +195,10 @@ myteamOUO/
 ├── server.mjs
 ├── agent-utils.mjs
 ├── commandSafety.mjs
+├── collaboration-context.mjs
+├── storage.mjs
+├── governance.mjs
+├── scheduler.mjs
 ├── plan.mjs
 ├── dispatch.mjs
 ├── web/
@@ -162,17 +214,36 @@ myteamOUO/
 │   ├── html-ui-alignment/SKILL.md
 │   └── shell-exec/SKILL.md
 ├── docs/
+├── tests/
+│   └── collaboration-context.test.mjs
 ├── .myteam/
-│   ├── tasks.jsonl
-│   ├── lessons.jsonl
-│   ├── invocations.jsonl
-│   ├── memory.json
+│   ├── myteam.sqlite
+│   ├── migrations/
 │   ├── skills/
 │   └── outputs/
 └── .env
 ```
 
-## 本轮修复重点（2026-06-17）
+## LobsterAI 优先级路线完成（2026-06-18）
+
+- `P0`：Plan JSON Schema、Codex `--output-schema`、统一规范化与兼容解析。
+- `P1`：结构化 `spawn_subagent` 派生协议，`@mention` 仅作兼容回退。
+- `P2`：session 持久化 Continuity Capsule。
+- `P3`：Top-K 历史证据检索注入。
+- `P4`：执行前 Git workspace rehydration。
+- `P5`：subagent run/message JSONL、查询 API、Hub 状态列表和详情入口。
+
+核心实现集中在 `collaboration-context.mjs`，对应测试在 `tests/collaboration-context.test.mjs`。
+
+## LobsterAI 后续路线完成（2026-06-19）
+
+- `P6`：服务端审批对象、不可伪造的操作指纹、会话/单次授权和脱敏审计。
+- `P7`：Node 内置 SQLite、WAL、migration、旧 JSON/JSONL 备份与幂等导入。
+- `P8`：Cron + 时区、启停、手动运行、审批暂停、互斥和运行历史。
+
+详细取舍见 `docs/lobsterai-comparison.md`，实施 lessons 见 `docs/lessons-p6-p8.md`。
+
+## 前轮修复重点（2026-06-17）
 
 - 补齐 `skills-registry/shell-exec/SKILL.md`，修复官方市场中存在坏条目的问题。
 - 官方市场读取当前 checkout 的本地 registry，避免本地开发时依赖 GitHub main。
@@ -191,6 +262,7 @@ myteamOUO/
 ```bash
 node --check server.mjs
 node --check web/app.js
+npm test
 git diff --check
 ```
 
@@ -204,7 +276,7 @@ git diff --check
 
 ## 运行时数据
 
-以下文件属于本地运行时数据，默认不提交：
+以下目录和文件属于本地运行时数据，默认不提交：
 
 - `.myteam/tasks.jsonl`
 - `.myteam/lessons.jsonl`
@@ -212,5 +284,7 @@ git diff --check
 - `.myteam/memory.json`
 - `.myteam/skills/`
 - `.myteam/outputs/`
+- `.myteam/myteam.sqlite*`
+- `.myteam/migrations/`
 
-本轮 review 经验已写入 `.myteam/lessons.jsonl`，用于本地长期记忆。
+旧 JSON/JSONL 只作为首次迁移来源和只读备份；迁移后 SQLite 是唯一写入源。

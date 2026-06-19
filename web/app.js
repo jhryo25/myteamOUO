@@ -1165,6 +1165,30 @@ function updateSendBtnState() {
   }
 }
 
+async function decideInlineApproval(approval) {
+  const detail = JSON.stringify(approval.payload || {}, null, 2);
+  const accepted = confirm(`敏感操作需要审批：${approval.operation}\n风险：${approval.risk}\n\n${detail}\n\n批准本次操作？`);
+  const decision = accepted ? 'approve_once' : 'deny';
+  const res = await fetch(`/api/approvals/${encodeURIComponent(approval.id)}/decision`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || '审批失败');
+  return accepted;
+}
+
+async function fetchWithApproval(url, options = {}) {
+  const response = await fetch(url, options);
+  const data = await response.json();
+  if (response.status !== 202 || !data.approvalRequired) return { response, data };
+  const accepted = await decideInlineApproval(data.approval);
+  if (!accepted) return { response, data: { ok: false, error: '用户拒绝操作' } };
+  const body = options.body ? JSON.parse(options.body) : {};
+  return fetchWithApproval(url, { ...options, body: JSON.stringify({ ...body, approvalId: data.approval.id }) });
+}
+
 function ssePost(url, body, handlers) {
   const requestSessionId = body.sessionId || currentSessionId || '';
   const clientRunId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -1187,6 +1211,17 @@ function ssePost(url, body, handlers) {
       body: JSON.stringify({ ...body, clientRunId }),
       signal: controller.signal,
     }).then(async res => {
+      if ((res.headers.get('content-type') || '').includes('application/json')) {
+        const data = await res.json();
+        if (res.status === 202 && data.approvalRequired) {
+          const accepted = await decideInlineApproval(data.approval);
+          if (accepted) return ssePost(url, { ...body, approvalId: data.approval.id }, handlers).then(resolve);
+          handlers.error?.({ message: '用户拒绝操作' });
+          return resolve(null);
+        }
+        handlers.error?.({ message: data.error || `请求失败 (${res.status})` });
+        return resolve(null);
+      }
       const reader = res.body.getReader();
       const dec = new TextDecoder();
       let buf = '';
@@ -1895,7 +1930,7 @@ drawerMask.onclick  = closeDrawer;
 
 // ── Hub 指挥抽屉 ─────────────────────────────────────────────
 let hubActiveTab = 'overview';
-let hubState = { agents: [], tasks: [], skills: [], selectedSkills: [], skillsSummary: null, skillContextPreview: '', invocations: [], invocationSummary: null, lessons: [] };
+let hubState = { agents: [], tasks: [], skills: [], selectedSkills: [], skillsSummary: null, skillContextPreview: '', invocations: [], invocationSummary: null, lessons: [], subagents: [], subagentSummary: null, approvals: [], audit: [], schedules: [], scheduleRuns: [] };
 
 function openHub() {
   closeDrawer();
@@ -1917,12 +1952,17 @@ async function loadHub() {
     const skillPhase = getMode() === 'plan' ? 'plan' : 'run';
     const skillAgent = planAgentGroupEl.querySelector('.radio-btn.active')?.dataset.value || '';
     const skillUrl = `/api/skills?phase=${encodeURIComponent(skillPhase)}&agent=${encodeURIComponent(skillAgent)}&text=${encodeURIComponent(skillText)}`;
-    const [status, taskData, skillData, invocationData, lessonData] = await Promise.all([
+    const [status, taskData, skillData, invocationData, lessonData, subagentData, approvalData, auditData, scheduleData, scheduleRunData] = await Promise.all([
       fetch('/api/status').then(r => r.json()),
       fetch('/api/tasks').then(r => r.json()).catch(() => ({ tasks: [] })),
       fetch(skillUrl).then(r => r.json()).catch(() => ({ skills: [], selected: [], summary: null, contextPreview: '' })),
       fetch('/api/invocations').then(r => r.json()).catch(() => ({ invocations: [], summary: null })),
       fetch('/api/lessons').then(r => r.json()).catch(() => ({ lessons: [] })),
+      fetch('/api/subagents?sessionId=' + encodeURIComponent(currentSessionId || '')).then(r => r.json()).catch(() => ({ runs: [], summary: null })),
+      fetch('/api/approvals').then(r => r.json()).catch(() => ({ approvals: [] })),
+      fetch('/api/audit?limit=100').then(r => r.json()).catch(() => ({ events: [] })),
+      fetch('/api/schedules').then(r => r.json()).catch(() => ({ schedules: [] })),
+      fetch('/api/schedule-runs').then(r => r.json()).catch(() => ({ runs: [] })),
     ]);
     hubState = {
       agents: status.agents || [],
@@ -1934,6 +1974,12 @@ async function loadHub() {
       invocations: invocationData.invocations || [],
       invocationSummary: invocationData.summary || null,
       lessons: lessonData.lessons || [],
+      subagents: subagentData.runs || [],
+      subagentSummary: subagentData.summary || null,
+      approvals: approvalData.approvals || [],
+      audit: auditData.events || [],
+      schedules: scheduleData.schedules || [],
+      scheduleRuns: scheduleRunData.runs || [],
     };
     renderHub();
   } catch (err) {
@@ -2000,6 +2046,9 @@ function renderHub() {
   else if (hubActiveTab === 'lessons') renderer = renderHubLessons;
   else if (hubActiveTab === 'invocations') renderer = renderHubInvocations;
   else if (hubActiveTab === 'gate') renderer = renderHubGate;
+  else if (hubActiveTab === 'subagents') renderer = renderHubSubagents;
+  else if (hubActiveTab === 'approvals') renderer = renderHubApprovals;
+  else if (hubActiveTab === 'schedules') renderer = renderHubSchedules;
   else if (hubActiveTab === 'tasks') renderer = renderHubTasks;
   else renderer = renderHubOverview;
   renderer();
@@ -2014,6 +2063,9 @@ function hubTabIntro(tab) {
     lessons:     { icon: '📚', title: 'Lessons 课程', desc: 'agent 失败时记录的踩坑与原因，供下次任务规划参考。' },
     invocations: { icon: '⏱', title: '调用历史', desc: '所有 agent CLI 调用记录：耗时、状态、退出码、stderr。可定位疑难 case。' },
     gate:        { icon: '🚦', title: 'Reviewer Gate', desc: '任务完成后的人工通过 / 返工节点。后续将由 reviewer agent 自动审。' },
+    subagents:   { icon: '⑂', title: '子代理运行', desc: '结构化 spawn_subagent 派生的运行记录、状态和结果。' },
+    approvals:   { icon: '✓', title: '审批与审计', desc: '敏感操作必须由服务端签发审批，批准后的操作指纹必须完全匹配。' },
+    schedules:   { icon: '◷', title: '定时任务', desc: 'Cron 触发后默认暂停等待审批，同一计划不会并发重入。' },
     tasks:       { icon: '📋', title: '任务清单', desc: 'pending / in_progress / done / failed 全量任务。可点 ▶ 重跑或查看 lesson。' },
   };
   const m = map[tab] || { icon: '·', title: tab, desc: '' };
@@ -2062,6 +2114,191 @@ function renderHubOverview() {
     if (section.textContent.includes('下一步路线')) section.remove();
   });
   bindHubActions();
+}
+
+function renderHubSubagents() {
+  const runs = hubState.subagents || [];
+  const summary = hubState.subagentSummary || { total: runs.length, running: 0, done: 0, error: 0 };
+  const statusMeta = {
+    running: { tone: 'info', label: '运行中' },
+    done: { tone: 'ok', label: '已完成' },
+    error: { tone: 'err', label: '失败' },
+  };
+  hubBody.innerHTML = `
+    <div class="hub-kpi-grid">
+      <div class="hub-kpi"><div class="hub-kpi-label">总运行</div><div class="hub-kpi-value">${summary.total || 0}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">运行中</div><div class="hub-kpi-value">${summary.running || 0}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">已完成</div><div class="hub-kpi-value">${summary.done || 0}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">失败</div><div class="hub-kpi-value">${summary.error || 0}</div></div>
+    </div>
+    <section class="hub-section">
+      <div class="hub-section-title">Subagent runs <span class="hub-mini-note">spawn_subagent 生命周期</span></div>
+      <div class="hub-list">
+        ${runs.length ? runs.map(run => {
+          const meta = statusMeta[run.status] || statusMeta.error;
+          return `<div class="hub-row">
+            <div class="hub-row-main">
+              <div class="hub-row-title">${esc(run.label || run.task || run.id)}</div>
+              <div class="hub-row-meta">${esc(run.agent || 'unknown')} · ${esc(run.taskId || run.id)}</div>
+              ${run.error ? `<div class="hub-row-meta">${esc(run.error)}</div>` : ''}
+            </div>
+            <div class="hub-row-side">
+              <span class="hub-badge ${meta.tone}">${meta.label}</span>
+              <button class="hub-mini-btn" data-subagent-run="${esc(run.id)}">查看</button>
+            </div>
+          </div>`;
+        }).join('') : '<div class="hub-empty">暂无子代理运行。执行任务时 agent 可通过 spawn_subagent 协议派生。</div>'}
+      </div>
+    </section>`;
+  hubBody.querySelectorAll('[data-subagent-run]').forEach(btn => {
+    btn.onclick = () => {
+      const run = runs.find(item => item.id === btn.dataset.subagentRun);
+      if (run && window.openSubagentSession) {
+        window.openSubagentSession(run.taskId || run.id, run.label || run.task, run.agent);
+        closeHub();
+      }
+    };
+  });
+}
+
+function renderHubApprovals() {
+  const pending = hubState.approvals.filter(item => item.status === 'pending');
+  const statusTone = { pending: 'warn', approved: 'ok', consumed: 'info', denied: 'err', expired: 'err' };
+  hubBody.innerHTML = `
+    <div class="hub-kpi-grid">
+      <div class="hub-kpi"><div class="hub-kpi-label">待审批</div><div class="hub-kpi-value">${pending.length}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">审批记录</div><div class="hub-kpi-value">${hubState.approvals.length}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">审计事件</div><div class="hub-kpi-value">${hubState.audit.length}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">默认有效期</div><div class="hub-kpi-value">15m</div></div>
+    </div>
+    <section class="hub-section">
+      <div class="hub-section-title">待处理审批</div>
+      <div class="hub-list">
+        ${pending.length ? pending.map(item => `<div class="hub-row">
+          <div class="hub-row-main">
+            <div class="hub-row-title">${esc(item.operation)}</div>
+            <div class="hub-row-meta">风险 ${esc(item.risk)} · ${esc(new Date(item.requestedAt).toLocaleString())}</div>
+            <pre class="hub-inline-code">${esc(JSON.stringify(item.payload || {}, null, 2))}</pre>
+          </div>
+          <div class="hub-row-side approval-actions">
+            <button class="hub-mini-btn" data-approval-id="${esc(item.id)}" data-decision="approve_once">批准一次</button>
+            ${item.sessionId ? `<button class="hub-mini-btn" data-approval-id="${esc(item.id)}" data-decision="approve_session">本会话批准</button>` : ''}
+            <button class="hub-mini-btn danger" data-approval-id="${esc(item.id)}" data-decision="deny">拒绝</button>
+          </div>
+        </div>`).join('') : '<div class="hub-empty">当前没有待审批操作。</div>'}
+      </div>
+    </section>
+    <section class="hub-section">
+      <div class="hub-section-title">最近审计 <span class="hub-mini-note">敏感字段已脱敏</span></div>
+      <div class="hub-list">
+        ${hubState.audit.slice(0, 30).map(event => `<div class="hub-row">
+          <div class="hub-row-main"><div class="hub-row-title">${esc(event.operation)}</div><div class="hub-row-meta">${esc(event.decision || '-')} · ${esc(event.result || '-')} · ${esc(new Date(event.timestamp).toLocaleString())}</div></div>
+          <span class="hub-badge ${statusTone[event.result] || (event.result === 'succeeded' ? 'ok' : 'info')}">${esc(event.risk || 'low')}</span>
+        </div>`).join('') || '<div class="hub-empty">暂无审计事件。</div>'}
+      </div>
+    </section>`;
+  hubBody.querySelectorAll('[data-approval-id]').forEach(button => {
+    button.onclick = async () => {
+      button.disabled = true;
+      try {
+        const res = await fetch(`/api/approvals/${encodeURIComponent(button.dataset.approvalId)}/decision`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ decision: button.dataset.decision }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '审批失败');
+        await loadHub();
+      } catch (error) {
+        addSystemMsg(`审批失败：${error.message}`);
+        button.disabled = false;
+      }
+    };
+  });
+}
+
+function renderHubSchedules() {
+  const runBySchedule = new Map();
+  hubState.scheduleRuns.forEach(run => { if (!runBySchedule.has(run.scheduleId)) runBySchedule.set(run.scheduleId, run); });
+  const running = hubState.scheduleRuns.filter(run => ['running', 'waiting_approval'].includes(run.status)).length;
+  hubBody.innerHTML = `
+    <div class="hub-kpi-grid">
+      <div class="hub-kpi"><div class="hub-kpi-label">计划数</div><div class="hub-kpi-value">${hubState.schedules.length}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">已启用</div><div class="hub-kpi-value">${hubState.schedules.filter(item => item.enabled).length}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">活动运行</div><div class="hub-kpi-value">${running}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">运行记录</div><div class="hub-kpi-value">${hubState.scheduleRuns.length}</div></div>
+    </div>
+    <section class="hub-section schedule-create">
+      <div class="hub-section-title">新建计划</div>
+      <div class="schedule-form">
+        <input id="scheduleName" placeholder="名称" maxlength="100">
+        <input id="scheduleCron" placeholder="Cron，例如 0 9 * * 1-5" value="0 9 * * 1-5">
+        <input id="scheduleTimezone" placeholder="时区" value="${esc(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC')}">
+        <select id="scheduleAgent"><option value="codex">Codex</option><option value="claude">Claude</option><option value="kimi">Kimi</option></select>
+        <select id="scheduleMode"><option value="chat">对话执行</option><option value="plan">拆解计划</option><option value="dispatch">任务执行</option></select>
+        <textarea id="scheduleGoal" placeholder="定时任务目标"></textarea>
+        <button class="hub-action-btn" id="scheduleCreateBtn">创建</button>
+      </div>
+    </section>
+    <section class="hub-section">
+      <div class="hub-section-title">计划列表</div>
+      <div class="hub-list">
+        ${hubState.schedules.length ? hubState.schedules.map(item => {
+          const lastRun = runBySchedule.get(item.id);
+          return `<div class="hub-row">
+            <div class="hub-row-main">
+              <div class="hub-row-title">${esc(item.name)}</div>
+              <div class="hub-row-meta">${esc(item.expression)} · ${esc(item.timezone)} · ${esc(item.agent)} / ${esc(item.mode)}</div>
+              <div class="hub-row-meta">下次：${esc(new Date(item.nextRunAt).toLocaleString())}${lastRun ? ` · 最近：${esc(lastRun.status)}` : ''}</div>
+            </div>
+            <div class="hub-row-side schedule-actions">
+              <label class="skill-toggle" title="启用或暂停"><input type="checkbox" data-schedule-toggle="${esc(item.id)}" ${item.enabled ? 'checked' : ''}><span class="skill-toggle-track"><span class="skill-toggle-thumb"></span></span></label>
+              <button class="hub-mini-btn" data-schedule-run="${esc(item.id)}">运行</button>
+              <button class="hub-mini-btn danger" data-schedule-delete="${esc(item.id)}">删除</button>
+            </div>
+          </div>`;
+        }).join('') : '<div class="hub-empty">暂无定时任务。</div>'}
+      </div>
+    </section>
+    <section class="hub-section">
+      <div class="hub-section-title">运行历史</div>
+      <div class="hub-list">${hubState.scheduleRuns.slice(0, 30).map(run => `<div class="hub-row"><div class="hub-row-main"><div class="hub-row-title">${esc(run.scheduleId)}</div><div class="hub-row-meta">${esc(run.status)} · ${esc(new Date(run.createdAt).toLocaleString())}${run.error ? ` · ${esc(run.error)}` : ''}</div></div></div>`).join('') || '<div class="hub-empty">暂无运行记录。</div>'}</div>
+    </section>`;
+
+  document.getElementById('scheduleCreateBtn').onclick = async () => {
+    const payload = {
+      name: document.getElementById('scheduleName').value.trim(),
+      expression: document.getElementById('scheduleCron').value.trim(),
+      timezone: document.getElementById('scheduleTimezone').value.trim(),
+      agent: document.getElementById('scheduleAgent').value,
+      mode: document.getElementById('scheduleMode').value,
+      goal: document.getElementById('scheduleGoal').value.trim(),
+    };
+    try {
+      const res = await fetch('/api/schedules', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '创建失败');
+      await loadHub();
+    } catch (error) { addSystemMsg(`创建定时任务失败：${error.message}`); }
+  };
+  hubBody.querySelectorAll('[data-schedule-toggle]').forEach(input => {
+    input.onchange = async () => {
+      await fetch(`/api/schedules/${encodeURIComponent(input.dataset.scheduleToggle)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: input.checked }) });
+      await loadHub();
+    };
+  });
+  hubBody.querySelectorAll('[data-schedule-run]').forEach(button => {
+    button.onclick = async () => {
+      await fetch(`/api/schedules/${encodeURIComponent(button.dataset.scheduleRun)}/run`, { method: 'POST' });
+      await loadHub();
+    };
+  });
+  hubBody.querySelectorAll('[data-schedule-delete]').forEach(button => {
+    button.onclick = async () => {
+      if (!confirm('确定删除这个定时任务？')) return;
+      await fetch(`/api/schedules/${encodeURIComponent(button.dataset.scheduleDelete)}`, { method: 'DELETE' });
+      await loadHub();
+    };
+  });
 }
 
 function renderHubGate() {
@@ -2267,7 +2504,9 @@ function renderHubSkills() {
     btn.onclick = async () => {
       const name = btn.dataset.skill;
       if (!confirm(`确认卸载 skill: ${name}？`)) return;
-      await fetch(`/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      await fetchWithApproval(`/api/skills/${encodeURIComponent(name)}`, {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
       await loadHub();
     };
   });
@@ -2325,12 +2564,11 @@ function renderHubSkills() {
         btn.disabled = true;
         btn.textContent = '安装中…';
         try {
-          const res = await fetch('/api/skills/install', {
+          const { response: res, data } = await fetchWithApproval('/api/skills/install', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ source, name }),
           });
-          const data = await res.json();
           if (!res.ok) throw new Error(data.error || '安装失败');
           btn.textContent = '✓ 已安装';
           btn.classList.add('installed');
@@ -2509,12 +2747,11 @@ async function openSkillImportDialog() {
   const yaml = prompt('粘贴 skill 的 YAML 定义（参考下面格式）：\n\n' + sample, sample);
   if (!yaml || !yaml.trim()) return;
   try {
-    const res = await fetch('/api/skills/import', {
+    const { response: res, data } = await fetchWithApproval('/api/skills/import', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ yaml }),
     });
-    const data = await res.json();
     if (!res.ok) throw new Error(data.error || '导入失败');
     addSystemMsg(`✓ Skill 已导入，当前共 ${data.total} 条`);
     await loadHub();
@@ -2556,12 +2793,11 @@ hubTabs.querySelectorAll('.hub-tab').forEach(btn => {
 });
 
 async function saveAgentList(agents, { scrollToKey = null } = {}) {
-  const res = await fetch('/api/agents', {
+  const { response: res, data } = await fetchWithApproval('/api/agents', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ agents }),
   });
-  const data = await res.json();
   if (!res.ok) throw new Error(data.error || '保存 agent 失败');
   agentConfigList = data.agents || agents;
   await loadStatus();
@@ -2774,7 +3010,7 @@ async function loadAgentConfig({ scrollToKey = null } = {}) {
         const model = agentFormEl.querySelector(`.model-input[data-agent="${key}"]`)?.value.trim() || '';
         btn.textContent = '保存中…';
         try {
-          await fetch(`/api/agents/${encodeURIComponent(key)}`, {
+          await fetchWithApproval(`/api/agents/${encodeURIComponent(key)}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ baseUrl, apiKey, model }),
@@ -2835,7 +3071,7 @@ async function loadAgentConfig({ scrollToKey = null } = {}) {
         const colorSecondary = getColor('color.secondary');
         btn.textContent = '保存中…';
         try {
-          await fetch(`/api/agents/${encodeURIComponent(key)}`, {
+          await fetchWithApproval(`/api/agents/${encodeURIComponent(key)}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -2903,7 +3139,7 @@ async function loadAgentConfig({ scrollToKey = null } = {}) {
               removeBtn.textContent = '移除';
               removeBtn.onclick = async () => {
                 try {
-                  await fetch(`/api/agents/${encodeURIComponent(key)}`, {
+                  await fetchWithApproval(`/api/agents/${encodeURIComponent(key)}`, {
                     method: 'PATCH',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ avatar: '' }),
@@ -2931,7 +3167,7 @@ async function loadAgentConfig({ scrollToKey = null } = {}) {
       btn.onclick = async () => {
         const key = btn.dataset.agent;
         try {
-          await fetch(`/api/agents/${encodeURIComponent(key)}`, {
+          await fetchWithApproval(`/api/agents/${encodeURIComponent(key)}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ avatar: '' }),
@@ -3121,12 +3357,11 @@ function showChoiceDialog(title, choices) {
 workspaceSaveBtn.onclick = async () => {
   workspaceSaveBtn.disabled = true;
   try {
-    const res = await fetch('/api/settings', {
+    const { response: res, data } = await fetchWithApproval('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ workspace: workspaceInput.value.trim() }),
     });
-    const data = await res.json();
     if (!res.ok) throw new Error(data.error || '保存失败');
     workspaceInput.value = data.workspace || workspaceInput.value;
     workspaceTip.style.color = 'var(--green)';
@@ -4013,10 +4248,8 @@ shellBtn && shellBtn.addEventListener("click", () => {
 });
 window.execShell = execShell;
 async function execShell(command) {
-  const res = await fetch("/api/shell/exec", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({command}) });
-  const data = await res.json();
+  const { data } = await fetchWithApproval("/api/shell/exec", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({command, sessionId: currentSessionId}) });
   if (data.ok) { addShellResultCard(data.runId, data.command); streamShellResult(data.runId); return; }
-  if (data.needConfirm) { pendingShellCmd = data.command; showShellConfirm(data.level, data.reason, data.command); return; }
   addSystemMsg("Shell error: " + (data.error || "unknown"));
 }
 function showShellConfirm(level, reason, command) {
@@ -4125,7 +4358,7 @@ async function loadInstalledSkills() {
       return "<div class=\"sv-card " + (enabled?"":"disabled") + "\"><div class=\"sv-card-header\"><span class=\"sv-card-name\">"+esc(s.name)+"</span><span class=\"sv-card-cat\">"+esc(cat)+"</span><div class=\"sv-card-actions\"><label class=\"sv-toggle\"><input type=\"checkbox\" class=\"sv-toggle-cb\" data-skill=\""+esc(s.name)+"\" "+(enabled?"checked":"")+"><span class=\"sv-toggle-track\"><span class=\"sv-toggle-thumb\"></span></span></label><button class=\"sv-uninstall-btn\" data-skill=\""+esc(s.name)+"\">🗑</button></div></div><div class=\"sv-card-desc\">"+esc(desc)+"</div>"+(s.mounts?"<div class=\"sv-card-mounts\">"+Object.entries(s.mounts).filter(([_,v])=>v).map(([k])=>"<span class=\"sv-mount-tag\">"+esc(k)+"</span>").join("")+"</div>":"")+"</div>";
     }).join("");
     svInstalledList.querySelectorAll(".sv-toggle-cb").forEach(cb => { cb.addEventListener("change", async () => { var n=cb.dataset.skill; var en=cb.checked; await fetch("/api/skills/"+encodeURIComponent(n)+"/toggle", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({enabled:en}) }); }); });
-    svInstalledList.querySelectorAll(".sv-uninstall-btn").forEach(btn => { btn.addEventListener("click", async () => { var n=btn.dataset.skill; if (!confirm("Uninstall "+n+"?")) return; await fetch("/api/skills/"+encodeURIComponent(n), { method:"DELETE" }); loadInstalledSkills(); }); });
+    svInstalledList.querySelectorAll(".sv-uninstall-btn").forEach(btn => { btn.addEventListener("click", async () => { var n=btn.dataset.skill; if (!confirm("Uninstall "+n+"?")) return; await fetchWithApproval("/api/skills/"+encodeURIComponent(n), { method:"DELETE", headers:{"Content-Type":"application/json"}, body:"{}" }); loadInstalledSkills(); }); });
   } catch(e) { svInstalledList.innerHTML = "<div class=\"sv-empty\">Load failed: "+esc(e.message)+"</div>"; }
 }
 async function loadMarketSources() {
@@ -4159,8 +4392,8 @@ async function doImport(payload) {
   var st = document.getElementById("svImportStatus");
   st.classList.remove("hidden"); st.textContent = "Installing..."; st.className="sv-import-status";
   try {
-    var res = await fetch("/api/skills/install-source", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload) });
-    var data = await res.json();
+    var approvedResult = await fetchWithApproval("/api/skills/install-source", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload) });
+    var data = approvedResult.data;
     if (data.ok) { st.textContent = "Installed: "+data.skill.name; st.classList.add("success"); loadInstalledSkills(); }
     else throw new Error(data.error||"unknown");
   } catch(e) { st.textContent = "Failed: "+e.message; st.classList.add("error"); }

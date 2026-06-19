@@ -45,6 +45,8 @@ body {
   box-shadow: var(--shadow);
   flex-shrink: 0;
   z-index: 10;
+  max-width: 100vw;
+  overflow-x: auto;
 }
 .logo {
   font-size: 17px;
@@ -132,18 +134,18 @@ body {
 .layout {
   flex: 1;
   display: grid;
-  grid-template-columns: 240px 1fr 56px;
+  grid-template-columns: 240px minmax(0, 1fr) 56px;
   overflow: hidden;
   transition: grid-template-columns .2s ease;
 }
 .layout.sidebar-collapsed {
-  grid-template-columns: 48px 1fr 56px;
+  grid-template-columns: 48px minmax(0, 1fr) 56px;
 }
 .layout.tasks-expanded {
-  grid-template-columns: 240px 1fr 340px;
+  grid-template-columns: 240px minmax(0, 1fr) 340px;
 }
 .layout.sidebar-collapsed.tasks-expanded {
-  grid-template-columns: 48px 1fr 340px;
+  grid-template-columns: 48px minmax(0, 1fr) 340px;
 }
 
 /* ── 左侧 Session sidebar ── */
@@ -2348,9 +2350,11 @@ details[open] .role-card-summary::before { transform: rotate(90deg); }
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
   background: var(--surface2);
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
 .hub-tab {
-  flex: 1;
+  flex: 0 0 auto;
   border: 1px solid transparent;
   background: transparent;
   color: var(--muted);
@@ -2359,6 +2363,7 @@ details[open] .role-card-summary::before { transform: rotate(90deg); }
   font-size: 12px;
   font-weight: 800;
   padding: 7px 8px;
+  white-space: nowrap;
 }
 .hub-tab:hover { color: var(--text); background: var(--surface); }
 .hub-tab.active {
@@ -2982,5 +2987,62 @@ details[open] .role-card-summary::before { transform: rotate(90deg); }
   border-radius: 6px;
   padding: 6px 10px;
   margin-bottom: 8px;
+}
+
+.hub-inline-code {
+  max-width: 100%;
+  max-height: 120px;
+  overflow: auto;
+  margin: 7px 0 0;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--muted);
+  font: 11px/1.45 Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.approval-actions,
+.schedule-actions {
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.schedule-form {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(170px, 1fr) minmax(140px, 1fr);
+  gap: 8px;
+}
+
+.schedule-form input,
+.schedule-form select,
+.schedule-form textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 7px 9px;
+  font: inherit;
+}
+
+.schedule-form textarea {
+  grid-column: 1 / -1;
+  min-height: 72px;
+  resize: vertical;
+}
+
+.schedule-form .hub-action-btn {
+  justify-self: start;
+}
+
+@media (max-width: 640px) {
+  .schedule-form { grid-template-columns: 1fr; }
+  .schedule-form textarea { grid-column: auto; }
+  .approval-actions,
+  .schedule-actions { align-items: stretch; width: 100%; }
 }
 

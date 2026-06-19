@@ -4,6 +4,7 @@
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'fs';
+import { repository } from './storage.mjs';
 
 export const AGENT_KEYS = ['codex', 'claude', 'kimi'];
 export const AGENTS_FILE = '.myteam/agents.json';
@@ -437,13 +438,20 @@ export function checkAgentLaunchable(agentKey, cfg, timeoutMs = 3000) {
 // 教训1 (02-cli-engineering): readline 接管 stdout 后 child.stdout.on('data') 不再触发。
 //   watchdog 必须在 rl.on('line') 和 stderr.on('data') 里刷新，不能只靠 stdout 流。
 // 教训1: 超时时间 30min，匹配复杂任务（代码分析/长篇写作）实际需要。
-export function invokeAgent(CLI_CONFIG, agentKey, prompt, { silent = false, timeoutMs = 30 * 60 * 1000 } = {}) {
+export function invokeAgent(CLI_CONFIG, agentKey, prompt, {
+  silent = false,
+  timeoutMs = 30 * 60 * 1000,
+  outputSchemaPath = '',
+} = {}) {
   const cfg = CLI_CONFIG[agentKey];
   if (!cfg?.path) throw new Error(`${agentKey} 路径未在 .env 中配置（${agentKey.toUpperCase()}_PATH）`);
 
   const parser = PARSERS[agentKey] || parseText;
 
   const args = cfg.args(prompt);
+  if (outputSchemaPath && agentKey === 'codex' && !args.includes('--output-schema')) {
+    args.push('--output-schema', outputSchemaPath);
+  }
   const { spawnPath, spawnArgs } = buildSpawnCommand(cfg, args);
 
   return new Promise((resolve, reject) => {
@@ -619,28 +627,21 @@ export function validatePlanResult(data) {
   return { ok: true };
 }
 
-// ── tasks.jsonl 读写（IMP-004: 从 server.mjs / dispatch.mjs 抽取） ──
-const TASKS_FILE = '.myteam/tasks.jsonl';
-
 export function readTasks() {
-  if (!existsSync(TASKS_FILE)) return [];
-  return readFileSync(TASKS_FILE, 'utf8')
-    .split('\n').filter(l => l.trim())
-    .map(l => { try { return JSON.parse(l); } catch { return null; } })
-    .filter(Boolean);
+  return repository.list('tasks');
 }
 
 export function writeAllTasks(tasks) {
-  writeFileSync(TASKS_FILE, tasks.map(t => JSON.stringify(t)).join('\n') + '\n', 'utf8');
+  repository.replace('tasks', tasks);
 }
 
 export function appendTask(record) {
-  appendFileSync(TASKS_FILE, JSON.stringify(record) + '\n', 'utf8');
+  repository.append('tasks', record);
 }
 
 export function patchTask(id, patch) {
-  const tasks = readTasks();
-  writeAllTasks(tasks.map(t => t.id === id ? { ...t, ...patch } : t));
+  const task = repository.get('tasks', id);
+  if (task) repository.upsert('tasks', { ...task, ...patch });
 }
 
 // ── 共享 Prompt（IMP-004: 从 server.mjs / plan.mjs / dispatch.mjs 抽取） ──

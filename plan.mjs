@@ -3,10 +3,12 @@
 
 import { appendFileSync } from 'fs';
 import { randomUUID } from 'crypto';
-import { loadEnv, buildCliConfig, invokeAgent, extractJson, validatePlanResult, AGENT_KEYS, PLAN_PROMPT } from './agent-utils.mjs';
+import { loadEnv, buildCliConfig, invokeAgent, AGENT_KEYS, PLAN_PROMPT } from './agent-utils.mjs';
+import { ensurePlanSchemaFile, parseStructuredPlanOutput } from './collaboration-context.mjs';
 
 const ENV = loadEnv();
 const CLI_CONFIG = buildCliConfig(ENV);
+const PLAN_SCHEMA_FILE = ensurePlanSchemaFile();
 
 function writeTasks(goal, tasks, agentKey) {
   const tasksFile = '.myteam/tasks.jsonl';
@@ -61,7 +63,9 @@ console.log(`正在调用 ${agentKey} 拆分任务，请稍候...\n目标：${go
 
 let rawOutput;
 try {
-  rawOutput = await invokeAgent(CLI_CONFIG, agentKey, `${PLAN_PROMPT}\n\n用户目标：${goal}`);
+  rawOutput = await invokeAgent(CLI_CONFIG, agentKey, `${PLAN_PROMPT}\n\n用户目标：${goal}`, {
+    outputSchemaPath: agentKey === 'codex' ? PLAN_SCHEMA_FILE : '',
+  });
 } catch (err) {
   console.error(`\n调用失败：${err.message}`);
   process.exit(1);
@@ -72,14 +76,17 @@ if (!rawOutput?.trim()) {
   process.exit(1);
 }
 
-const data = extractJson(rawOutput);
-// 教训2: 严格验证，防止幻觉数据写入
-const validation = validatePlanResult(data);
-if (!validation.ok) {
-  console.error(`\n无法从输出中解析有效任务列表（${validation.reason}），原始输出：`);
+const parsedPlan = parseStructuredPlanOutput(rawOutput, {
+  goal,
+  defaultAgent: agentKey,
+  allowedAgents: AGENT_KEYS,
+});
+if (!parsedPlan.ok) {
+  console.error(`\n无法从输出中解析有效任务列表（${parsedPlan.reason}），原始输出：`);
   console.error(rawOutput.slice(0, 800));
   process.exit(1);
 }
+const data = parsedPlan.data;
 
 const { runId, written } = writeTasks(goal, data.tasks, agentKey);
 console.log(`\n已写入 ${written} 条任务 → .myteam/tasks.jsonl（run_id: ${runId}）`);

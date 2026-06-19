@@ -4,17 +4,42 @@
 import { createServer } from 'http';
 import { get as httpsGet } from 'https';
 import { get as httpGetModule } from 'http';
-import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync, readdirSync, rmSync, statSync, lstatSync, realpathSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, readdirSync, rmSync, statSync, lstatSync, realpathSync } from 'fs';
 import { resolve, basename, dirname, extname, join, sep, relative } from 'path';
 import { randomUUID, createHash } from 'crypto';
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
-import { loadEnv, buildCliConfig, invokeAgent, extractJson, PARSERS, validatePlanResult, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, buildReviewPrompt, AGENT_KEYS, buildSpawnCommand, checkAgentLaunchable, formatLaunchError, readAgentRegistry, writeAgentRegistry, sanitizeAgentKey, buildRoleCard, validatePhaseTransition, getNextPhase } from './agent-utils.mjs';
+import { loadEnv, buildCliConfig, invokeAgent, extractJson, PARSERS, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, buildReviewPrompt, AGENT_KEYS, buildSpawnCommand, checkAgentLaunchable, formatLaunchError, readAgentRegistry, writeAgentRegistry, sanitizeAgentKey, buildRoleCard, validatePhaseTransition, getNextPhase } from './agent-utils.mjs';
 import { getDangerLevel } from './commandSafety.mjs';
+import { repository } from './storage.mjs';
+import {
+  appendAudit,
+  approvalResponse,
+  authorizeOperation,
+  decideApproval,
+  listApprovals,
+  listAudit,
+} from './governance.mjs';
+import { ScheduleService } from './scheduler.mjs';
+import {
+  ensurePlanSchemaFile,
+  parseStructuredPlanOutput,
+  buildContinuityCapsule,
+  formatContinuityBridge,
+  buildTopKEvidenceBridge,
+  buildWorkspaceBridge,
+  SPAWN_SUBAGENT_PROTOCOL,
+  parseSpawnSubagentDirectives,
+  createSubagentRun,
+  updateSubagentRun,
+  listSubagentRuns,
+  recoverStaleSubagentRuns,
+  appendSubagentMessage,
+  listSubagentMessages,
+} from './collaboration-context.mjs';
 
 let ENV = loadEnv();
 let CLI_CONFIG = buildCliConfig(ENV);
-const TASKS_FILE = '.myteam/tasks.jsonl';
 const LESSONS_FILE = '.myteam/lessons.jsonl';
 const SKILLS_FILE = '.myteam/skills.yaml';
 const SKILLS_DIR = '.myteam/skills';
@@ -23,6 +48,8 @@ const INVOCATIONS_FILE = '.myteam/invocations.jsonl';
 const SETTINGS_FILE = '.myteam/settings.json';
 const UPLOADS_DIR = '.myteam/uploads';
 const OUTPUTS_DIR = '.myteam/outputs';
+const PLAN_SCHEMA_FILE = ensurePlanSchemaFile();
+recoverStaleSubagentRuns();
 
 // skill 市场远程源配置
 const SKILL_SOURCES = {
@@ -63,7 +90,7 @@ function getChainMessages(taskId) {
 
 const shellResults = new Map();
 
-function executeShell(command, runId) {
+function executeShell(command, runId, context = {}) {
   shellResults.set(runId, { stdout: '', stderr: '', exitCode: null, done: false, startedAt: new Date().toISOString() });
   const isWin = process.platform === 'win32';
   const child = spawn(isWin ? 'powershell' : 'sh', [isWin ? '-Command' : '-c', command], {
@@ -85,10 +112,12 @@ function executeShell(command, runId) {
   child.on('close', (code) => {
     const cur = shellResults.get(runId);
     if (cur) { cur.exitCode = code; cur.done = true; cur.finishedAt = new Date().toISOString(); shellResults.set(runId, cur); }
+    appendAudit({ operation: 'shell.execute', decision: context.approvalId ? 'authorized' : 'safe_policy', result: code === 0 ? 'succeeded' : 'failed', approvalId: context.approvalId, sessionId: context.sessionId, details: { command, runId, exitCode: code } });
   });
   child.on('error', (err) => {
     const cur = shellResults.get(runId);
     if (cur) { cur.stderr += err.message; cur.exitCode = -1; cur.done = true; cur.finishedAt = new Date().toISOString(); shellResults.set(runId, cur); }
+    appendAudit({ operation: 'shell.execute', decision: context.approvalId ? 'authorized' : 'safe_policy', result: 'failed', approvalId: context.approvalId, sessionId: context.sessionId, details: { command, runId, error: err.message } });
   });
 }
 
@@ -381,8 +410,7 @@ function appendLesson(task, error) {
     pattern,
     timestamp: new Date().toISOString(),
   };
-  appendFileSync(LESSONS_FILE, JSON.stringify(lesson) + '\n', 'utf8');
-  return lesson;
+  return repository.append('lessons', lesson);
 }
 
 // 检测重复 pattern（对齐 clowder-ai self-evolution：同类错误 ≥2 次触发改进提案）
@@ -978,13 +1006,15 @@ function guessMime(fileName) {
 
 function appendInvocation(record) {
   try {
-    appendFileSync(INVOCATIONS_FILE, JSON.stringify(record) + '\n', 'utf8');
+    repository.append('invocations', record);
   } catch (err) {
     console.error('Failed to append invocation:', err.message);
   }
 }
 
 function readJsonl(file) {
+  if (file === LESSONS_FILE) return repository.list('lessons');
+  if (file === INVOCATIONS_FILE) return repository.list('invocations');
   if (!existsSync(file)) return [];
   return readFileSync(file, 'utf8')
     .split('\n')
@@ -1034,6 +1064,7 @@ function newSession(name) {
     name: name || DEFAULT_DRAFT_SESSION_NAME,
     created_at: new Date().toISOString(),
     history: [],
+    continuity: null,
     mode: null, // 'chat' | 'plan' | 'mixed'，由首次/最近一次操作决定
   };
 }
@@ -1080,6 +1111,18 @@ function getActiveSession() {
 }
 
 function loadSessions() {
+  const stored = repository.loadSessionState();
+  if (stored.sessions.length) {
+    sessions = stored.sessions.map((session) => ({
+      ...session,
+      history: Array.isArray(session.history) ? session.history.slice(-40) : [],
+    }));
+    activeSessionId = stored.activeId && getSession(stored.activeId) ? stored.activeId : sessions[0].id;
+    const now = Date.now();
+    trashedSessions = stored.trashedSessions
+      .filter((entry) => now - Number(entry.deletedAt || 0) < TRASH_RETENTION_MS);
+    return;
+  }
   if (!existsSync(MEMORY_FILE)) {
     sessions = [newSession()];
     activeSessionId = sessions[0].id;
@@ -1101,6 +1144,7 @@ function loadSessions() {
         name: s.name || DEFAULT_SESSION_NAME,
         created_at: s.created_at || new Date().toISOString(),
         history: Array.isArray(s.history) ? s.history.slice(-40) : [],
+        continuity: s.continuity && typeof s.continuity === 'object' ? s.continuity : null,
         mode: s.mode || null,
       }));
       activeSessionId = data.activeId && getSession(data.activeId)
@@ -1133,14 +1177,55 @@ function saveSessions() {
         deletedAt: t.deletedAt,
       })),
     };
-    writeFileSync(MEMORY_FILE, JSON.stringify(payload, null, 2), 'utf8');
+    repository.saveSessionState(payload);
   } catch (err) {
     console.error('Failed to save sessions:', err.message);
   }
 }
 
+function refreshSessionContinuity(session, source = 'manual') {
+  if (!session) return null;
+  session.continuity = buildContinuityCapsule({
+    sessionId: session.id,
+    history: session.history,
+    previous: session.continuity,
+    source,
+  });
+  return session.continuity;
+}
+
 // 启动时加载
 loadSessions();
+
+const scheduleService = new ScheduleService({
+  execute: async (schedule, run) => {
+    const { agentKey } = await resolveRunnableAgent(schedule.agent);
+    const targetSession = schedule.sessionPolicy === 'existing' && getSession(schedule.sessionId)
+      ? getSession(schedule.sessionId)
+      : newSession(`定时：${schedule.name}`);
+    if (!getSession(targetSession.id)) sessions.push(targetSession);
+    const prompt = schedule.mode === 'plan'
+      ? `${PLAN_PROMPT}\n\n用户目标：${schedule.goal}`
+      : schedule.mode === 'dispatch'
+        ? buildExecPrompt({
+            id: `schedule-${run.id}`,
+            title: schedule.name,
+            goal: schedule.goal,
+            accept: '完成定时任务目标并给出可验证摘要',
+            steps: [],
+            agent: agentKey,
+          })
+        : `这是经用户批准的定时任务。请完成目标并给出简洁结果。\n\n目标：${schedule.goal}`;
+    targetSession.history.push({ role: 'user', text: schedule.goal, agent: null, kind: 'schedule-goal', scheduleId: schedule.id, runId: run.id });
+    const result = await invokeAgent(CLI_CONFIG, agentKey, prompt, { silent: true });
+    targetSession.history.push({ role: 'assistant', text: result, agent: agentKey, kind: 'schedule-result', scheduleId: schedule.id, runId: run.id });
+    if (targetSession.history.length > 40) targetSession.history.splice(0, targetSession.history.length - 40);
+    refreshSessionContinuity(targetSession, 'scheduled_run');
+    saveSessions();
+    return { summary: result, sessionId: targetSession.id };
+  },
+});
+scheduleService.start();
 
 // ── @mention 路由解析 ─────────────────────────────────────────
 // 参考 clowder-ai 的 parseA2AMentions：用户输入用宽松匹配（任意位置）
@@ -1258,15 +1343,15 @@ const PORT = (() => {
   return i >= 0 ? Number(process.argv[i + 1]) : 7878;
 })();
 
-// ── tasks.jsonl 工具 ──────────────────────────────────────────
-// 教训4 (02-cli-engineering): 重要操作前先备份，防止数据丢失
+// 重要执行前导出一份可读快照；SQLite 仍是权威存储。
 const RUNS_DIR = '.myteam/runs';
 function backupTasks() {
-  if (!existsSync(TASKS_FILE)) return null;
+  const tasks = readTasks();
+  if (!tasks.length) return null;
   mkdirSync(RUNS_DIR, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const dest = `${RUNS_DIR}/tasks-backup-${stamp}.jsonl`;
-  copyFileSync(TASKS_FILE, dest);
+  writeFileSync(dest, tasks.map((task) => JSON.stringify(task)).join('\n') + '\n', 'utf8');
   return dest;
 }
 
@@ -1365,7 +1450,12 @@ function abortChildren({ sessionId = '', clientRunId = '' } = {}) {
 // 教训1 (02-cli-engineering): readline 接管 stdout 后，child.stdout.on('data') 不再触发。
 // watchdog 必须在 rl.on('line') 和 stderr.on('data') 里刷新。
 // 教训1: 超时 30min，匹配复杂任务实际需要。
-function streamAgent(agentKey, prompt, res, label = 'chunk', { skipRoleCard = false, sessionId = '', clientRunId = '' } = {}) {
+function streamAgent(agentKey, prompt, res, label = 'chunk', {
+  skipRoleCard = false,
+  sessionId = '',
+  clientRunId = '',
+  outputSchemaPath = '',
+} = {}) {
   const invocationId = randomUUID().slice(0, 8);
   const startedAt = Date.now();
   const startedIso = new Date(startedAt).toISOString();
@@ -1404,6 +1494,9 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', { skipRoleCard = fa
 
   const parser = PARSERS[agentKey] || ((line) => `${line}\n`);
   const args = cfg.args(fullPrompt);
+  if (outputSchemaPath && agentKey === 'codex' && !args.includes('--output-schema')) {
+    args.push('--output-schema', resolve(outputSchemaPath));
+  }
   const { spawnPath, spawnArgs } = buildSpawnCommand(cfg, args);
 
   return new Promise((resolve, reject) => {
@@ -1447,7 +1540,7 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', { skipRoleCard = fa
 
     if (cfg.inputMode !== 'arg') {
       try {
-        child.stdin.write(prompt, 'utf8');
+        child.stdin.write(fullPrompt, 'utf8');
         child.stdin.end();
       } catch (err) {
         fail(new Error(formatLaunchError(agentKey, err)), cid);
@@ -1578,6 +1671,18 @@ const MIME = {
   '.gif': 'image/gif',
 };
 
+function requireApproval(res, { operation, payload, sessionId = '', approvalId = '' }) {
+  const authorization = authorizeOperation({ operation, payload, sessionId, approvalId });
+  if (authorization.ok) return true;
+  approvalResponse(res, authorization);
+  return false;
+}
+
+function json(res, status, body) {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+  return res.end(JSON.stringify(body));
+}
+
 // ── 路由 ──────────────────────────────────────────────────────
 async function handle(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -1587,10 +1692,72 @@ async function handle(req, res) {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
+      'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
     });
     return res.end();
+  }
+
+  if (req.method === 'GET' && pathname === '/api/approvals') {
+    const status = url.searchParams.get('status') || '';
+    return json(res, 200, { approvals: listApprovals({ status }) });
+  }
+
+  const approvalDecisionMatch = pathname.match(/^\/api\/approvals\/([^/]+)\/decision$/);
+  if (req.method === 'POST' && approvalDecisionMatch) {
+    try {
+      const body = await readBody(req);
+      const approval = decideApproval(decodeURIComponent(approvalDecisionMatch[1]), body.decision, body.actor);
+      void scheduleService.resumeApproval(approval);
+      return json(res, 200, { ok: true, approval });
+    } catch (error) {
+      return json(res, /not found/.test(error.message) ? 404 : 409, { error: error.message });
+    }
+  }
+
+  if (req.method === 'GET' && pathname === '/api/audit') {
+    const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit') || 200)));
+    return json(res, 200, { events: listAudit({ limit }) });
+  }
+
+  if (req.method === 'GET' && pathname === '/api/schedules') {
+    return json(res, 200, { schedules: scheduleService.list() });
+  }
+
+  if (req.method === 'POST' && pathname === '/api/schedules') {
+    try {
+      return json(res, 201, { ok: true, schedule: scheduleService.create(await readBody(req)) });
+    } catch (error) {
+      return json(res, 400, { error: error.message });
+    }
+  }
+
+  const scheduleMatch = pathname.match(/^\/api\/schedules\/([^/]+)$/);
+  if (scheduleMatch && req.method === 'PATCH') {
+    try {
+      return json(res, 200, { ok: true, schedule: scheduleService.update(decodeURIComponent(scheduleMatch[1]), await readBody(req)) });
+    } catch (error) {
+      return json(res, /not found/.test(error.message) ? 404 : 400, { error: error.message });
+    }
+  }
+  if (scheduleMatch && req.method === 'DELETE') {
+    const removed = scheduleService.remove(decodeURIComponent(scheduleMatch[1]));
+    return json(res, removed ? 200 : 404, removed ? { ok: true } : { error: 'schedule not found' });
+  }
+
+  const scheduleRunMatch = pathname.match(/^\/api\/schedules\/([^/]+)\/run$/);
+  if (scheduleRunMatch && req.method === 'POST') {
+    try {
+      const run = await scheduleService.trigger(decodeURIComponent(scheduleRunMatch[1]), { manual: true });
+      return json(res, 202, { ok: true, run });
+    } catch (error) {
+      return json(res, /not found/.test(error.message) ? 404 : 409, { error: error.message });
+    }
+  }
+
+  if (req.method === 'GET' && pathname === '/api/schedule-runs') {
+    const scheduleId = url.searchParams.get('scheduleId') || '';
+    return json(res, 200, { runs: scheduleService.listRuns(scheduleId) });
   }
 
   // 静态首页
@@ -1661,6 +1828,11 @@ async function handle(req, res) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: '工作区路径不存在' }));
       }
+      if (!requireApproval(res, {
+        operation: 'config.write',
+        payload: { target: 'settings.workspace', workspace },
+        approvalId: body.approvalId,
+      })) return;
       const settings = { ...loadSettings(), workspace };
       saveSettings(settings);
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1853,6 +2025,7 @@ async function handle(req, res) {
 
     // 存入对话历史（按 session）
     session.history.push({ role: 'user', text: message, agent: null, attachments });
+    refreshSessionContinuity(session, 'user_message');
     saveSessions();
 
     const prompt = buildChatPrompt(cleanMessage, agentKey, session.history);
@@ -1870,6 +2043,7 @@ async function handle(req, res) {
       const chatArtifacts = extractArtifacts(fullReply, { sessionId: session.id, agent: agentKey, messageIndex: msgIndex });
       session.history.push({ role: 'assistant', text: fullReply, agent: agentKey, artifacts: chatArtifacts });
       if (session.history.length > 40) session.history.splice(0, session.history.length - 40);
+      refreshSessionContinuity(session, 'post_run');
       saveSessions();
       sseSend(res, 'done', { agent: agentKey, sessionId: session.id });
     } catch (err) {
@@ -1880,6 +2054,7 @@ async function handle(req, res) {
         agent: agentKey,
         kind: 'chat-error',
       });
+      refreshSessionContinuity(session, 'tool_result');
       saveSessions();
       sseSend(res, 'error', { message: err.message });
     }
@@ -1950,6 +2125,11 @@ async function handle(req, res) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: `agent ${agentKey} 不存在` }));
     }
+    if (!requireApproval(res, {
+      operation: 'config.write',
+      payload: { target: `agent.${agentKey}`, changes: body },
+      approvalId: body.approvalId,
+    })) return;
     // 只允许更新角色卡字段和基础展示字段
     const allowed = ['label', 'emoji', 'desc', 'baseUrl', 'apiKey', 'model', 'roleDescription', 'personality', 'strengths', 'restrictions', 'nickname', 'avatar', 'color'];
     for (const field of allowed) {
@@ -2011,6 +2191,11 @@ async function handle(req, res) {
   // POST /api/agents { codex?: string, claude?: string, kimi?: string } — 写回 .env，实时重载
   if (req.method === 'POST' && pathname === '/api/agents') {
     const body = await readBody(req);
+    if (!requireApproval(res, {
+      operation: 'config.write',
+      payload: { target: 'agents', agents: body.agents || Object.keys(body).filter((key) => AGENT_KEYS.includes(key)) },
+      approvalId: body.approvalId,
+    })) return;
     const current = readAgentRegistry(ENV);
     const currentByKey = new Map(current.map(a => [a.key, a]));
 
@@ -2141,6 +2326,11 @@ async function handle(req, res) {
   // POST /api/skills/import — 导入 skill（追加 yaml 或单条 JSON）
   if (req.method === 'POST' && pathname === '/api/skills/import') {
     const body = await readBody(req);
+    if (!requireApproval(res, {
+      operation: 'skill.install',
+      payload: { source: 'inline', name: body.skill?.name || 'yaml-import' },
+      approvalId: body.approvalId,
+    })) return;
     try {
       const lines = [];
       if (typeof body.yaml === 'string' && body.yaml.trim()) {
@@ -2259,6 +2449,11 @@ async function handle(req, res) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: 'name 必填' }));
     }
+    if (!requireApproval(res, {
+      operation: 'skill.install',
+      payload: { source, name },
+      approvalId: body.approvalId,
+    })) return;
     const srcCfg = SKILL_SOURCES[source];
     if (!srcCfg) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -2326,6 +2521,12 @@ async function handle(req, res) {
   const skillDeleteMatch = pathname.match(/^\/api\/skills\/([^\/]+)$/);
   if (req.method === 'DELETE' && skillDeleteMatch) {
     const skillName = decodeURIComponent(skillDeleteMatch[1]);
+    const body = await readBody(req);
+    if (!requireApproval(res, {
+      operation: 'skill.delete',
+      payload: { name: skillName },
+      approvalId: body.approvalId,
+    })) return;
     const skillPath = `${SKILLS_DIR}/${skillName}`;
     if (existsSync(skillPath)) {
       rmSync(skillPath, { recursive: true, force: true });
@@ -2646,13 +2847,7 @@ async function handle(req, res) {
 
   // GET /api/lessons — 返回踩坑记录
   if (req.method === 'GET' && pathname === '/api/lessons') {
-    let lessons = [];
-    if (existsSync(LESSONS_FILE)) {
-      lessons = readFileSync(LESSONS_FILE, 'utf8')
-        .split('\n').filter(l => l.trim())
-        .map(l => { try { return JSON.parse(l); } catch { return null; } })
-        .filter(Boolean);
-    }
+    const lessons = repository.list('lessons');
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ lessons }));
   }
@@ -2694,7 +2889,7 @@ async function handle(req, res) {
     lesson.promoted = true;
     lesson.promoted_at = new Date().toISOString();
     lesson.promoted_insight = insight;
-    writeFileSync(LESSONS_FILE, lessons.map(l => JSON.stringify(l)).join('\n') + '\n', 'utf8');
+    repository.upsert('lessons', lesson);
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, lesson }));
@@ -2717,6 +2912,7 @@ async function handle(req, res) {
     recordSessionMode(session, 'plan');
     maybeAutoRenameSession(session, goal || '图片拆任务');
     session.history.push({ role: 'user', text: goal, agent: null, kind: 'plan-goal', attachments });
+    refreshSessionContinuity(session, 'user_message');
     saveSessions();
 
     sseInit(res);
@@ -2733,14 +2929,21 @@ async function handle(req, res) {
       // 只告知"有图"，由后续执行 agent 阶段处理读图。
       const imgPrompt = attachmentPromptForPlan(attachments);
       const prompt = `${PLAN_PROMPT}${skillContext ? `\n\n本次按需加载的 Skills：\n${skillContext}` : ''}\n\n用户目标：${effectiveGoal}${imgPrompt}`;
-      const raw = await streamAgent(agentKey, prompt, res, 'chunk', { skipRoleCard: true, sessionId: session.id, clientRunId });
-      const data = extractJson(raw);
-      // 教训2: 严格验证，防止幻觉数据写入 tasks.jsonl
-      const validation = validatePlanResult(data);
-      if (!validation.ok) {
-        console.error('[plan] extractJson failed. raw length:', raw.length);
+      const raw = await streamAgent(agentKey, prompt, res, 'chunk', {
+        skipRoleCard: true,
+        sessionId: session.id,
+        clientRunId,
+        outputSchemaPath: agentKey === 'codex' ? PLAN_SCHEMA_FILE : '',
+      });
+      const parsedPlan = parseStructuredPlanOutput(raw, {
+        goal: effectiveGoal,
+        defaultAgent: agentKey,
+        allowedAgents: agentKeys(),
+      });
+      if (!parsedPlan.ok) {
+        console.error('[plan] structured plan failed. raw length:', raw.length);
         console.error('[plan] raw output (first 2000 chars):\n' + raw.slice(0, 2000));
-        const reason = raw.trim() ? validation.reason : validation.reason + ' (agent output empty - likely only thinking stream or CLI error)';
+        const reason = raw.trim() ? parsedPlan.reason : parsedPlan.reason + ' (agent output empty - likely only thinking stream or CLI error)';
         session.history.push({
           role: 'system',
           text: `plan failed: ${reason}\nraw (first 400):\n${raw.slice(0, 400)}`,
@@ -2751,6 +2954,7 @@ async function handle(req, res) {
         sseSend(res, 'error', { message: `plan parse failed (${reason})`, raw: raw.slice(0, 400) });
         return res.end();
       }
+      const data = parsedPlan.data;
       const runId = randomUUID().slice(0, 8);
       const now = new Date().toISOString();
       data.tasks.forEach((t, i) => {
@@ -2793,7 +2997,12 @@ async function handle(req, res) {
         text: `已拆分为 ${taskSummaries.length} 个任务（run ${runId}）`,
       });
       saveSessions();
-      sseSend(res, 'done', { runId, written: data.tasks.length, tasks: taskSummaries });
+      sseSend(res, 'done', {
+        runId,
+        written: data.tasks.length,
+        tasks: taskSummaries,
+        structuredMode: parsedPlan.mode || (agentKey === 'codex' ? 'schema' : 'compat'),
+      });
     } catch (err) {
       session.history.push({
         role: 'system',
@@ -2818,6 +3027,14 @@ async function handle(req, res) {
     const filterTask = body.taskId || '';
     const filterAgent = body.agentOnly || '';
     const agentOverride = body.agent || '';
+    const dispatchSession = getSession(sessionId) || getActiveSession();
+
+    if (!requireApproval(res, {
+      operation: 'agent.dispatch',
+      payload: { runId: filterRun, taskId: filterTask, agentOnly: filterAgent, agent: agentOverride },
+      sessionId: dispatchSession?.id || sessionId,
+      approvalId: body.approvalId,
+    })) return;
 
     let pending = readTasks().filter(t => t.status === 'pending');
     if (filterRun) pending = pending.filter(t => t.run_id === filterRun);
@@ -2838,10 +3055,24 @@ async function handle(req, res) {
 
     let done = 0, failed = 0;
 
+    function buildTaskCollaborationContext(task) {
+      const capsule = refreshSessionContinuity(dispatchSession, 'dispatch');
+      const continuity = formatContinuityBridge(capsule);
+      const evidence = buildTopKEvidenceBridge({
+        query: [task.goal, task.title, task.accept, ...(task.steps || [])].join('\n'),
+        history: dispatchSession?.history || [],
+        capsule,
+        k: 3,
+      });
+      const workspace = buildWorkspaceBridge({ workspace: currentWorkspace() });
+      saveSessions();
+      return [continuity, evidence, workspace].filter(Boolean).join('\n\n');
+    }
+
     // 自动 reviewer：对齐 clowder-ai cross-model review 铁律
     // 选一个 != executor 的可用 agent 做静默调用，解析 JSON 写回 task。
     // 失败/无可用 reviewer 时降级为 review_status=skipped，不影响主流程。
-    async function runAutoReview(task, executorAgent, executionResult) {
+    async function runAutoReview(task, executorAgent, executionResult, collaborationContext = '') {
       try {
         const statuses = await getAgentStatuses();
         const reviewer = statuses.find(a => a.available && a.key !== executorAgent);
@@ -2856,7 +3087,8 @@ async function handle(req, res) {
           return;
         }
         sseSend(res, 'task-review-start', { id: task.id, reviewer: reviewer.key });
-        const reviewPrompt = buildReviewPrompt(task, executorAgent, executionResult);
+        const reviewPrompt = buildReviewPrompt(task, executorAgent, executionResult)
+          + (collaborationContext ? '\n\n【协作上下文】\n' + collaborationContext : '');
         // 静默调用：reviewer 不流式发到前端，避免和 executor 输出混在一起
         const raw = await invokeAgent(CLI_CONFIG, reviewer.key, reviewPrompt, { silent: true, timeoutMs: 5 * 60 * 1000 });
         const data = extractJson(raw || '');
@@ -2917,13 +3149,42 @@ async function handle(req, res) {
           sseSend(res, 'system', { text: `⚠️ ${task.agent} 不可用，改用 ${agentKey} 执行任务「${task.title}」` });
         }
       }
-      patchTask(task.id, { status: 'in_progress', started_at: new Date().toISOString() });
-      sseSend(res, 'task-start', { id: task.id, title: task.title, agent: agentKey });
-      if (depth > 0) pushChainMessage(task.id, { type: 'task-start', agent: agentKey, title: task.title });
+      let subagentRunId = task.subagent_run_id || '';
+      if (depth > 0 && !subagentRunId) {
+        const run = createSubagentRun({
+          parentSessionId: dispatchSession?.id || sessionId,
+          parentTaskId: task.parent_task_id || '',
+          taskId: task.id,
+          agent: agentKey,
+          task: task.title,
+          label: task.title,
+        });
+        subagentRunId = run.id;
+      }
+      patchTask(task.id, {
+        status: 'in_progress',
+        started_at: new Date().toISOString(),
+        subagent_run_id: subagentRunId || null,
+      });
+      sseSend(res, 'task-start', {
+        id: task.id,
+        title: task.title,
+        agent: agentKey,
+        subagentRunId: subagentRunId || null,
+      });
+      if (depth > 0) {
+        pushChainMessage(task.id, { type: 'task-start', agent: agentKey, title: task.title, subagentRunId });
+        updateSubagentRun(subagentRunId, { status: 'running', agent: agentKey });
+        appendSubagentMessage(subagentRunId, { type: 'system', content: 'Subagent started: ' + task.title });
+      }
       try {
         const skillText = [task.goal, task.title, task.accept, ...(task.steps || [])].join('\n');
         const skillContext = buildSkillContext(selectSkills({ text: skillText, agent: agentKey, phase: 'run' }));
-        const result = await streamAgent(agentKey, buildExecPrompt(task, skillContext), res, `task-chunk:${task.id}`, { sessionId, clientRunId });
+        const collaborationContext = buildTaskCollaborationContext(task);
+        const execPrompt = buildExecPrompt(task, skillContext)
+          + '\n\n【协作上下文】\n' + collaborationContext
+          + '\n\n【子代理派生协议】\n' + SPAWN_SUBAGENT_PROTOCOL;
+        const result = await streamAgent(agentKey, execPrompt, res, `task-chunk:${task.id}`, { sessionId, clientRunId });
         const taskArtifacts = extractArtifacts(result, { sessionId, agent: agentKey, messageIndex: null });
         patchTask(task.id, {
           status: 'done',
@@ -2934,9 +3195,36 @@ async function handle(req, res) {
           phase: 'impl', // SOP: pending → impl
         });
         const summary = result ? result.slice(0, 200) : '';
-        sseSend(res, 'task-done', { id: task.id, title: task.title, agent: agentKey, summary });
+        sseSend(res, 'task-done', {
+          id: task.id,
+          title: task.title,
+          agent: agentKey,
+          summary,
+          subagentRunId: subagentRunId || null,
+        });
         done++;
-        if (depth > 0) pushChainMessage(task.id, { type: 'task-done', agent: agentKey, title: task.title, summary });
+        if (depth > 0) {
+          pushChainMessage(task.id, { type: 'task-done', agent: agentKey, title: task.title, summary, subagentRunId });
+          appendSubagentMessage(subagentRunId, { type: 'assistant', content: result || '' });
+          updateSubagentRun(subagentRunId, {
+            status: 'done',
+            finishedAt: Date.now(),
+            resultSummary: summary,
+          });
+        } else if (dispatchSession) {
+          dispatchSession.history.push({
+            role: 'assistant',
+            agent: agentKey,
+            kind: 'task-result',
+            taskId: task.id,
+            text: result?.slice(0, 1600) || '',
+          });
+          if (dispatchSession.history.length > 40) {
+            dispatchSession.history.splice(0, dispatchSession.history.length - 40);
+          }
+          refreshSessionContinuity(dispatchSession, 'post_run');
+          saveSessions();
+        }
 
         // 推荐下一阶段 skill（对齐 clowder-ai manifest.yaml 的 next 链）
         const currentSkills = selectSkills({ text: skillText, agent: agentKey, phase: 'run' });
@@ -2954,13 +3242,27 @@ async function handle(req, res) {
         // 跨 agent 自动 review（对齐 clowder-ai cross-model review 铁律）
         // 链式 worklist 任务（chain_depth > 0）跳过 review，避免审查链爆炸
         if (depth === 0) {
-          await runAutoReview({ ...task, ...readTasks().find(t => t.id === task.id) }, agentKey, result);
+          await runAutoReview(
+            { ...task, ...readTasks().find(t => t.id === task.id) },
+            agentKey,
+            result,
+            collaborationContext,
+          );
         }
 
         // A2A Worklist：扫描回复中的 @mention，自动创建并执行链式任务
         if (result && depth < WORKLIST_MAX_DEPTH) {
-          const mentions = parseA2AMentions(result);
-          for (const nextAgent of mentions) {
+          const structuredSpawns = parseSpawnSubagentDirectives(result, agentKeys());
+          const spawnRequests = structuredSpawns.length
+            ? structuredSpawns
+            : parseA2AMentions(result).map((agent) => ({
+                agent,
+                task: '继续处理「' + task.title + '」的后续工作',
+                label: task.title,
+                accept: '',
+              }));
+          for (const spawnRequest of spawnRequests) {
+            const nextAgent = spawnRequest.agent;
             if (nextAgent === agentKey) continue; // 跳过自己，防止死循环
             
             // IMP-002: 乒乓球熔断检测（防止 A→B→A→B 无限交替）
@@ -2984,17 +3286,20 @@ async function handle(req, res) {
               id: `${task.run_id}-w${chainId}`,
               run_id: task.run_id,
               created_at: new Date().toISOString(),
+              session_id: dispatchSession?.id || sessionId,
               goal: task.goal,
-              title: `[A2A] ${agentKey} → @${nextAgent}: ${task.title}`,
+              title: `[A2A] ${agentKey} → @${nextAgent}: ${spawnRequest.label || task.title}`,
+              why: '由上游 agent 通过 spawn_subagent 协议派生',
               steps: [
                 `上游 ${agentKey} 的分析：${upstreamSummary}`,
-                `继续处理「${task.title}」的后续工作`,
+                spawnRequest.task,
               ],
-              accept: '',
+              accept: spawnRequest.accept || '',
               agent: nextAgent,
               status: 'pending',
               parent_task_id: task.id,
               chain_depth: depth + 1,
+              spawn_protocol: structuredSpawns.length ? 'spawn_subagent' : 'mention-fallback',
             };
             appendTask(chainTask);
             sseSend(res, 'worklist-chain', {
@@ -3017,7 +3322,15 @@ async function handle(req, res) {
         appendLesson(task, err);
         sseSend(res, 'task-failed', { id: task.id, title: task.title, agent: agentKey, error: err.message });
         failed++;
-        if (depth > 0) pushChainMessage(task.id, { type: 'task-failed', agent: agentKey, title: task.title, error: err.message });
+        if (depth > 0) {
+          pushChainMessage(task.id, { type: 'task-failed', agent: agentKey, title: task.title, error: err.message, subagentRunId });
+          appendSubagentMessage(subagentRunId, { type: 'system', content: 'Subagent failed: ' + err.message, isError: true });
+          updateSubagentRun(subagentRunId, {
+            status: 'error',
+            finishedAt: Date.now(),
+            error: err.message,
+          });
+        }
         return null;
       }
     }
@@ -3034,6 +3347,11 @@ async function handle(req, res) {
     const body = await readBody(req);
     const { url, path: localPath, zip: zipPath } = body;
     const requestedName = body.name ? sanitizeSkillName(body.name) : '';
+    if (!requireApproval(res, {
+      operation: 'skill.install',
+      payload: { source: url || localPath || zipPath || 'unknown', name: requestedName },
+      approvalId: body.approvalId,
+    })) return;
     try {
       let mdContent = '';
       let skillName = requestedName;
@@ -3098,24 +3416,35 @@ async function handle(req, res) {
     if (!command) { res.writeHead(400); return res.end(JSON.stringify({ error: 'command required' })); }
     const danger = getDangerLevel(command);
     if (danger.level !== 'safe') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ ok: false, needConfirm: true, level: danger.level, reason: danger.reason, command }));
+      if (!requireApproval(res, {
+        operation: 'shell.execute',
+        payload: { command, level: danger.level, reason: danger.reason },
+        sessionId: body.sessionId,
+        approvalId: body.approvalId,
+      })) return;
     }
     const runId = randomUUID().slice(0, 8);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, runId, command, level: 'safe' }));
-    executeShell(command, runId);
+    executeShell(command, runId, { approvalId: body.approvalId, sessionId: body.sessionId });
     return;
   }
 
   if (req.method === 'POST' && pathname === '/api/shell/exec-confirm') {
     const body = await readBody(req);
     const command = (body.command || '').trim();
-    if (!command || !body.confirmed) { res.writeHead(400); return res.end(JSON.stringify({ error: 'command and confirmed required' })); }
+    if (!command) { res.writeHead(400); return res.end(JSON.stringify({ error: 'command required' })); }
+    const danger = getDangerLevel(command);
+    if (!requireApproval(res, {
+      operation: 'shell.execute',
+      payload: { command, level: danger.level, reason: danger.reason },
+      sessionId: body.sessionId,
+      approvalId: body.approvalId,
+    })) return;
     const runId = randomUUID().slice(0, 8);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, runId, command }));
-    executeShell(command, runId);
+    executeShell(command, runId, { approvalId: body.approvalId, sessionId: body.sessionId });
     return;
   }
 
@@ -3147,11 +3476,64 @@ async function handle(req, res) {
     return res.end(readFileSync(fpath, 'utf8'));
   }
 
+  if (req.method === 'GET' && pathname === '/api/subagents') {
+    const parentSessionId = url.searchParams.get('sessionId') || '';
+    const runs = listSubagentRuns(parentSessionId);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({
+      runs,
+      summary: {
+        total: runs.length,
+        running: runs.filter((run) => run.status === 'running').length,
+        done: runs.filter((run) => run.status === 'done').length,
+        error: runs.filter((run) => run.status === 'error').length,
+      },
+    }));
+  }
+
+  const subagentMessagesMatch = pathname.match(/^\/api\/subagents\/([^/]+)\/messages$/);
+  if (req.method === 'GET' && subagentMessagesMatch) {
+    const runId = decodeURIComponent(subagentMessagesMatch[1]);
+    const run = listSubagentRuns().find((item) => item.id === runId) || null;
+    const messages = listSubagentMessages(runId);
+    res.writeHead(run ? 200 : 404, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(run ? { run, messages } : { error: 'subagent run 不存在' }));
+  }
+
   if (req.method === 'GET' && pathname === '/api/chain-task/messages') {
     const taskId = url.searchParams.get('taskId') || '';
-    const messages = getChainMessages(taskId);
+    const persistedRun = listSubagentRuns().find((run) => run.taskId === taskId) || null;
+    const persisted = persistedRun ? listSubagentMessages(persistedRun.id) : [];
+    const messages = persisted.length
+      ? persisted.map((message) => {
+          if (message.isError) {
+            return {
+              type: 'task-failed',
+              agent: persistedRun.agent,
+              title: persistedRun.label,
+              error: message.content,
+              timestamp: message.timestamp,
+            };
+          }
+          if (message.type === 'assistant') {
+            return {
+              type: 'task-done',
+              agent: persistedRun.agent,
+              title: persistedRun.label,
+              summary: String(message.content || '').slice(0, 200),
+              timestamp: message.timestamp,
+            };
+          }
+          return {
+            type: 'task-start',
+            agent: persistedRun.agent,
+            title: persistedRun.label,
+            timestamp: message.timestamp,
+          };
+        })
+      : getChainMessages(taskId);
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ taskId, messages }));
+    return res.end(JSON.stringify({ taskId, run: persistedRun, messages }));
   }
 
   if (req.method === 'GET' && pathname === '/api/chain-task/stream') {

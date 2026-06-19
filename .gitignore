@@ -5,6 +5,7 @@ __pycache__/
 # 本地环境文件
 .venv/
 venv/
+node_modules/
 .env
 
 # myteam 运行时数据（本地生成，不入库）
@@ -14,6 +15,9 @@ reports/
 .myteam/tasks.jsonl
 .myteam/lessons.jsonl
 .myteam/invocations.jsonl
+.myteam/subagent-runs.jsonl
+.myteam/subagent-messages.jsonl
+.myteam/schemas/
 .myteam/memory.json
 .myteam/agents.json
 .myteam/settings.json
@@ -23,6 +27,8 @@ reports/
 .myteam/skills/
 .myteam/skills-state.json
 .myteam/avatars/
+.myteam/myteam.sqlite*
+.myteam/migrations/
 
 # 系统文件
 .DS_Store

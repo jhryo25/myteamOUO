@@ -196,47 +196,47 @@ extractJson 从单策略括号匹配重写为多策略恢复：
 
 ## LobsterAI 对齐优先级路线图
 
-已拉取 netease-youdao/LobsterAI 参考仓库（本地 F:\py project\LobsterAI-ref），对比分析后制定以下对齐优先级。
+Git clone/partial fetch 曾连续被 reset；最终通过 Windows BITS 下载 main 分支完整源码 ZIP，解压到 `D:\myteam\.compare\LobsterAI-full\LobsterAI-main`（1393 个文件）。同时通过 GitHub connector 保存了 commit `e213217d` 的优先级精确参考树到 `.compare\LobsterAI-reference`。
 
 **核心差异**：LobsterAI 通过 OpenClaw runtime 的 tool-call 协议（sessions_spawn / sessions_resume）派生和管理子 agent，myteam 当前通过文本 JSON 解析 + 服务端编排。
 
-### P0 — 任务登记从文本解析改为结构化输出（根源修复）
+### P0 ✅ — 任务登记改为结构化输出
 
-当前 PLAN_PROMPT 让 codex 吐文本 JSON，extractJson 再提取——LobsterAI 没有这一步，它的 spawn 参数天然结构化。codex CLI 具备 --output-schema 选项（需验证模型兼容性）。
+Plan 现在以 JSON Schema 为契约。Codex CLI 优先使用 `--output-schema`；其他 CLI 或不兼容模型进入统一规范化兜底。
 
-**改动**：plan 阶段让 agent 输出符合 JSON schema 的结构化数据，服务端直接从结构化字段读取，彻底删除 extractJson + validatePlanResult。如 schema 模式不可用则走 tool-call 方式。
+**实际改动**：server plan 和 CLI plan 都调用 `parseStructuredPlanOutput()`；`/api/plan` 不再直接调用旧 `extractJson + validatePlanResult`，并向前端回传 structured mode。
 
-### P1 — 子 agent 派生改为 spawn 协议
+### P1 ✅ — 子 agent 派生改为 spawn 协议
 
-当前 dispatch 是服务端 for 循环串行 streamAgent。LobsterAI 是主 agent 在对话中自主决定何时派出、派给谁，子结果通过 tool_result 协议回流。
+myteam 继续使用本地 CLI，但主 agent 已能在结果里自主声明要派给谁、做什么和如何验收。
 
-**改动**：dispatch 从服务端编排改为主 agent 自主编排——主 agent 调用 spawn_subagent 工具，服务端退化为 runtime 适配层。收益：主 agent 可根据上游结果动态决策。
+**实际改动**：执行 prompt 注入 `<spawn_subagent>` 协议，服务端作为 runtime adapter 创建子任务和 run；结构化 spawn 优先，`@mention` 仅作兼容回退。
 
-### P2 — Continuity Capsule（跨 turn / 跨 agent 上下文接力）
+### P2 ✅ — Continuity Capsule（跨 turn / 跨 agent 上下文接力）
 
 LobsterAI 的 CoworkContinuityCapsule 从消息流提取 currentObjective / decisions / completedFacts / recentFailures / nextSteps / touchedFiles，在 context compaction 和跨 agent 交接时注入。
 
-**改动**：抄 coworkContinuityCapsule.ts 的正则提取逻辑（已含中英双语 RE），为 dispatch 的 task 间交接、reviewer 审查生成胶囊。改动中等，收益大。
+**实际改动**：session 持久化 capsule，并为 executor/reviewer 注入 current objective、constraints、decisions、facts、files、verification、failures 和 next steps。
 
-### P3 — Top-K Evidence 检索注入
+### P3 ✅ — Top-K Evidence 检索注入
 
 LobsterAI 每次续写前从历史消息检索 top-3 最相关证据片段（文件路径 / 命令 / 错误），避免全量历史注入。
 
-**改动**：给 streamAgent prompt 构造加一层 evidence 检索，按 task 关键词从 session history 捞最相关 N 条。局部改动，可独立实施。
+**实际改动**：按 task 和 capsule 关键词给 session history 评分，只注入最多 3 条真实命中的证据。
 
-### P4 — Workspace Rehydration（工作区状态快照）
+### P4 ✅ — Workspace Rehydration（工作区状态快照）
 
 LobsterAI spawn 子 agent 前跑 git status / git log --stat 提取工作区状态，组成 workspace bridge 注入。
 
-**改动**：dispatch 每个 task 前生成工作区快照注入 buildExecPrompt。改动小，抄 LobsterAI 的 git 命令即可。
+**实际改动**：每个 task 前生成 git status、latest commit stat 和 working diff stat，作为 workspace bridge 注入。
 
-### P5 — Subagent 可视化与生命周期管理
+### P5 ✅ — Subagent 可视化与生命周期管理
 
 LobsterAI 的 subagentTracker 维护 toolCallId -> status(running/done/error) 状态机 + 消息缓存 + DB。前端展示每个子 agent 进度。
 
-**改动**：配合 P1，给每个 spawn 建结构化 run 记录，前端做子 agent 列表 + 进度条。P1 的自然延伸。
+**实际改动**：每个 spawn 持久化 JSONL run/message，提供查询 API、重启恢复规则和 Hub 子代理状态列表。
 
-### 建议执行顺序
+### 已完成执行顺序
 
 P0 → P2 → P4 → P1 → P3 → P5
 
@@ -249,7 +249,88 @@ P0 → P2 → P4 → P1 → P3 → P5
 
 ## 注意事项（更新）
 
-- codex exec --output-schema 实测未生效（kimi-k2.6 模型下不约束输出），P0 前需先验证模型兼容性。
-- 项目目录残留 _*.cjs / _*.js / test_extract.cjs / app_clean_head.tmp.js 临时文件（沙箱禁止删除），需要手动清理。
-- 临时验证目录 .tmp-plan-schema 包含计划 schema 定义和实测输出，可用于后续 P0 验证。
-- LobsterAI 克隆到 F:\py project\LobsterAI-ref，方便后续对照开发。
+- `--output-schema` 只在 Codex CLI 路径启用；模型/代理不兼容时由统一 schema 规范化器走兼容解析，但仍严格验收字段。
+- myteam 不是 OpenClaw runtime；P1 使用等价的 `<spawn_subagent>` 结构化协议，服务端作为 runtime adapter 执行和回流。
+- 完整源码位于 `.compare/LobsterAI-full/LobsterAI-main`；它来自 GitHub main ZIP，不含 `.git` 历史。`.compare/LobsterAI-reference` 保留 P0-P5 对应 commit 的精确文件。
+- `.myteam/subagent-runs.jsonl`、`.myteam/subagent-messages.jsonl` 和 `.myteam/schemas/` 是运行时文件，已加入 `.gitignore`。
+
+---
+
+## LobsterAI P0-P5 完成记录（2026-06-18）
+
+### P0 结构化 Plan
+
+- 新增 `PLAN_OUTPUT_SCHEMA` 和 `.myteam/schemas/plan.schema.json`。
+- Codex 的 server plan 与 CLI plan 都附加 `--output-schema`。
+- `parseStructuredPlanOutput()` 统一处理 native JSON、Markdown envelope 和兼容候选，并规范化 agent/字段/长度。
+- `/api/plan` 不再直接调用旧的 `extractJson + validatePlanResult`。
+
+### P2 Continuity Capsule
+
+- session 新增持久化 `continuity` 字段。
+- 从最近 40 条历史提取 objective、constraints、decisions、completed facts、touched files、verification、failures、next steps 和 questions。
+- chat、plan、dispatch、task result 都会刷新 capsule。
+
+### P4 Workspace Rehydration
+
+- 每个 task 执行前读取 `git status --short --branch`、`git log -1 --oneline --stat`、`git diff --stat`。
+- bridge 标记为系统维护参考，不当作新用户指令。
+
+### P1 Spawn 协议
+
+- 执行 agent prompt 注入 `<spawn_subagent>{agent,task,label,accept}</spawn_subagent>` 协议。
+- 优先消费结构化 spawn；没有结构化块时才回退到旧 `@mention`。
+- 结构化派生任务保留 parent task、chain depth、session 和协议来源。
+
+### P3 Top-K Evidence
+
+- 按 task goal/title/accept/steps 和 capsule 文件词提取查询词。
+- 从 session 历史评分并注入最多 3 条相关证据。
+- evidence 同时提供给 executor 和 reviewer。
+
+### P5 Subagent 生命周期与 UI
+
+- JSONL 持久化 run/message，状态为 `running / done / error`。
+- 服务启动时把上次残留 running run 标记为 error。
+- 新增 `GET /api/subagents` 和 `GET /api/subagents/:id/messages`。
+- 旧 `/api/chain-task/messages` 会回退读取持久化消息。
+- Hub 新增「子代理」Tab，展示统计、列表、状态和详情入口。
+
+### 验证
+
+- `node --check`：`agent-utils.mjs`、`server.mjs`、`plan.mjs`、`web/app.js`、`collaboration-context.mjs` 全部通过。
+- `node --test tests/*.test.mjs`：8/8 通过。
+- API：subagent list、done summary、持久化 task-done 映射、首页 200、schema maxItems=7。
+- Playwright + Edge：桌面/390px 手机 Hub 子代理页通过；手机 `body/doc/viewport` 宽度均为 390，无横向溢出。
+
+---
+
+## P6-P8 交接（2026-06-19）
+
+### 已完成
+
+- P6：新增统一风险策略、服务端审批对象、原始载荷指纹、单次/会话授权、拒绝/过期和脱敏审计；覆盖 shell、skill 安装/删除、配置写入和 dispatch。
+- P7：最低 Node 提升到 22.5，使用 `node:sqlite`；sessions/messages、tasks、lessons、invocations、subagents、approvals/audit、schedules/runs 迁移到 `.myteam/myteam.sqlite`。
+- P7：首次启动先备份旧 JSON/JSONL 到 `.myteam/migrations/legacy-*`，再事务导入；SQLite 成为唯一写入源。
+- P8：新增五段 Cron、时区、启停、删除、手动触发、互斥、错过触发 skipped 和运行历史；执行默认等待审批。
+- Hub 新增「审批」与「定时」Tab，移动端保持 390px 页面宽度，tabs 在抽屉内部滚动。
+
+### API 与状态
+
+- 审批：`GET /api/approvals`、`POST /api/approvals/:id/decision`、`GET /api/audit`。
+- 调度：`GET/POST /api/schedules`、`PATCH/DELETE /api/schedules/:id`、`POST /api/schedules/:id/run`、`GET /api/schedule-runs`。
+- 定时运行状态：`queued / waiting_approval / running / succeeded / failed / cancelled / skipped`。
+
+### 验证结果
+
+- `npm run check` 通过。
+- `npm test`：11/11 通过；新增审批指纹/脱敏、SQLite session、Cron 时区/审批/互斥测试。
+- HTTP：危险 shell 返回 202；拒绝后不执行。定时运行由 waiting_approval 转为 cancelled，审计和 SQLite 均有记录。
+- Browser：桌面 1280px 与手机 390x844 通过；无 console error/warn，无页面级横向溢出，审批/定时页和创建计划交互正常。
+
+### 限制与下一步
+
+- P6 只控制 myteam 管理的 HTTP/执行入口，不能逐项拦截外部 CLI 内部工具调用。
+- Scheduler 依赖 myteam 进程持续运行；当前没有系统服务安装器或远程通知。
+- 建议下一轮增加数据库导出/恢复 CLI，再评估 agent 原生 permission adapter。
+- 详细对比见 `docs/lobsterai-comparison.md`，经验见 `docs/lessons-p6-p8.md`。

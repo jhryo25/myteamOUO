@@ -52,7 +52,7 @@ const DEFAULT_AGENT_DEFS = [
     desc: '轻量执行 / 快速草稿',
     envKey: 'KIMI_PATH',
     inputMode: 'arg',
-    argsTemplate: '--print --output-format stream-json --prompt {prompt}',
+    argsTemplate: '--prompt {prompt} --output-format stream-json',
     checkTemplate: '--help',
     roleDescription: '快速执行、轻量任务、草稿生成',
     personality: '高效、简洁、直接给出结果，不绕弯子',
@@ -99,6 +99,10 @@ export function readAgentRegistry(ENV = loadEnv(), file = AGENTS_FILE) {
     const key = sanitizeAgentKey(raw.key);
     if (!key) continue;
     const base = byKey.get(key) || {};
+    const savedArgsTemplate = raw.argsTemplate || base.argsTemplate || '-p {prompt}';
+    const argsTemplate = key === 'kimi'
+      ? savedArgsTemplate.replace(/(^|\s)--print(?=\s|$)/g, ' ').replace(/\s+/g, ' ').trim()
+      : savedArgsTemplate;
     byKey.set(key, {
       ...base,
       ...raw,
@@ -107,7 +111,7 @@ export function readAgentRegistry(ENV = loadEnv(), file = AGENTS_FILE) {
       emoji: raw.emoji || base.emoji || '●',
       desc: raw.desc || base.desc || '',
       inputMode: raw.inputMode === 'stdin' ? 'stdin' : 'arg',
-      argsTemplate: raw.argsTemplate || base.argsTemplate || '-p {prompt}',
+      argsTemplate,
       checkTemplate: raw.checkTemplate || base.checkTemplate || '--help',
       envKey: raw.envKey || base.envKey || `${key.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_PATH`,
       removable: raw.removable ?? !AGENT_KEYS.includes(key),

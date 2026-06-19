@@ -28,6 +28,8 @@ CLAUDE_PATH=C:\path\to\claude.exe
 KIMI_PATH=C:\path\to\kimi.exe
 ```
 
+Kimi Code CLI 0.14+ 使用 `--prompt ... --output-format stream-json`；旧配置中的 `--print` 会在加载时自动移除。
+
 运行环境要求 Node.js `22.5+`。项目使用 Node 内置 `node:sqlite`，无需额外安装 SQLite。
 
 ## 当前能力

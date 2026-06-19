@@ -334,3 +334,10 @@ P0 → P2 → P4 → P1 → P3 → P5
 - Scheduler 依赖 myteam 进程持续运行；当前没有系统服务安装器或远程通知。
 - 建议下一轮增加数据库导出/恢复 CLI，再评估 agent 原生 permission adapter。
 - 详细对比见 `docs/lobsterai-comparison.md`，经验见 `docs/lessons-p6-p8.md`。
+
+### Kimi CLI 0.14 兼容修复（2026-06-19）
+
+- 现象：`/api/status` 显示 Kimi 可启动，但真实对话报 `unknown option '--print'`。
+- 根因：轻量检测只执行 `--help`，而默认调用模板仍使用 Kimi 旧版 `--print` 参数。
+- 修复：默认模板改为 `--prompt {prompt} --output-format stream-json`；加载旧 `agents.json` 时自动移除遗留 `--print`。
+- 验证：本机 Kimi Code CLI 0.14.0 真实调用返回 `KIMI_OK`。

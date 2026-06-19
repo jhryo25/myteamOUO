@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -19,6 +19,7 @@ import {
   appendSubagentMessage,
   listSubagentMessages,
 } from '../collaboration-context.mjs';
+import { readAgentRegistry } from '../agent-utils.mjs';
 
 const samplePlan = {
   goal: '完成协作上下文',
@@ -139,6 +140,25 @@ test('plan schema is materialized for codex output-schema', () => {
     const file = ensurePlanSchemaFile(join(dir, 'plan.schema.json'));
     const schema = JSON.parse(readFileSync(file, 'utf8'));
     assert.equal(schema.properties.tasks.maxItems, 7);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Kimi 0.14 invocation template omits removed --print flag', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'myteam-kimi-config-'));
+  const file = join(dir, 'agents.json');
+  try {
+    const defaults = readAgentRegistry({}, join(dir, 'missing.json'));
+    const defaultKimi = defaults.find((agent) => agent.key === 'kimi');
+    assert.equal(defaultKimi.argsTemplate, '--prompt {prompt} --output-format stream-json');
+
+    writeFileSync(file, JSON.stringify({
+      agents: [{ key: 'kimi', argsTemplate: '--print --output-format stream-json --prompt {prompt}' }],
+    }), 'utf8');
+    const migratedKimi = readAgentRegistry({}, file).find((agent) => agent.key === 'kimi');
+    assert.equal(migratedKimi.argsTemplate.includes('--print'), false);
+    assert.match(migratedKimi.argsTemplate, /--prompt \{prompt\}/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

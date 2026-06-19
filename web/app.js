@@ -1165,10 +1165,74 @@ function updateSendBtnState() {
   }
 }
 
+function approvalRiskLabel(risk) {
+  return ({ high: '高风险', medium: '中风险', low: '低风险' })[risk] || risk || '未知风险';
+}
+
+function approvalContextRows(approval) {
+  const payload = approval.payload || {};
+  if (approval.operation === 'agent.dispatch') {
+    let scope = '当前 pending 任务';
+    if (payload.selection === 'all_pending') scope = '全部 pending 任务';
+    else if (payload.selection?.startsWith('task:')) scope = `单个任务 ${payload.selection.slice(5)}`;
+    else if (payload.selection?.startsWith('run:')) scope = `任务批次 ${payload.selection.slice(4)}`;
+    else if (payload.selection?.startsWith('agent:')) scope = `仅 ${payload.selection.slice(6)} 的 pending 任务`;
+    return [
+      ['执行范围', scope],
+      ['任务数量', `${Number(payload.pendingCount || 0)} 条`],
+      ['Agent', payload.requestedAgent === 'task_assignment' ? '按任务分配自动选择' : (payload.requestedAgent || '自动选择')],
+    ];
+  }
+  return Object.entries(payload)
+    .filter(([, value]) => value !== '' && value !== null && value !== undefined)
+    .slice(0, 8)
+    .map(([key, value]) => [key, typeof value === 'object' ? JSON.stringify(value) : String(value)]);
+}
+
+function approvalDetailsMarkup(approval) {
+  const effects = Array.isArray(approval.effects) ? approval.effects : [];
+  const rows = approvalContextRows(approval);
+  return `
+    <div class="approval-heading">
+      <span class="approval-risk ${esc(approval.risk || 'medium')}">${esc(approvalRiskLabel(approval.risk))}</span>
+      <div>
+        <div class="dialog-title">${esc(approval.title || approval.operation || '操作审批')}</div>
+        <div class="approval-operation">${esc(approval.operation || '')}</div>
+      </div>
+    </div>
+    <p class="approval-reason">${esc(approval.reason || '此操作需要你的明确批准后才能继续。')}</p>
+    ${effects.length ? `<div class="approval-section"><div class="approval-section-title">批准后可能发生</div><ul class="approval-effects">${effects.map(effect => `<li>${esc(effect)}</li>`).join('')}</ul></div>` : ''}
+    ${rows.length ? `<div class="approval-section"><div class="approval-section-title">本次执行范围</div><div class="approval-context">${rows.map(([label, value]) => `<div class="approval-context-row"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('')}</div></div>` : ''}`;
+}
+
+function showApprovalDialog(approval) {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+    overlay.innerHTML = `<div class="dialog-box approval-dialog" role="dialog" aria-modal="true" aria-labelledby="approval-dialog-title">
+      ${approvalDetailsMarkup(approval).replace('class="dialog-title"', 'class="dialog-title" id="approval-dialog-title"')}
+      <div class="dialog-actions approval-dialog-actions">
+        <button class="dialog-cancel-btn" data-decision="deny">取消</button>
+        ${approval.sessionId ? '<button class="dialog-choice-btn approval-session-btn" data-decision="approve_session">本会话允许</button>' : ''}
+        <button class="dialog-confirm-btn" data-decision="approve_once">批准一次</button>
+      </div>
+    </div>`;
+    const finish = decision => {
+      overlay.remove();
+      resolve(decision);
+    };
+    overlay.addEventListener('click', event => {
+      const button = event.target.closest('[data-decision]');
+      if (button) finish(button.dataset.decision);
+      else if (event.target === overlay) finish('deny');
+    });
+    document.body.appendChild(overlay);
+    overlay.querySelector('[data-decision="approve_once"]').focus();
+  });
+}
+
 async function decideInlineApproval(approval) {
-  const detail = JSON.stringify(approval.payload || {}, null, 2);
-  const accepted = confirm(`敏感操作需要审批：${approval.operation}\n风险：${approval.risk}\n\n${detail}\n\n批准本次操作？`);
-  const decision = accepted ? 'approve_once' : 'deny';
+  const decision = await showApprovalDialog(approval);
   const res = await fetch(`/api/approvals/${encodeURIComponent(approval.id)}/decision`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1176,7 +1240,7 @@ async function decideInlineApproval(approval) {
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || '审批失败');
-  return accepted;
+  return decision !== 'deny';
 }
 
 async function fetchWithApproval(url, options = {}) {
@@ -2179,9 +2243,10 @@ function renderHubApprovals() {
       <div class="hub-list">
         ${pending.length ? pending.map(item => `<div class="hub-row">
           <div class="hub-row-main">
-            <div class="hub-row-title">${esc(item.operation)}</div>
-            <div class="hub-row-meta">风险 ${esc(item.risk)} · ${esc(new Date(item.requestedAt).toLocaleString())}</div>
-            <pre class="hub-inline-code">${esc(JSON.stringify(item.payload || {}, null, 2))}</pre>
+            <div class="hub-row-title">${esc(item.title || item.operation)}</div>
+            <div class="hub-row-meta">${esc(approvalRiskLabel(item.risk))} · ${esc(new Date(item.requestedAt).toLocaleString())}</div>
+            <div class="hub-approval-reason">${esc(item.reason || '此操作需要明确批准后才能继续。')}</div>
+            <div class="approval-context hub-approval-context">${approvalContextRows(item).map(([label, value]) => `<div class="approval-context-row"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('')}</div>
           </div>
           <div class="hub-row-side approval-actions">
             <button class="hub-mini-btn" data-approval-id="${esc(item.id)}" data-decision="approve_once">批准一次</button>

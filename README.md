@@ -69,6 +69,7 @@ Kimi Code CLI 0.14+ 使用 `--prompt ... --output-format stream-json`；旧配�
 ### 权限与审计
 
 - shell、skill 安装/卸载、配置写入和任务 dispatch 统一进入风险策略层。
+- 审批弹窗会说明触发原因、批准后的能力影响，以及本次任务数量、选择范围和 Agent；不再用内部操作码和原始 JSON 代替风险说明。
 - 审批支持批准一次、会话批准、拒绝和 15 分钟过期；不提供永久授权。
 - Hub 的「审批」Tab 展示待处理审批和脱敏审计记录。
 - 审计不会保存 Token、Secret、API Key、Cookie 或完整环境变量。

@@ -34,6 +34,9 @@ test('SQLite repository persists normalized session state and entities', () => {
 test('approval fingerprint rejects payload changes and audit redacts secrets', () => {
   const payload = { target: 'agents', apiKey: 'secret-one', model: 'test' };
   const approval = requestApproval({ operation: 'config.write', payload, sessionId: 'session-1' });
+  assert.equal(approval.title, '修改本地配置');
+  assert.match(approval.reason, /配置/);
+  assert.ok(approval.effects.length > 0);
   decideApproval(approval.id, 'approve_once');
 
   const mismatch = authorizeOperation({
@@ -50,6 +53,21 @@ test('approval fingerprint rejects payload changes and audit redacts secrets', (
   assert.equal(allowed.ok, true);
   assert.equal(repository.get('approvals', approval.id).status, 'consumed');
   assert.doesNotMatch(JSON.stringify(listAudit()), /secret-one|secret-two/);
+});
+
+test('agent dispatch approval explains capability and selected scope', () => {
+  const approval = requestApproval({
+    operation: 'agent.dispatch',
+    payload: { selection: 'all_pending', pendingCount: 3, requestedAgent: 'task_assignment' },
+    sessionId: 'session-1',
+  });
+  assert.equal(approval.title, '执行 pending 任务');
+  assert.match(approval.reason, /Agent CLI/);
+  assert.match(approval.reason, /读写工作区/);
+  assert.deepEqual(approval.payload, {
+    selection: 'all_pending', pendingCount: 3, requestedAgent: 'task_assignment',
+  });
+  decideApproval(approval.id, 'deny');
 });
 
 test('scheduler validates timezone, waits for approval, and prevents overlap', async () => {

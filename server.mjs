@@ -3029,17 +3029,29 @@ async function handle(req, res) {
     const agentOverride = body.agent || '';
     const dispatchSession = getSession(sessionId) || getActiveSession();
 
-    if (!requireApproval(res, {
-      operation: 'agent.dispatch',
-      payload: { runId: filterRun, taskId: filterTask, agentOnly: filterAgent, agent: agentOverride },
-      sessionId: dispatchSession?.id || sessionId,
-      approvalId: body.approvalId,
-    })) return;
-
     let pending = readTasks().filter(t => t.status === 'pending');
     if (filterRun) pending = pending.filter(t => t.run_id === filterRun);
     if (filterTask) pending = pending.filter(t => t.id === filterTask);
     if (filterAgent) pending = pending.filter(t => t.agent === filterAgent);
+
+    const selection = filterTask
+      ? `task:${filterTask}`
+      : filterRun
+        ? `run:${filterRun}`
+        : filterAgent
+          ? `agent:${filterAgent}`
+          : 'all_pending';
+
+    if (!requireApproval(res, {
+      operation: 'agent.dispatch',
+      payload: {
+        selection,
+        pendingCount: pending.length,
+        requestedAgent: agentOverride || 'task_assignment',
+      },
+      sessionId: dispatchSession?.id || sessionId,
+      approvalId: body.approvalId,
+    })) return;
 
     sseInit(res);
     sseSend(res, 'start', { count: pending.length, agentOnly: filterAgent || null });

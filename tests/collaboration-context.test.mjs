@@ -18,6 +18,7 @@ import {
   recoverStaleSubagentRuns,
   appendSubagentMessage,
   listSubagentMessages,
+  createTurnPartsCollector,
 } from '../collaboration-context.mjs';
 import { readAgentRegistry, selectRunnableAgent } from '../agent-utils.mjs';
 
@@ -109,6 +110,23 @@ test('spawn_subagent protocol parses only allowed agents', () => {
   const directives = parseSpawnSubagentDirectives(text, ['claude']);
   assert.equal(directives.length, 1);
   assert.equal(directives[0].task, 'review server');
+});
+
+test('turn parts collector preserves order and pairs tool calls with results', () => {
+  let tick = 1000;
+  const collector = createTurnPartsCollector({ now: () => tick++ });
+  collector.append({ type: 'reasoning', delta: '先检查' });
+  collector.append({ type: 'reasoning', delta: '文件。' });
+  collector.append({ type: 'tool_call', callId: 'call-1', name: 'shell', input: { command: 'npm test' } });
+  collector.append({ type: 'tool_result', callId: 'call-1', output: 'ok', summary: '通过' });
+  collector.append({ type: 'final', delta: '已经完成' });
+  collector.append({ type: 'final', delta: '。' });
+
+  assert.deepEqual(collector.parts.map(part => part.type), ['reasoning', 'tool_call', 'tool_result', 'final']);
+  assert.equal(collector.parts[0].text, '先检查文件。');
+  assert.equal(collector.parts[1].status, 'completed');
+  assert.equal(collector.parts[2].name, 'shell');
+  assert.equal(collector.finalText(), '已经完成。');
 });
 
 test('subagent lifecycle and messages persist in jsonl', () => {

@@ -383,4 +383,13 @@ P0 → P2 → P4 → P1 → P3 → P5
 - 参考 LobsterAI 的 `file://` 解析与 `shell.openPath()` 路径，新增工作区 HTML 链接和 `POST /api/workspace/open-html`；Windows 使用系统文件关联打开默认浏览器。
 - 安全边界：仅允许当前工作区内的真实 `.html/.htm` 文件，拒绝越界、符号链接越界、敏感目录、目录目标和其他扩展名。
 - 验证：`npm run check`、17 项测试、浏览器 console 均通过；页面检测到 7 个历史 HTML 路径链接；`clowder-ai` 56 项，热缓存 API 约 5ms。
-- 已知问题：390px 下旧版三栏主界面仍存在页面级横向布局问题，不由本轮三个交互改动引入，后续应单独做响应式布局收敛。
+- 390px 下旧版三栏布局已收敛为单栏聊天视图；桌面侧栏和任务窄轨在窄屏隐藏，消息与输入区保持完整宽度。
+
+### 结构化 Agent 消息时间线（2026-06-20）
+
+- `collaboration-context.mjs` 新增 `createTurnPartsCollector()`，把 CLI 流规范化为有序的 `reasoning / tool_call / tool_result / final / error` parts，并用 `callId` 配对工具开始与结果。
+- `/api/chat` 仍保留 `text` 兼容字段，同时把 `parts`、`startedAt`、`finishedAt` 写入 SQLite message payload；失败也会保存结构化 `error` part。
+- 前端实时 SSE 与历史消息共用时间线组件语义：思考可折叠、工具步骤显示状态/耗时并可展开输入输出、最终回答独立呈现。
+- Kimi 变体按 key 前缀或 CLI 路径继承基础 parser，修复 `kimi-plan` 将原始 NDJSON 显示为正文的问题。
+- 本轮不引入 Euphony 包或运行时，只借鉴“一次回复由多种消息 part 组成”的交互模型；plan/dispatch 暂保留原 SSE 兼容事件，聊天消息先成为权威实现。
+- 验证：`npm run check`、19 项测试通过；真实 `kimi-plan` 调用产生 `tool_call → tool_result → final`，刷新后从 SQLite 恢复；桌面工具详情可展开，390x844 下页面宽度保持 390px。

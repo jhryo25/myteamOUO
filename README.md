@@ -41,6 +41,8 @@ Kimi Code CLI 0.14+ 使用 `--prompt ... --output-format stream-json`；旧配�
 - 新建 Agent 变体时必须选择一个可启动的基础 Agent；CLI 路径和启动参数自动继承，模型 ID、API 地址、API Key 和角色模板可在同一表单按需覆盖。
 - 对话模式支持流式输出、thinking 面板、图片附件和历史会话。
 - thinking 在生成期间实时展开；Kimi 的文件读取、命令等工具调用会显示开始、完成和简要结果，不再长时间只显示“正在思考”。
+- 每次 Agent 回复统一保存为有序 `turn.parts`：`reasoning`、`tool_call`、`tool_result`、`final`、`error`。实时 SSE 和 SQLite 历史回放使用同一套时间线语义，刷新后仍能恢复工具输入、输出、状态和最终回答。
+- Agent 变体会继承基础 CLI 的流式 parser，避免 `kimi-plan` 等变体把原始 stream-json/NDJSON 当正文显示。
 - 拆任务模式会把目标拆成可验收的 3-7 个子任务。
 - 拆任务前后端都会选择真实可启动的 agent；所选 CLI 不可用时服务端自动回退到第一个可用 agent。
 - 执行任务后自动进入 reviewer gate，降低单模型自检盲区。
@@ -125,6 +127,7 @@ Kimi Code CLI 0.14+ 使用 `--prompt ... --output-format stream-json`；旧配�
 - 同一个 run 里已有 done 且仍有 pending 的任务，会恢复为可继续的运行提示。
 - 恢复逻辑会补齐 `startedAt`，避免计时出现 NaN。
 - 左侧“新建对话”固定在历史列表顶部，长会话列表下无需滚动到底部。
+- 720px 以下切换为单栏聊天布局，隐藏桌面侧栏与任务窄轨；390px 视口下消息和工具详情不会被压成竖排或产生页面级横向溢出。
 
 ## 架构概览
 

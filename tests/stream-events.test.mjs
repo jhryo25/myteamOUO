@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { PARSERS } from '../agent-utils.mjs';
+import { PARSERS, resolveAgentParser } from '../agent-utils.mjs';
 
 test('Kimi parser exposes tool start and completion as live activities', () => {
   const started = PARSERS.kimi(JSON.stringify({
@@ -14,6 +14,7 @@ test('Kimi parser exposes tool start and completion as live activities', () => {
   }));
   assert.deepEqual(started.activities, [{
     id: 'tool-read-1', phase: 'started', name: 'Read', summary: 'package.json',
+    input: { path: 'package.json' },
   }]);
 
   const completed = PARSERS.kimi(JSON.stringify({
@@ -23,6 +24,7 @@ test('Kimi parser exposes tool start and completion as live activities', () => {
   }));
   assert.deepEqual(completed.activities, [{
     id: 'tool-read-1', phase: 'completed', name: '', summary: '返回 32 行',
+    output: 'line one\nline two\n<system>Total lines in file: 32</system>',
   }]);
 });
 
@@ -31,4 +33,9 @@ test('Kimi parser keeps normal assistant output unchanged', () => {
   assert.equal(output.text, '完成。');
   assert.equal(output.thinking, '');
   assert.deepEqual(output.activities, []);
+});
+
+test('agent variants inherit the parser for their base CLI', () => {
+  assert.equal(resolveAgentParser('kimi-plan', { path: 'C:/tools/kimi.exe' }), PARSERS.kimi);
+  assert.equal(resolveAgentParser('reviewer', { path: 'C:/tools/claude.exe' }), PARSERS.claude);
 });

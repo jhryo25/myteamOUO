@@ -9,7 +9,7 @@ import { resolve, basename, dirname, extname, join, sep, relative } from 'path';
 import { randomUUID, createHash } from 'crypto';
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
-import { loadEnv, buildCliConfig, invokeAgent, extractJson, PARSERS, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, buildReviewPrompt, AGENT_KEYS, buildSpawnCommand, checkAgentLaunchable, formatLaunchError, readAgentRegistry, writeAgentRegistry, sanitizeAgentKey, buildRoleCard, validatePhaseTransition, getNextPhase, selectRunnableAgent } from './agent-utils.mjs';
+import { loadEnv, buildCliConfig, invokeAgent, extractJson, resolveAgentParser, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, buildReviewPrompt, AGENT_KEYS, buildSpawnCommand, checkAgentLaunchable, formatLaunchError, readAgentRegistry, writeAgentRegistry, sanitizeAgentKey, buildRoleCard, validatePhaseTransition, getNextPhase, selectRunnableAgent } from './agent-utils.mjs';
 import { getDangerLevel, openPathWithDefaultApp, resolveWorkspaceHtmlPath } from './commandSafety.mjs';
 import { repository } from './storage.mjs';
 import {
@@ -19,6 +19,7 @@ import {
   decideApproval,
   listApprovals,
   listAudit,
+  redactSensitive,
 } from './governance.mjs';
 import { ScheduleService } from './scheduler.mjs';
 import {
@@ -36,6 +37,7 @@ import {
   recoverStaleSubagentRuns,
   appendSubagentMessage,
   listSubagentMessages,
+  createTurnPartsCollector,
 } from './collaboration-context.mjs';
 
 let ENV = loadEnv();
@@ -1471,6 +1473,19 @@ function abortChildren({ sessionId = '', clientRunId = '' } = {}) {
   return count;
 }
 
+function safeTurnValue(value) {
+  if (value === undefined) return undefined;
+  const redacted = redactSensitive(value);
+  if (typeof redacted === 'string') {
+    return redacted
+      .replace(/((?:token|secret|password|api[-_]?key|authorization)\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]')
+      .slice(0, 12000);
+  }
+  const serialized = JSON.stringify(redacted);
+  if (serialized.length <= 12000) return redacted;
+  return { truncated: true, preview: serialized.slice(0, 12000) };
+}
+
 // ── 调用 agent 并实时流到 SSE ─────────────────────────────────
 // 教训1 (02-cli-engineering): readline 接管 stdout 后，child.stdout.on('data') 不再触发。
 // watchdog 必须在 rl.on('line') 和 stderr.on('data') 里刷新。
@@ -1480,6 +1495,7 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
   sessionId = '',
   clientRunId = '',
   outputSchemaPath = '',
+  turnCollector = null,
 } = {}) {
   const invocationId = randomUUID().slice(0, 8);
   const startedAt = Date.now();
@@ -1517,7 +1533,7 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
   const roleCard = buildRoleCard(agentDef);
   const fullPrompt = roleCard ? roleCard + prompt : prompt;
 
-  const parser = PARSERS[agentKey] || ((line) => `${line}\n`);
+  const parser = resolveAgentParser(agentKey, cfg);
   const args = cfg.args(fullPrompt);
   if (outputSchemaPath && agentKey === 'codex' && !args.includes('--output-schema')) {
     args.push('--output-schema', resolve(outputSchemaPath));
@@ -1614,14 +1630,37 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
         if (fullText.length === text.length) {
           sseSend(res, 'status', { agent: agentKey, phase: 'streaming', text: `${agentKey} 开始输出` });
         }
-        sseSend(res, label, { text });
-        if (label !== 'chunk') sseSend(res, 'chunk', { text });
+        if (turnCollector) {
+          const part = turnCollector.append({ type: 'final', delta: text });
+          if (part) sseSend(res, 'part', part);
+        } else {
+          sseSend(res, label, { text });
+          if (label !== 'chunk') sseSend(res, 'chunk', { text });
+        }
       }
       if (thinking) {
-        sseSend(res, 'thinking', { text: thinking });
+        if (turnCollector) {
+          const part = turnCollector.append({ type: 'reasoning', delta: thinking });
+          if (part) sseSend(res, 'part', part);
+        } else {
+          sseSend(res, 'thinking', { text: thinking });
+        }
       }
       for (const activity of activities) {
-        sseSend(res, 'activity', activity);
+        if (turnCollector) {
+          const isResult = activity.phase === 'completed' || activity.phase === 'failed';
+          const part = turnCollector.append(isResult ? {
+            type: 'tool_result', callId: activity.id, name: activity.name,
+            status: activity.phase === 'failed' ? 'error' : 'completed',
+            summary: activity.summary, output: safeTurnValue(activity.output),
+          } : {
+            type: 'tool_call', callId: activity.id, name: activity.name,
+            status: 'running', summary: activity.summary, input: safeTurnValue(activity.input),
+          });
+          if (part) sseSend(res, 'part', part);
+        } else {
+          sseSend(res, 'activity', activity);
+        }
       }
     });
 
@@ -2065,25 +2104,43 @@ async function handle(req, res) {
     sseSend(res, 'start', { agent: agentKey, sessionId: session.id });
 
     let fullReply = '';
+    const turnCollector = createTurnPartsCollector();
+    const turnStartedAt = Date.now();
     try {
       if (!agentStatus?.available) {
         throw new Error(`${agentKey} 不可用：${agentStatus?.error || '没有可启动的 agent'}`);
       }
-      fullReply = await streamAgent(agentKey, prompt, res, 'chunk', { sessionId: session.id, clientRunId });
+      fullReply = await streamAgent(agentKey, prompt, res, 'chunk', {
+        sessionId: session.id,
+        clientRunId,
+        turnCollector,
+      });
       const msgIndex = session.history.length;
       const chatArtifacts = extractArtifacts(fullReply, { sessionId: session.id, agent: agentKey, messageIndex: msgIndex });
-      session.history.push({ role: 'assistant', text: fullReply, agent: agentKey, artifacts: chatArtifacts });
+      session.history.push({
+        role: 'assistant',
+        text: fullReply,
+        agent: agentKey,
+        parts: turnCollector.parts,
+        artifacts: chatArtifacts,
+        startedAt: turnStartedAt,
+        finishedAt: Date.now(),
+      });
       if (session.history.length > 40) session.history.splice(0, session.history.length - 40);
       refreshSessionContinuity(session, 'post_run');
       saveSessions();
       sseSend(res, 'done', { agent: agentKey, sessionId: session.id });
     } catch (err) {
       // 不再 pop 用户消息，保留失败现场让用户刷新后能看到
+      turnCollector.append({ type: 'error', message: err.message, status: 'error' });
       session.history.push({
-        role: 'system',
-        text: `调用 ${agentKey} 失败：${err.message}`,
+        role: 'assistant',
+        text: turnCollector.finalText(),
         agent: agentKey,
         kind: 'chat-error',
+        parts: turnCollector.parts,
+        startedAt: turnStartedAt,
+        finishedAt: Date.now(),
       });
       refreshSessionContinuity(session, 'tool_result');
       saveSessions();

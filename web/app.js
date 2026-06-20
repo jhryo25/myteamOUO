@@ -401,7 +401,7 @@ function startAgentBubble(agentKey, sessionId = currentSessionId) {
   row.dataset.sessionId = sessionId || '';
   row.innerHTML = `
     ${renderAgentAvatar(agentKey)}
-    <div class="bubble-content-wrap">
+    <div class="bubble-content-wrap agent-turn">
       <div class="bubble-name">${esc(displayName)} <span class="bubble-time" id="${timeUid}"></span></div>
       <div class="thinking-panel hidden" id="${thinkUid}">
         <button class="thinking-toggle" type="button" aria-expanded="false">
@@ -414,6 +414,7 @@ function startAgentBubble(agentKey, sessionId = currentSessionId) {
         <div class="thinking-body hidden" id="body-${uid}"></div>
       </div>
       <div class="agent-activity-feed hidden" aria-live="polite"></div>
+      <div class="turn-final-label hidden">最终输出</div>
       <div class="bubble agent-bubble typing-cursor" id="${uid}">
         <div class="agent-waiting" aria-label="正在启动 ${esc(displayName)}">
           <span class="agent-waiting-dots" aria-hidden="true"><i></i><i></i><i></i></span>
@@ -501,6 +502,7 @@ function _flushTyper(bubble) {
 function appendTyping(text) {
   if (!agentTypingBubble || !text) return;
   agentTypingBubble.classList.remove('hidden');
+  agentTypingBubble.closest('.agent-turn')?.querySelector('.turn-final-label')?.classList.remove('hidden');
   let st = typerStates.get(agentTypingBubble);
   if (!st) {
     st = { pending: '', displayed: '', rafId: null };
@@ -633,6 +635,47 @@ function finishTyping(stats = null) {
   }
   agentTypingBubble = null;
   return Boolean(raw.trim());
+}
+
+function appendTurnPart(part = {}) {
+  if (part.type === 'reasoning') {
+    appendThinking(part.delta || part.text || '');
+    bumpRunningChars('thinking', (part.delta || part.text || '').length);
+    return;
+  }
+  if (part.type === 'final') {
+    appendTyping(part.delta || part.text || '');
+    bumpRunningChars('chunk', (part.delta || part.text || '').length);
+    return;
+  }
+  if (part.type === 'tool_call') {
+    appendAgentActivity({
+      id: part.callId || part.id,
+      phase: 'started',
+      name: part.name,
+      summary: part.summary,
+      input: part.input,
+    });
+    return;
+  }
+  if (part.type === 'tool_result') {
+    appendAgentActivity({
+      id: part.callId || part.id,
+      phase: part.status === 'error' ? 'failed' : 'completed',
+      name: part.name,
+      summary: part.summary,
+      output: part.output,
+      durationMs: part.durationMs,
+    });
+    return;
+  }
+  if (part.type === 'error' && agentTypingBubble) {
+    const wrap = agentTypingBubble.closest('.agent-turn');
+    const error = document.createElement('div');
+    error.className = 'turn-error';
+    error.textContent = part.message || 'Agent 执行失败';
+    wrap?.insertBefore(error, wrap.querySelector('.bubble-actions'));
+  }
 }
 
 function scrollChat() {
@@ -1272,22 +1315,40 @@ function appendAgentActivity(activity = {}) {
   const id = String(activity.id || `activity-${Date.now()}`);
   let row = [...feed.querySelectorAll('.agent-activity-row')].find(item => item.dataset.activityId === id);
   if (!row) {
-    row = document.createElement('div');
+    row = document.createElement('details');
     row.className = 'agent-activity-row running';
     row.dataset.activityId = id;
-    row.innerHTML = '<span class="agent-activity-dot"></span><div class="agent-activity-copy"><strong></strong><span></span></div>';
+    row.innerHTML = '<summary><span class="agent-activity-dot"></span><div class="agent-activity-copy"><strong></strong><span></span></div><span class="agent-activity-chevron">›</span></summary><div class="agent-activity-detail"></div>';
     feed.appendChild(row);
   }
 
   if (activity.name) row.dataset.activityName = activity.name;
+  if (activity.input !== undefined) row._activityInput = activity.input;
+  if (activity.output !== undefined) row._activityOutput = activity.output;
   const name = row.dataset.activityName || '工具';
-  const completed = activity.phase === 'completed';
+  const completed = activity.phase === 'completed' || activity.phase === 'failed';
   row.classList.toggle('running', !completed);
   row.classList.toggle('completed', completed);
-  row.querySelector('strong').textContent = completed ? `${name} 已完成` : `正在调用 ${name}`;
+  row.classList.toggle('failed', activity.phase === 'failed');
+  row.querySelector('strong').textContent = activity.phase === 'failed'
+    ? `${name} 执行失败`
+    : completed ? `${name} 已完成` : `正在调用 ${name}`;
   const detail = row.querySelector('.agent-activity-copy span');
-  detail.textContent = activity.summary || (completed ? '已返回结果' : '等待工具返回');
+  const duration = activity.durationMs ? ` · ${(activity.durationMs / 1000).toFixed(1)}s` : '';
+  detail.textContent = `${activity.summary || (completed ? '已返回结果' : '等待工具返回')}${duration}`;
+  const detailEl = row.querySelector('.agent-activity-detail');
+  const blocks = [];
+  if (row._activityInput !== undefined) blocks.push(`<div><span>输入</span><pre>${esc(formatTurnValue(row._activityInput))}</pre></div>`);
+  if (row._activityOutput !== undefined) blocks.push(`<div><span>输出</span><pre>${esc(formatTurnValue(row._activityOutput))}</pre></div>`);
+  detailEl.innerHTML = blocks.join('');
+  row.classList.toggle('has-detail', blocks.length > 0);
   scrollChat();
+}
+
+function formatTurnValue(value) {
+  if (value === undefined || value === null) return '';
+  if (typeof value === 'string') return value;
+  try { return JSON.stringify(value, null, 2); } catch { return String(value); }
 }
 
 function approvalRiskLabel(risk) {
@@ -1800,6 +1861,7 @@ async function doChat(message, sessionId = currentSessionId) {
       bubble = startAgentBubble(agent, sessionId);
       showRunningPanel({ agent, mode: '对话' });
     },
+    part: appendTurnPart,
     chunk: ({ text }) => { appendTyping(text); bumpRunningChars('chunk', (text || '').length); },
     thinking: ({ text }) => { appendThinking(text); bumpRunningChars('thinking', (text || '').length); },
     activity: appendAgentActivity,
@@ -3951,16 +4013,53 @@ async function loadHistoryLegacy() {
 }
 
 // ── 初始化 ────────────────────────────────────────────────────
+function renderTurnParts(parts, fallbackText = '') {
+  if (!Array.isArray(parts) || !parts.length) {
+    return `<div class="turn-final"><div class="bubble agent-bubble">${renderRichText(fallbackText)}</div></div>`;
+  }
+  const toolResults = new Map(parts.filter(part => part.type === 'tool_result').map(part => [part.callId, part]));
+  return `<div class="turn-timeline">${parts.map(part => {
+    if (part.type === 'reasoning') {
+      const text = String(part.text || '');
+      const preview = text.split(/\n+/).filter(Boolean).at(-1) || '';
+      return `<details class="turn-part turn-reasoning">
+        <summary><span class="turn-part-dot"></span><strong>思考过程</strong><span>${text.length} 字</span><em>${esc(preview.slice(0, 80))}</em></summary>
+        <div class="turn-reasoning-body">${esc(text)}</div>
+      </details>`;
+    }
+    if (part.type === 'tool_call') {
+      const result = toolResults.get(part.callId);
+      const failed = result?.status === 'error' || part.status === 'error';
+      const status = failed ? '失败' : result ? '已完成' : '未完成';
+      const blocks = [];
+      if (part.input !== undefined) blocks.push(`<div><span>输入</span><pre>${esc(formatTurnValue(part.input))}</pre></div>`);
+      if (result?.output !== undefined) blocks.push(`<div><span>输出</span><pre>${esc(formatTurnValue(result.output))}</pre></div>`);
+      const duration = result?.durationMs ? ` · ${(result.durationMs / 1000).toFixed(1)}s` : '';
+      return `<details class="turn-part turn-tool ${failed ? 'failed' : 'completed'}" ${blocks.length ? '' : 'data-empty="true"'}>
+        <summary><span class="turn-part-dot"></span><strong>${esc(part.name || result?.name || '工具')} ${status}</strong><span>${esc(result?.summary || part.summary || '')}${duration}</span><i>›</i></summary>
+        <div class="agent-activity-detail">${blocks.join('')}</div>
+      </details>`;
+    }
+    if (part.type === 'tool_result' && parts.some(item => item.type === 'tool_call' && item.callId === part.callId)) return '';
+    if (part.type === 'final') {
+      return `<section class="turn-final"><div class="turn-final-label">最终输出</div><div class="bubble agent-bubble">${renderRichText(part.text || '')}</div></section>`;
+    }
+    if (part.type === 'error') return `<div class="turn-error">${esc(part.message || 'Agent 执行失败')}</div>`;
+    return '';
+  }).join('')}</div>`;
+}
+
 function renderAssistantHistoryBubble(h) {
   const meta = agentMeta(h.agent);
   const displayName = meta.nickname || meta.label;
   const row = document.createElement('div');
   row.className = 'bubble-row';
+  const timestamp = h.finishedAt || h.startedAt;
   row.innerHTML = `
     ${renderAgentAvatar(h.agent)}
-    <div class="bubble-content-wrap">
-      <div class="bubble-name">${esc(displayName)}</div>
-      <div class="bubble agent-bubble">${renderRichText(h.text)}</div>
+    <div class="bubble-content-wrap agent-turn">
+      <div class="bubble-name">${esc(displayName)}${timestamp ? ` <span class="bubble-time">${formatTime(timestamp)}</span>` : ''}</div>
+      ${renderTurnParts(h.parts, h.text)}
       <div class="bubble-actions">
         <button class="bubble-action-btn" data-action="copy" title="复制">⧉</button>
       </div>
@@ -4085,7 +4184,7 @@ async function loadHistory({ older = false } = {}) {
 }
 
 (async function init() {
-  loadStatus();
+  await loadStatus();
   loadTasks();
   await loadSessions();
   await loadHistory();
@@ -4130,6 +4229,7 @@ async function reconnectSessionStream(sessionId, agentKey, taskTitle) {
         if (event === 'nostream') { break; }
         if (event === 'start') { ensureBubble(parsed.agent || agentKey); continue; }
         if (event === 'status') { ensureBubble(parsed.agent || agentKey); updateAgentStatus(parsed.text, parsed.phase); continue; }
+        if (event === 'part') { ensureBubble(parsed.agent || agentKey); appendTurnPart(parsed); continue; }
         if (event === 'chunk' && parsed.text) { ensureBubble(parsed.agent || agentKey); appendTyping(parsed.text); bumpRunningChars('chunk', (parsed.text||'').length); continue; }
         if (event === 'thinking' && parsed.text) { appendThinking(parsed.text); bumpRunningChars('thinking', (parsed.text||'').length); continue; }
         if (event === 'activity') { appendAgentActivity(parsed); continue; }

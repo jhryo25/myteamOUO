@@ -11,7 +11,7 @@
 | 调度 | Cron 任务关联 Cowork session 和运行历史 | P8 支持五段 Cron、时区、审批暂停、互斥和运行历史 |
 | 子代理 | 状态机、消息缓存和数据库持久化 | P1/P5 使用结构化 spawn 协议和 SQLite run/message 生命周期 |
 | 上下文 | continuity、memory 与工作区状态恢复 | P2-P4 使用 Capsule、Top-K Evidence 和 Workspace Bridge |
-| 流式交互 | thinking 消息流式期间默认展开，tool use/result 独立成组，只有无可渲染内容时显示等待指示器 | myteam 将 Kimi NDJSON 规范化为 thinking / activity / chunk 三类 SSE；展示工具开始、完成和摘要 |
+| 流式交互 | thinking 消息流式期间默认展开，tool use/result 独立成组，只有无可渲染内容时显示等待指示器 | myteam 将 CLI 流规范化为 `turn.parts`，按 reasoning、tool call/result、final、error 构建实时与历史共用的时间线 |
 
 ## 简化采用
 
@@ -22,7 +22,7 @@
 | 产物预览 | 采用 LobsterAI 的本地路径识别与系统默认应用打开思路；myteam 只实现工作区 HTML，并在 HTTP 服务端增加 realpath 边界校验 |
 | Memory | 保留显式 lessons/memory 和 Continuity Capsule，不引入后台推断式记忆写入 |
 | Scheduler | 采用进程内 timer + SQLite 恢复，不引入 OpenClaw gateway；错过触发默认 skipped |
-| 流式运行时 | 采用 LobsterAI 的消息分层和可见状态设计，不引入 OpenClaw event runtime；继续由本地 CLI parser 转换为 SSE |
+| 流式运行时 | 采用 LobsterAI/Euphony 的消息分层和可见状态设计，不引入 OpenClaw event runtime 或 Euphony 依赖；继续由本地 CLI parser 转换为统一 parts 和 SSE |
 
 ## 暂不采用
 

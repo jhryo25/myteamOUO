@@ -355,6 +355,7 @@ function parseKimi(line) {
               phase: 'started',
               name: String(fn.name || call?.name || '工具'),
               summary: summarizeToolInput(input),
+              input,
             };
           })
         : [];
@@ -370,6 +371,7 @@ function parseKimi(line) {
           phase: 'completed',
           name: '',
           summary: summarizeToolResult(e.content),
+          output: e.content,
         }],
       };
     }
@@ -403,6 +405,16 @@ function parseText(line) {
 }
 
 export const PARSERS = { codex: parseCodex, claude: parseClaude, kimi: parseKimi };
+
+export function resolveAgentParser(agentKey, cfg = {}) {
+  if (PARSERS[agentKey]) return PARSERS[agentKey];
+  const key = String(agentKey || '').toLowerCase();
+  const path = String(cfg.path || '').toLowerCase();
+  for (const [base, parser] of Object.entries(PARSERS)) {
+    if (key.startsWith(`${base}-`) || key.startsWith(`${base}_`) || path.includes(base)) return parser;
+  }
+  return parseText;
+}
 
 export function buildSpawnCommand(cfg, args) {
   const isCmd = cfg.path.toLowerCase().endsWith('.cmd');
@@ -504,7 +516,7 @@ export function invokeAgent(CLI_CONFIG, agentKey, prompt, {
   const cfg = CLI_CONFIG[agentKey];
   if (!cfg?.path) throw new Error(`${agentKey} 路径未在 .env 中配置（${agentKey.toUpperCase()}_PATH）`);
 
-  const parser = PARSERS[agentKey] || parseText;
+  const parser = resolveAgentParser(agentKey, cfg);
 
   const args = cfg.args(prompt);
   if (outputSchemaPath && agentKey === 'codex' && !args.includes('--output-schema')) {

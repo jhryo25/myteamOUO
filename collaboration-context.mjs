@@ -408,3 +408,78 @@ export function listSubagentMessages(runId, file = '.myteam/subagent-messages.js
   return rows
     .sort((left, right) => left.timestamp - right.timestamp);
 }
+
+export function createTurnPartsCollector({ now = () => Date.now() } = {}) {
+  const parts = [];
+  let sequence = 0;
+
+  const append = (event = {}) => {
+    const type = String(event.type || '');
+    if (!type) return null;
+    const timestamp = event.createdAt || now();
+
+    if (type === 'reasoning' || type === 'final') {
+      const delta = String(event.delta ?? event.text ?? '');
+      if (!delta) return null;
+      const previous = parts.at(-1);
+      if (previous?.type === type) {
+        previous.text += delta;
+        previous.updatedAt = timestamp;
+      } else {
+        parts.push({ id: `part-${++sequence}`, type, text: delta, createdAt: timestamp, updatedAt: timestamp });
+      }
+      return { type, delta, createdAt: timestamp };
+    }
+
+    if (type === 'tool_call') {
+      const callId = String(event.callId || event.id || `call-${++sequence}`);
+      let part = parts.find(item => item.type === 'tool_call' && item.callId === callId);
+      if (!part) {
+        part = { id: `part-${++sequence}`, type, callId, createdAt: timestamp };
+        parts.push(part);
+      }
+      Object.assign(part, {
+        name: event.name || part.name || '工具',
+        status: event.status || 'running',
+        summary: event.summary || part.summary || '',
+        input: event.input ?? part.input,
+        updatedAt: timestamp,
+      });
+      return { ...part };
+    }
+
+    if (type === 'tool_result') {
+      const callId = String(event.callId || event.id || `call-${++sequence}`);
+      const call = parts.find(item => item.type === 'tool_call' && item.callId === callId);
+      if (call) {
+        call.status = event.status === 'error' ? 'error' : 'completed';
+        call.updatedAt = timestamp;
+        call.durationMs = Math.max(0, timestamp - call.createdAt);
+        if (!call.name && event.name) call.name = event.name;
+      }
+      const result = {
+        id: `part-${++sequence}`,
+        type,
+        callId,
+        name: event.name || call?.name || '工具',
+        status: event.status || 'completed',
+        summary: event.summary || '',
+        output: event.output,
+        durationMs: call ? Math.max(0, timestamp - call.createdAt) : undefined,
+        createdAt: timestamp,
+      };
+      parts.push(result);
+      return { ...result };
+    }
+
+    const part = { id: `part-${++sequence}`, ...event, type, createdAt: timestamp };
+    parts.push(part);
+    return { ...part };
+  };
+
+  return {
+    parts,
+    append,
+    finalText: () => parts.filter(part => part.type === 'final').map(part => part.text || '').join(''),
+  };
+}

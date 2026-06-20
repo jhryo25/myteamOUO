@@ -51,12 +51,23 @@ test('SQLite repository persists normalized session state and entities', () => {
 
   repository.saveSessionState({
     activeId: 'session-1',
-    sessions: [{ id: 'session-1', name: 'Test', history: [{ role: 'user', text: 'hello' }] }],
+    sessions: [{ id: 'session-1', name: 'Test', history: [
+      { role: 'user', text: 'hello' },
+      { role: 'assistant', text: 'done', parts: [
+        { id: 'part-1', type: 'reasoning', text: 'checking' },
+        { id: 'part-2', type: 'tool_call', callId: 'call-1', name: 'shell', status: 'completed' },
+        { id: 'part-3', type: 'tool_result', callId: 'call-1', output: 'ok' },
+        { id: 'part-4', type: 'final', text: 'done' },
+      ] },
+    ] }],
     trashedSessions: [],
   });
   const state = repository.loadSessionState();
   assert.equal(state.activeId, 'session-1');
   assert.equal(state.sessions[0].history[0].text, 'hello');
+  assert.deepEqual(state.sessions[0].history[1].parts.map(part => part.type), [
+    'reasoning', 'tool_call', 'tool_result', 'final',
+  ]);
 });
 
 test('approval fingerprint rejects payload changes and audit redacts secrets', () => {

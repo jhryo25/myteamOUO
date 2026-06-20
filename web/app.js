@@ -688,6 +688,38 @@ function scrollChat() {
 }
 
 // ── 结构化气泡：plan 任务列表 ─────────────────────────────────
+function renderPlanTaskDetail(task) {
+  const steps = Array.isArray(task.steps) ? task.steps : [];
+  const questions = Array.isArray(task.open_questions) ? task.open_questions : [];
+  const sections = [];
+  if (steps.length) sections.push(`<div class="plan-detail-section"><span>实施步骤</span><ol>${steps.map(step => `<li>${esc(step)}</li>`).join('')}</ol></div>`);
+  if (task.tradeoff) sections.push(`<div class="plan-detail-section"><span>取舍</span><p>${esc(task.tradeoff)}</p></div>`);
+  if (questions.length) sections.push(`<div class="plan-detail-section"><span>待确认</span><ul>${questions.map(question => `<li>${esc(question)}</li>`).join('')}</ul></div>`);
+  if (task.accept) sections.push(`<div class="plan-detail-section plan-detail-accept"><span>验收标准</span><p>${esc(task.accept)}</p></div>`);
+  return sections.join('');
+}
+
+function renderPlanTaskRow(task, index, agentControl, { open = false } = {}) {
+  const steps = Array.isArray(task.steps) ? task.steps : [];
+  const questions = Array.isArray(task.open_questions) ? task.open_questions : [];
+  return `<details class="plan-task-row" data-task-id="${esc(task.id || '')}" data-agent="${esc(task.agent || '')}" ${open ? 'open' : ''}>
+    <summary class="plan-task-summary">
+      <span class="plan-task-num">${index + 1}</span>
+      <div class="plan-task-body">
+        <div class="plan-task-name">${esc(task.title)}</div>
+        <div class="plan-task-meta">
+          ${agentControl}
+          ${steps.length ? `<span>${steps.length} 步</span>` : ''}
+          ${questions.length ? `<span>${questions.length} 项待确认</span>` : ''}
+        </div>
+        ${task.why ? `<div class="plan-task-why">${esc(task.why)}</div>` : ''}
+      </div>
+      <span class="plan-task-chevron" aria-hidden="true">›</span>
+    </summary>
+    <div class="plan-task-details">${renderPlanTaskDetail(task)}</div>
+  </details>`;
+}
+
 function addPlanCard(goal, tasks) {
   hideWelcome();
   // 可用 agent 列表（用于下拉）
@@ -698,7 +730,6 @@ function addPlanCard(goal, tasks) {
   ).join('');
 
   const rows = tasks.map((t, i) => {
-    const steps = (t.steps || []).length;
     // agent 下拉：默认选中 plan 推荐的 agent，若不可用则保留显示但标记
     const selectedAgent = t.agent || '';
     const isAvailable = availableAgents.some(a => a.key === selectedAgent);
@@ -707,17 +738,7 @@ function addPlanCard(goal, tasks) {
       ${!isAvailable && selectedAgent ? `<option value="${esc(selectedAgent)}" disabled>${esc(selectedAgent)}（不可用）</option>` : ''}
     </select>`;
     // 设置 selected 需要在 DOM 后操作，先用 data 属性传递
-    return `<div class="plan-task-row" data-task-id="${esc(t.id)}" data-agent="${esc(selectedAgent)}">
-      <span class="plan-task-num">${i + 1}</span>
-      <div class="plan-task-body">
-        <div class="plan-task-name">${esc(t.title)}</div>
-        <div class="plan-task-meta">
-          ${selectHtml}
-          ${steps ? `<span>${steps} 步</span>` : ''}
-        </div>
-        ${t.accept ? `<div class="plan-task-accept">✓ ${esc(t.accept)}</div>` : ''}
-      </div>
-    </div>`;
+    return renderPlanTaskRow(t, i, selectHtml, { open: i === 0 });
   }).join('');
 
   // 统计各 agent 的 pending 任务数，只生成可用 agent 的建议按钮
@@ -737,7 +758,10 @@ function addPlanCard(goal, tasks) {
   row.innerHTML = `
     <div class="avatar system-av">📋</div>
     <div class="plan-card">
-      <div class="plan-card-title">🎯 ${esc(goal)}</div>
+      <div class="plan-card-header">
+        <div><span class="plan-card-kicker">执行计划</span><div class="plan-card-title">${esc(goal)}</div></div>
+        <span class="plan-card-count">${tasks.length} 个任务</span>
+      </div>
       ${rows}
       <div class="plan-suggest-row">
         <span class="plan-suggest-label">建议执行方式：</span>
@@ -754,6 +778,7 @@ function addPlanCard(goal, tasks) {
 
   // 下拉修改 agent → PATCH 到后端
   row.querySelectorAll('.plan-task-agent-select').forEach(sel => {
+    sel.onclick = event => event.stopPropagation();
     sel.onchange = async () => {
       const taskId = sel.dataset.taskId;
       const newAgent = sel.value;
@@ -1349,6 +1374,32 @@ function appendAgentActivity(activity = {}) {
   scrollChat();
 }
 
+function updatePlanProgress(text = '正在组织任务结构…') {
+  if (!agentTypingBubble) return;
+  agentTypingBubble.classList.remove('hidden');
+  agentTypingBubble.classList.add('plan-progress-bubble');
+  agentTypingBubble.innerHTML = `<div class="plan-progress"><span class="spinner"></span><span>${esc(text)}</span></div>`;
+}
+
+function finishPlanProgress(taskCount = 0, failed = false) {
+  if (!agentTypingBubble) return;
+  const bubble = agentTypingBubble;
+  const st = typerStates.get(bubble);
+  if (st?.rafId) clearTimeout(st.rafId);
+  typerStates.delete(bubble);
+  bubble.dataset.raw = '';
+  bubble.classList.remove('typing-cursor', 'hidden');
+  bubble.classList.add('plan-progress-bubble');
+  bubble.innerHTML = failed
+    ? '<div class="plan-progress failed"><span>计划生成未完成</span></div>'
+    : `<div class="plan-progress completed"><span>计划已生成</span><strong>${taskCount} 个任务</strong></div>`;
+  const wrap = bubble.closest('.agent-turn');
+  wrap?.querySelector('.turn-final-label')?.classList.add('hidden');
+  wrap?.querySelector('.bubble-actions')?.classList.add('hidden');
+  const timeEl = wrap?.querySelector('[id^="time-"]');
+  if (timeEl) timeEl.textContent = formatTime();
+}
+
 function formatTurnValue(value) {
   if (value === undefined || value === null) return '';
   if (typeof value === 'string') return value;
@@ -1913,7 +1964,6 @@ async function doPlan(goal) {
 
   const agentAttachments = attachments.map(({ previewUrl, ...a }) => a);
   addUserBubble(`📋 ${goal}`, { attachments });
-  addSystemMsg(`正在让 ${agent} 拆解任务…`);
   setActiveAgent(agent);
   startAgentBubble(agent, currentSessionId);
   showRunningPanel({ agent, mode: '拆任务' });
@@ -1921,17 +1971,16 @@ async function doPlan(goal) {
   await ssePost('/api/plan', { goal, agent, sessionId: currentSessionId, attachments: agentAttachments, mode: 'plan' }, {
     start: ({ agent }) => setActiveAgent(agent),
     status: ({ text, phase }) => updateAgentStatus(text, phase),
-    chunk: ({ text }) => { appendTyping(text); bumpRunningChars('chunk', (text || '').length); },
+    chunk: ({ text }) => { updatePlanProgress(); bumpRunningChars('chunk', (text || '').length); },
     thinking: ({ text }) => { appendThinking(text); bumpRunningChars('thinking', (text || '').length); },
     activity: appendAgentActivity,
     error: ({ message, raw }) => {
-      finishTyping();
+      finishPlanProgress(0, true);
       hideRunningPanel();
       addPlanRecoveryPrompt(goal, agent, message, raw, attachments, agentAttachments);
     },
     done: ({ runId, written, tasks }) => {
-      const stats = collectFinishStats();
-      finishTyping(stats);
+      finishPlanProgress(tasks?.length || written || 0);
       hideRunningPanel();
       if (tasks && tasks.length) {
         addPlanCard(goal, tasks);
@@ -1940,7 +1989,7 @@ async function doPlan(goal) {
       }
     },
     aborted: () => {
-      finishTyping();
+      finishPlanProgress(0, true);
       hideRunningPanel();
       addSystemMsg('⏹ 已中断');
     },
@@ -4092,22 +4141,19 @@ function renderHistoryEntry(h, prepend = false) {
     hideWelcome();
     const row = document.createElement('div');
     row.className = 'bubble-row';
-    const taskRows = h.tasks.map((t, i) => `
-      <div class="plan-task-row">
-        <span class="plan-task-num">${i + 1}</span>
-        <div class="plan-task-body">
-          <div class="plan-task-name">${esc(t.title)}</div>
-          <div class="plan-task-meta">
-            <span class="plan-task-agent">${esc(t.agent || '')}</span>
-            ${(t.steps || []).length ? `<span>${t.steps.length} 步</span>` : ''}
-          </div>
-          ${t.accept ? `<div class="plan-task-accept">✓ ${esc(t.accept)}</div>` : ''}
-        </div>
-      </div>`).join('');
+    const taskRows = h.tasks.map((t, i) => renderPlanTaskRow(
+      t,
+      i,
+      `<span class="plan-task-agent">${esc(t.agent || '')}</span>`,
+      { open: i === 0 },
+    )).join('');
     row.innerHTML = `
       <div class="avatar system-av">📋</div>
       <div class="plan-card">
-        <div class="plan-card-title">🎯 ${esc(h.goal || '')} <span style="font-size:11px;color:var(--muted);font-weight:normal;">（历史 run ${esc(h.runId || '')}）</span></div>
+        <div class="plan-card-header">
+          <div><span class="plan-card-kicker">历史计划 · ${esc(h.runId || '')}</span><div class="plan-card-title">${esc(h.goal || '')}</div></div>
+          <span class="plan-card-count">${h.tasks.length} 个任务</span>
+        </div>
         ${taskRows}
       </div>`;
     if (prepend) {

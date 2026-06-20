@@ -44,6 +44,7 @@ Kimi Code CLI 0.14+ 使用 `--prompt ... --output-format stream-json`；旧配�
 - 每次 Agent 回复统一保存为有序 `turn.parts`：`reasoning`、`tool_call`、`tool_result`、`final`、`error`。实时 SSE 和 SQLite 历史回放使用同一套时间线语义，刷新后仍能恢复工具输入、输出、状态和最终回答。
 - Agent 变体会继承基础 CLI 的流式 parser，避免 `kimi-plan` 等变体把原始 stream-json/NDJSON 当正文显示。
 - 拆任务模式会把目标拆成可验收的 3-7 个子任务。
+- 计划生成期间只展示阶段进度，不显示机器 JSON；完成后以可展开任务时间线呈现负责人、原因、步骤、取舍、待确认项和验收标准。
 - 拆任务前后端都会选择真实可启动的 agent；所选 CLI 不可用时服务端自动回退到第一个可用 agent。
 - 执行任务后自动进入 reviewer gate，降低单模型自检盲区。
 - dispatch 已有完整流式正文时不重复追加结果卡；连接中断会提示刷新恢复，而不是直接判定 Agent 失败。

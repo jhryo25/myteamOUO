@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { PARSERS, resolveAgentParser } from '../agent-utils.mjs';
 
@@ -38,4 +39,13 @@ test('Kimi parser keeps normal assistant output unchanged', () => {
 test('agent variants inherit the parser for their base CLI', () => {
   assert.equal(resolveAgentParser('kimi-plan', { path: 'C:/tools/kimi.exe' }), PARSERS.kimi);
   assert.equal(resolveAgentParser('reviewer', { path: 'C:/tools/claude.exe' }), PARSERS.claude);
+});
+
+test('plan UI keeps structured JSON out of the assistant text bubble', () => {
+  const source = readFileSync(new URL('../web/app.js', import.meta.url), 'utf8');
+  const planFlow = source.match(/async function doPlan\([\s\S]*?\/\/ ── dispatch/);
+  assert.ok(planFlow, 'doPlan flow should exist');
+  assert.match(planFlow[0], /chunk: \(\{ text \}\) => \{ updatePlanProgress\(\)/);
+  assert.doesNotMatch(planFlow[0], /chunk: \(\{ text \}\) => \{ appendTyping\(/);
+  assert.match(source, /function renderPlanTaskDetail\(/);
 });

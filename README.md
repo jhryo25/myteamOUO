@@ -251,6 +251,13 @@ myteamOUO/
 
 详细取舍见 `docs/lobsterai-comparison.md`，实施 lessons 见 `docs/lessons-p6-p8.md`。
 
+## Skills 与 HTML 产物交互（2026-06-20）
+
+- Skills 市场使用页面级预取、请求去重和服务端 5 分钟缓存；`clowder-ai` 首次网络请求在后台完成，切换和重复打开不再反复下载 manifest。
+- 顶部不再提供手工 Shell 按钮。Agent 仍可通过 `shell-exec` Skill 和服务端 Shell API 执行命令，并继续经过审批与审计。
+- Agent 回复中的工作区 HTML 路径（Markdown 链接、行内代码、`file://`、Windows 绝对路径或常见输出目录相对路径）会渲染为可点击链接。
+- 点击 HTML 链接后，服务端先解析真实路径并校验其位于当前工作区、不是敏感目录且扩展名为 `.html/.htm`，再交给系统默认浏览器打开。
+
 ## 前轮修复重点（2026-06-17）
 
 - 补齐 `skills-registry/shell-exec/SKILL.md`，修复官方市场中存在坏条目的问题。

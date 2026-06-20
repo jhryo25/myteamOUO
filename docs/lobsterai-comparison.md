@@ -19,7 +19,7 @@
 |---|---|
 | 桌面权限模型 | myteam 是本地 HTTP 应用，不复制 Electron IPC；只在 REST/SSE 边界执行策略和审计 |
 | Skills | 保留文件系统 Skill 和轻量 registry，不引入完整 Expert Kit/市场服务；安装和卸载必须审批 |
-| 产物预览 | 继续使用浏览器原生 HTML/Markdown/JSON 预览，不复制 LobsterAI 大型多格式渲染器 |
+| 产物预览 | 采用 LobsterAI 的本地路径识别与系统默认应用打开思路；myteam 只实现工作区 HTML，并在 HTTP 服务端增加 realpath 边界校验 |
 | Memory | 保留显式 lessons/memory 和 Continuity Capsule，不引入后台推断式记忆写入 |
 | Scheduler | 采用进程内 timer + SQLite 恢复，不引入 OpenClaw gateway；错过触发默认 skipped |
 | 流式运行时 | 采用 LobsterAI 的消息分层和可见状态设计，不引入 OpenClaw event runtime；继续由本地 CLI parser 转换为 SSE |
@@ -38,3 +38,10 @@
 1. 将 agent CLI 内部工具调用接入可选的原生 permission adapter，缩小 P6 的控制边界。
 2. 给 migration 增加导出/恢复 CLI，提供运维级灾难恢复路径。
 3. 为 scheduler 增加通知渠道，但必须复用审批与审计，不另开绕过路径。
+
+## 交互补充（2026-06-20）
+
+- LobsterAI 在系统提示中要求 Agent 用 `[名称](file:///absolute/path)` 输出文件，并由 renderer 识别 `file://`，主进程调用 Electron `shell.openPath()`。
+- myteam 不引入 Electron IPC，改为把 HTML 路径渲染成按钮，点击后请求本地 Node 服务；服务端验证工作区边界后调用系统文件关联。
+- LobsterAI 的能力入口由 Agent/工具协议承载。myteam 因此移除顶部手工 Shell 输入入口，但保留 Agent 的 `shell-exec` Skill、审批和审计。
+- Skills 市场属于远端清单读取，不需要复制完整市场服务；共享前端缓存、后台预取和服务端 TTL 已能消除重复等待。

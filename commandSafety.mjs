@@ -1,6 +1,11 @@
 ﻿// commandSafety - danger-level classification for shell commands
 // Adapted from LobsterAI (commandSafety.ts), enhanced for Windows + cross-platform
 
+import { existsSync, realpathSync, statSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { extname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 const DELETE_PATTERNS = [
   /\brm\b/i, /\brmdir\b/i, /\bunlink\b/i, /\bdel\b/i,
   /\berase\b/i, /\bremove-item\b/i, /\btrash\b/i,
@@ -46,4 +51,40 @@ export function isDeleteCommand(command) {
 
 export function isDangerousCommand(command) {
   return getDangerLevel(command).level !== DANGER_LEVEL.SAFE;
+}
+
+function normalizeLocalFileInput(input) {
+  const value = String(input || '').trim();
+  if (!value) throw new Error('缺少文件路径');
+  if (value.toLowerCase().startsWith('file://')) {
+    try { return fileURLToPath(value); }
+    catch { throw new Error('无效的 file:// 路径'); }
+  }
+  return value;
+}
+
+export function resolveWorkspaceHtmlPath(workspace, input, denylist = []) {
+  const root = realpathSync(resolve(workspace || '.'));
+  const normalized = normalizeLocalFileInput(input);
+  const candidate = isAbsolute(normalized) ? resolve(normalized) : resolve(root, normalized.replace(/^[/\\]+/, ''));
+  if (!existsSync(candidate)) throw new Error('HTML 文件不存在');
+  const real = realpathSync(candidate);
+  const rel = relative(root, real);
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error('HTML 文件不在当前工作区内');
+  const segments = rel.toLowerCase().split(/[\\/]+/);
+  if (denylist.some(item => segments.includes(String(item).toLowerCase()))) throw new Error('HTML 文件位于禁止访问的目录');
+  if (!statSync(real).isFile()) throw new Error('目标不是文件');
+  if (!['.html', '.htm'].includes(extname(real).toLowerCase())) throw new Error('仅支持打开 HTML 文件');
+  return { abs: real, rel: rel.replace(/\\/g, '/') };
+}
+
+export function openPathWithDefaultApp(filePath, options = {}) {
+  const platform = options.platform || process.platform;
+  const spawnImpl = options.spawnImpl || spawn;
+  const [command, args] = platform === 'win32'
+    ? ['rundll32.exe', ['url.dll,FileProtocolHandler', filePath]]
+    : platform === 'darwin' ? ['open', [filePath]] : ['xdg-open', [filePath]];
+  const child = spawnImpl(command, args, { detached: true, stdio: 'ignore', windowsHide: true });
+  child.unref?.();
+  return { command, args };
 }

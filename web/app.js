@@ -5,6 +5,30 @@ function esc(s) {
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+const skillRegistryCache = {};
+const skillRegistryRequests = {};
+
+async function fetchSkillRegistry(source) {
+  if (skillRegistryCache[source]) return skillRegistryCache[source];
+  if (!skillRegistryRequests[source]) {
+    skillRegistryRequests[source] = fetch(`/api/skills/registry?source=${encodeURIComponent(source)}`)
+      .then(async response => {
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+        skillRegistryCache[source] = data;
+        return data;
+      })
+      .finally(() => { delete skillRegistryRequests[source]; });
+  }
+  return skillRegistryRequests[source];
+}
+
+function prefetchSkillRegistry(source) {
+  fetchSkillRegistry(source).catch(() => {});
+}
+
+setTimeout(() => prefetchSkillRegistry('clowder-ai'), 0);
+
 // ── Rich Blocks 渲染器 ─────────────────────────────────────────
 // 支持: ```code``` / `inline` / **b** / *i* / # h1 / - list / 1. ol
 // 自定义块: :::card title="X" / :::checklist title="X" / :::role name="X" tag="Y"
@@ -17,11 +41,24 @@ function parseAttrs(s) {
 }
 
 function renderInline(text) {
-  // 已经 esc 过的文本上做 inline 解析
-  return text
-    .replace(/`([^`]+)`/g, (_, c) => `<code class="rb-inline-code">${c}</code>`)
+  const links = [];
+  const isLocalHtml = value => /\.html?$/i.test(value.split(/[?#]/)[0]) &&
+    /^(?:file:\/\/|[A-Za-z]:[\\/]|\.{0,2}[\\/]|(?:reports?|outputs?|dist|build|public)[\\/])/i.test(value);
+  const asLink = (path, label, code = false) => {
+    const index = links.length;
+    links.push(`<button class="local-html-link" type="button" data-html-path="${path}" title="使用默认浏览器打开">${code ? `<code>${label}</code>` : label}<span aria-hidden="true">↗</span></button>`);
+    return `\x01HTML${index}\x01`;
+  };
+
+  let rendered = text
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (whole, label, path) => isLocalHtml(path) ? asLink(path, label) : whole)
+    .replace(/`([^`]+)`/g, (_, code) => isLocalHtml(code) ? asLink(code, code, true) : `<code class="rb-inline-code">${code}</code>`)
+    .replace(/(?:file:\/\/\/[^\s<>"']+\.html?|[A-Za-z]:[\\/][^\s<>"']+\.html?|(?:\.{0,2}[\\/]|(?:reports?|outputs?|dist|build|public)[\\/])[^\s<>"']+\.html?)/gi,
+      path => isLocalHtml(path) ? asLink(path, path, true) : path)
     .replace(/\*\*([^*]+)\*\*/g, '<span class="rb-bold">$1</span>')
     .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, '<span class="rb-italic">$1</span>');
+  rendered = rendered.replace(/\x01HTML(\d+)\x01/g, (_, index) => links[+index]);
+  return rendered;
 }
 
 function renderListBlock(lines) {
@@ -151,6 +188,41 @@ function copyCode(btn) {
 // ── chat helpers ─────────────────────────────────────────────
 const chatEl = document.getElementById('chatMessages');
 const welcome = document.getElementById('chatWelcome');
+
+async function openLocalHtml(path, button) {
+  const oldText = button?.innerHTML;
+  if (button) {
+    button.disabled = true;
+    button.dataset.opening = 'true';
+  }
+  try {
+    const response = await fetch('/api/workspace/open-html', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    });
+    const data = await response.json();
+    if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+    if (button) button.title = `已使用默认浏览器打开 ${data.path}`;
+    return data;
+  } catch (error) {
+    addSystemMsg(`无法打开 HTML：${error.message}`);
+    throw error;
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.dataset.opening = 'false';
+      if (oldText) button.innerHTML = oldText;
+    }
+  }
+}
+
+chatEl.addEventListener('click', event => {
+  const button = event.target.closest?.('[data-html-path]');
+  if (!button || !chatEl.contains(button)) return;
+  event.preventDefault();
+  openLocalHtml(button.dataset.htmlPath, button).catch(() => {});
+});
 
 // 每个 session 维护自己的 typing bubble 引用（对齐 clowder-ai per-thread liveness）
 const sessionBubbles = new Map(); // sessionId → { bubble, agentKey }
@@ -2643,20 +2715,19 @@ function renderHubSkills() {
 
   // ── 市场源切换 ──
   let currentMarketSrc = 'myteam-official';
-  let marketCache = {};
+  const marketCache = skillRegistryCache;
 
   async function loadMarket(src) {
     currentMarketSrc = src;
     hubBody.querySelectorAll('.skill-src-btn').forEach(b => b.classList.toggle('active', b.dataset.src === src));
     const listEl = document.getElementById('skillMarketList');
     if (!listEl) return;
-    if (marketCache[src]) { renderMarketList(marketCache[src], listEl); return; }
+    if (marketCache[src]) { renderMarketList(marketCache[src].skills || [], listEl); return; }
     listEl.innerHTML = '<div class="hub-loading">加载中…</div>';
     try {
-      const data = await fetch(`/api/skills/registry?source=${encodeURIComponent(src)}`).then(r => r.json());
-      if (data.error) throw new Error(data.error);
-      marketCache[src] = data.skills || [];
-      renderMarketList(marketCache[src], listEl);
+      const data = await fetchSkillRegistry(src);
+      if (currentMarketSrc !== src || !listEl.isConnected) return;
+      renderMarketList(data.skills || [], listEl);
     } catch (err) {
       listEl.innerHTML = `<div class="hub-empty">加载失败：${esc(err.message)}</div>`;
     }
@@ -2704,7 +2775,7 @@ function renderHubSkills() {
           btn.classList.add('installed');
           // 更新缓存
           if (marketCache[source]) {
-            const entry = marketCache[source].find(s => s.name === name);
+            const entry = marketCache[source].skills?.find(s => s.name === name);
             if (entry) entry.installed = true;
           }
           addSystemMsg(`✓ Skill "${name}" 安装成功`);
@@ -2724,8 +2795,11 @@ function renderHubSkills() {
   hubBody.querySelector('.skill-search-input')?.addEventListener('input', e => {
     const listEl = document.getElementById('skillMarketList');
     if (!listEl || !marketCache[currentMarketSrc]) return;
-    renderMarketList(marketCache[currentMarketSrc], listEl, e.target.value);
+    renderMarketList(marketCache[currentMarketSrc].skills || [], listEl, e.target.value);
   });
+
+  prefetchSkillRegistry('myteam-official');
+  prefetchSkillRegistry('clowder-ai');
 }
 
 function renderHubLessons() {
@@ -4284,7 +4358,7 @@ async function selectWsFile(f) {
   artifactsPreviewTitle.textContent = f.path;
   artifactsOpenBtn.style.display = f.lang === 'html' ? '' : 'none';
   if (f.lang === 'html') {
-    artifactsOpenBtn.onclick = () => window.open('/api/workspace/raw?path=' + encodeURIComponent(f.path), '_blank');
+    artifactsOpenBtn.onclick = () => openLocalHtml(f.path, artifactsOpenBtn).catch(() => {});
   }
   try {
     const data = await fetch('/api/workspace/file?path=' + encodeURIComponent(f.path)).then(r => r.json());
@@ -4309,10 +4383,7 @@ function renderArtifactPreview() {
   const isHtml = a.type === 'html' || a.lang === 'html';
   artifactsOpenBtn.style.display = isHtml ? '' : 'none';
   if (isHtml) {
-    artifactsOpenBtn.onclick = () => {
-      const blob = new Blob([a.content || ''], { type: 'text/html' });
-      window.open(URL.createObjectURL(blob), '_blank');
-    };
+    artifactsOpenBtn.onclick = () => openLocalHtml(a.path, artifactsOpenBtn).catch(() => {});
   }
 
   if (a.type === 'url') {
@@ -4415,55 +4486,6 @@ function injectArtifactBadges(bubbleEl, artifacts) {
 }
 window.injectArtifactBadges = injectArtifactBadges;
 
-// ─── Shell execution ───────────────────────────────────────────
-(function() {
-const shellBtn = document.getElementById("shellPageBtn");
-const shellOverlay = document.getElementById("shellModalOverlay");
-const shellLevelEl = document.getElementById("shellModalLevel");
-const shellCmdEl = document.getElementById("shellModalCmd");
-const shellDeny = document.getElementById("shellModalDeny");
-const shellAllow = document.getElementById("shellModalAllow");
-let pendingShellCmd = null;
-shellBtn && shellBtn.addEventListener("click", () => {
-  const cmd = prompt("Enter PowerShell command:");
-  if (!cmd || !cmd.trim()) return;
-  execShell(cmd.trim());
-});
-window.execShell = execShell;
-async function execShell(command) {
-  const { data } = await fetchWithApproval("/api/shell/exec", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({command, sessionId: currentSessionId}) });
-  if (data.ok) { addShellResultCard(data.runId, data.command); streamShellResult(data.runId); return; }
-  addSystemMsg("Shell error: " + (data.error || "unknown"));
-}
-function showShellConfirm(level, reason, command) {
-  shellCmdEl.textContent = command;
-  shellLevelEl.textContent = level.toUpperCase() + (reason ? ": " + reason : "");
-  shellLevelEl.className = "shell-modal-level " + (level==="destructive"?"destructive":"caution");
-  shellOverlay.classList.remove("hidden");
-  pendingShellCmd = command;
-}
-shellDeny && shellDeny.addEventListener("click", () => { shellOverlay.classList.add("hidden"); pendingShellCmd = null; addSystemMsg("Shell command cancelled."); });
-shellAllow && shellAllow.addEventListener("click", async () => {
-  shellOverlay.classList.add("hidden");
-  if (!pendingShellCmd) return;
-  const cmd = pendingShellCmd; pendingShellCmd = null;
-  const res = await fetch("/api/shell/exec-confirm", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({command:cmd,confirmed:true}) });
-  const data = await res.json();
-  if (data.ok) { addShellResultCard(data.runId, data.command); streamShellResult(data.runId); }
-});
-function addShellResultCard(runId, command) {
-  hideWelcome();
-  const row = document.createElement("div"); row.className = "bubble-row";
-  row.innerHTML = "<div class=\"avatar system-av\">$</div><div class=\"bubble-content-wrap\" style=\"max-width:85%\"><div class=\"shell-result-block\" id=\"shellBlock-"+runId+"\"><div class=\"shell-result-header\"><span>SHELL</span><span class=\"shell-result-exit\" id=\"shellExit-"+runId+"\">running...</span></div><div class=\"shell-result-body\" id=\"shellStdout-"+runId+"\">"+esc(command)+" ...</div><div class=\"shell-result-body stderr hidden\" id=\"shellStderr-"+runId+"\"></div></div></div>";
-  chatEl.appendChild(row); scrollChat();
-}
-async function streamShellResult(runId) {
-  const es = new EventSource("/api/shell/stream?runId=" + encodeURIComponent(runId));
-  es.onmessage = (e) => { try { const d = JSON.parse(e.data); const so = document.getElementById("shellStdout-"+runId); const se = document.getElementById("shellStderr-"+runId); const ex = document.getElementById("shellExit-"+runId); if (so) so.textContent = d.stdout || "(no output)"; if (se) { if (d.stderr) { se.classList.remove("hidden"); se.textContent = d.stderr; } else se.classList.add("hidden"); } if (ex) { if (d.done) { ex.textContent = "exit " + (d.exitCode!==null?d.exitCode:"?"); ex.style.color = d.exitCode===0?"var(--green)":"var(--red)"; es.close(); } else { ex.textContent = "running... "+((d.stdout||"").length+(d.stderr||"").length)+" chars"; } } } catch {} };
-  es.onerror = () => { es.close(); };
-}
-})();
-
 // ─── Subagent session ───────────────────────────────────────────
 (function() {
 const saBackBtn = document.getElementById("saBackBtn");
@@ -4523,10 +4545,16 @@ const svSourceBtns = document.getElementById("svSourceBtns");
 const svMarketSearch = document.getElementById("svMarketSearch");
 if (!skillsPageBtn) return;
 let currentSource = "myteam-official";
-let marketCache = {};
+const marketCache = skillRegistryCache;
 skillsPageBtn.addEventListener("click", () => showSkillsView());
 svBackBtn && svBackBtn.addEventListener("click", () => hideSkillsView());
-function showSkillsView() { skillsView.classList.remove("hidden"); chatArea.style.display = "none"; loadInstalledSkills(); loadMarketSources(); }
+function showSkillsView() {
+  skillsView.classList.remove("hidden");
+  chatArea.style.display = "none";
+  loadInstalledSkills();
+  loadMarketSources();
+  prefetchSkillRegistry("clowder-ai");
+}
 function hideSkillsView() { skillsView.classList.add("hidden"); chatArea.style.display = ""; }
 document.querySelectorAll(".sv-tab").forEach(tab => { tab.addEventListener("click", () => { document.querySelectorAll(".sv-tab").forEach(t=>t.classList.remove("active")); tab.classList.add("active"); var p=tab.dataset.stab; document.querySelectorAll(".sv-panel").forEach(p=>p.classList.add("hidden")); if (p==="installed") { document.getElementById("svPanelInstalled").classList.remove("hidden"); loadInstalledSkills(); } if (p==="market") { document.getElementById("svPanelMarket").classList.remove("hidden"); loadMarketSkills(); } if (p==="import") { document.getElementById("svPanelImport").classList.remove("hidden"); } }); });
 async function loadInstalledSkills() {
@@ -4545,28 +4573,34 @@ async function loadInstalledSkills() {
   } catch(e) { svInstalledList.innerHTML = "<div class=\"sv-empty\">Load failed: "+esc(e.message)+"</div>"; }
 }
 async function loadMarketSources() {
-  try {
-    const data = await fetch("/api/skills/registry?source=myteam-official").then(r=>r.json());
-    var sources = data.sources || ["myteam-official","clowder-ai"];
-    svSourceBtns.innerHTML = sources.map(s=>"<button class=\"sv-src-btn "+(s===currentSource?"active":"")+"\" data-src=\""+esc(s)+"\">"+esc(s)+"</button>").join("");
-    svSourceBtns.querySelectorAll(".sv-src-btn").forEach(btn => { btn.addEventListener("click", () => { currentSource=btn.dataset.src; svSourceBtns.querySelectorAll(".sv-src-btn").forEach(b=>b.classList.toggle("active",b.dataset.src===currentSource)); loadMarketSkills(); }); });
-    svMarketSearch.addEventListener("input", loadMarketSkills);
-    loadMarketSkills();
-  } catch(e) {}
+  const sources = ["myteam-official", "clowder-ai"];
+  svSourceBtns.innerHTML = sources.map(s=>"<button class=\"sv-src-btn "+(s===currentSource?"active":"")+"\" data-src=\""+esc(s)+"\">"+esc(s)+"</button>").join("");
+  svSourceBtns.querySelectorAll(".sv-src-btn").forEach(btn => { btn.addEventListener("click", () => { currentSource=btn.dataset.src; svSourceBtns.querySelectorAll(".sv-src-btn").forEach(b=>b.classList.toggle("active",b.dataset.src===currentSource)); loadMarketSkills(); }); });
+  svMarketSearch.oninput = () => renderMarketSkills(currentSource);
+  loadMarketSkills();
 }
 async function loadMarketSkills() {
+  const requestedSource = currentSource;
+  if (marketCache[requestedSource]) {
+    renderMarketSkills(requestedSource);
+    return;
+  }
+  svMarketList.innerHTML = "<div class=\"sv-empty\">正在加载市场…</div>";
   try {
-    const data = await fetch("/api/skills/registry?source="+encodeURIComponent(currentSource)).then(r=>r.json());
-    var skills = data.skills || []; marketCache[currentSource] = skills;
+    await fetchSkillRegistry(requestedSource);
+    if (requestedSource === currentSource) renderMarketSkills(requestedSource);
+  } catch(e) { if (requestedSource === currentSource) svMarketList.innerHTML = "<div class=\"sv-empty\">Load failed: "+esc(e.message)+"</div>"; }
+}
+function renderMarketSkills(source) {
+    var skills = marketCache[source]?.skills || [];
     var filter = svMarketSearch.value.toLowerCase();
     if (filter) skills = skills.filter(s => (s.name||"").toLowerCase().includes(filter) || (s.description||s.trigger||"").toLowerCase().includes(filter));
     if (!skills.length) { svMarketList.innerHTML = "<div class=\"sv-empty\">"+(filter?"No matches":"No skills")+"</div>"; return; }
     svMarketList.innerHTML = skills.map(s => {
       var installed = s.installed;
-      return "<div class=\"sv-card "+(installed?"installed":"")+"\"><div class=\"sv-card-header\"><span class=\"sv-card-name\">"+esc(s.name)+"</span><span class=\"sv-card-cat\">"+esc(s.category||"general")+"</span><div class=\"sv-card-actions\"><button class=\"sv-install-btn "+(installed?"installed":"")+"\" data-skill=\""+esc(s.name)+"\" data-source=\""+esc(currentSource)+"\" "+(installed?"disabled":"")+">"+(installed?"Installed":"Install")+"</button></div></div><div class=\"sv-card-desc\">"+esc((s.description||s.trigger||"").slice(0,150))+"</div></div>";
+      return "<div class=\"sv-card "+(installed?"installed":"")+"\"><div class=\"sv-card-header\"><span class=\"sv-card-name\">"+esc(s.name)+"</span><span class=\"sv-card-cat\">"+esc(s.category||"general")+"</span><div class=\"sv-card-actions\"><button class=\"sv-install-btn "+(installed?"installed":"")+"\" data-skill=\""+esc(s.name)+"\" data-source=\""+esc(source)+"\" "+(installed?"disabled":"")+">"+(installed?"Installed":"Install")+"</button></div></div><div class=\"sv-card-desc\">"+esc((s.description||s.trigger||"").slice(0,150))+"</div></div>";
     }).join("");
     svMarketList.querySelectorAll(".sv-install-btn:not([disabled])").forEach(btn => { btn.addEventListener("click", async () => { var n=btn.dataset.skill; btn.disabled=true; btn.textContent="Installing..."; try { var res = await fetch("/api/skills/install", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({source:btn.dataset.source,name:n}) }); var data = await res.json(); if (!res.ok || !data.ok) throw new Error(data.error || "install failed"); btn.textContent="Installed"; btn.classList.add("installed"); loadInstalledSkills(); } catch(e) { btn.disabled=false; btn.textContent="Install"; alert("Install failed: "+e.message); } }); });
-  } catch(e) { svMarketList.innerHTML = "<div class=\"sv-empty\">Load failed: "+esc(e.message)+"</div>"; }
 }
 document.getElementById("svImportGithubBtn") && document.getElementById("svImportGithubBtn").addEventListener("click", () => doImport({url:document.getElementById("svImportGithub").value.trim()}));
 document.getElementById("svImportUrlBtn") && document.getElementById("svImportUrlBtn").addEventListener("click", () => doImport({url:document.getElementById("svImportUrl").value.trim()}));

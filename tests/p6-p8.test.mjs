@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -16,6 +16,34 @@ const {
   requestApproval,
 } = await import('../governance.mjs');
 const { ScheduleService, nextCronDate } = await import('../scheduler.mjs');
+const { openPathWithDefaultApp, resolveWorkspaceHtmlPath } = await import('../commandSafety.mjs');
+
+test('workspace HTML opening validates paths and avoids command shells', () => {
+  const root = mkdtempSync(join(tmpdir(), 'myteam-html-'));
+  const outside = mkdtempSync(join(tmpdir(), 'myteam-outside-'));
+  mkdirSync(join(root, 'reports'));
+  mkdirSync(join(root, 'secrets'));
+  writeFileSync(join(root, 'reports', 'summary.html'), '<h1>ok</h1>');
+  writeFileSync(join(root, 'reports', 'notes.txt'), 'no');
+  writeFileSync(join(root, 'secrets', 'report.html'), '<h1>secret</h1>');
+  writeFileSync(join(outside, 'report.html'), '<h1>outside</h1>');
+
+  assert.equal(resolveWorkspaceHtmlPath(root, 'reports/summary.html').rel, 'reports/summary.html');
+  assert.throws(() => resolveWorkspaceHtmlPath(root, 'reports/notes.txt'), /仅支持/);
+  assert.throws(() => resolveWorkspaceHtmlPath(root, join(outside, 'report.html')), /不在当前工作区/);
+  assert.throws(() => resolveWorkspaceHtmlPath(root, 'secrets/report.html', ['secrets']), /禁止访问/);
+
+  const calls = [];
+  openPathWithDefaultApp('D:\\myteam\\reports\\summary.html', {
+    platform: 'win32',
+    spawnImpl(command, args, options) { calls.push({ command, args, options }); return { unref() {} }; },
+  });
+  assert.equal(calls[0].command, 'rundll32.exe');
+  assert.deepEqual(calls[0].args, ['url.dll,FileProtocolHandler', 'D:\\myteam\\reports\\summary.html']);
+  assert.equal(calls[0].options.detached, true);
+  rmSync(root, { recursive: true, force: true });
+  rmSync(outside, { recursive: true, force: true });
+});
 
 test('SQLite repository persists normalized session state and entities', () => {
   repository.upsert('tasks', { id: 'task-1', title: 'Persist me', status: 'pending' });

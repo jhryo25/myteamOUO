@@ -10,7 +10,7 @@ import { randomUUID, createHash } from 'crypto';
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
 import { loadEnv, buildCliConfig, invokeAgent, extractJson, PARSERS, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, buildReviewPrompt, AGENT_KEYS, buildSpawnCommand, checkAgentLaunchable, formatLaunchError, readAgentRegistry, writeAgentRegistry, sanitizeAgentKey, buildRoleCard, validatePhaseTransition, getNextPhase, selectRunnableAgent } from './agent-utils.mjs';
-import { getDangerLevel } from './commandSafety.mjs';
+import { getDangerLevel, openPathWithDefaultApp, resolveWorkspaceHtmlPath } from './commandSafety.mjs';
 import { repository } from './storage.mjs';
 import {
   appendAudit,
@@ -764,6 +764,34 @@ async function readSkillSourceIndex(srcCfg) {
     raw = await httpGet(srcCfg.indexUrl);
   }
   return raw.replace(/^\uFEFF/, '');
+}
+
+async function loadSkillRegistry(source, srcCfg) {
+  const now = Date.now();
+  const cached = skillRegistryCache.get(source);
+  if (cached?.skills && cached.expiresAt > now) return { skills: cached.skills, cached: true };
+  if (cached?.pending) return cached.pending;
+
+  const pending = (async () => {
+    try {
+      const raw = await readSkillSourceIndex(srcCfg);
+      let skills = [];
+      if (srcCfg.type === 'index') skills = JSON.parse(raw).skills || [];
+      else if (srcCfg.type === 'manifest') skills = parseClowderManifest(raw, srcCfg.rawBase);
+      skillRegistryCache.set(source, { skills, expiresAt: Date.now() + SKILL_REGISTRY_TTL_MS });
+      return { skills, cached: false };
+    } catch (error) {
+      if (cached?.skills) {
+        skillRegistryCache.set(source, { skills: cached.skills, expiresAt: Date.now() + 30_000 });
+        return { skills: cached.skills, cached: true, stale: true };
+      }
+      skillRegistryCache.delete(source);
+      throw error;
+    }
+  })();
+
+  skillRegistryCache.set(source, { ...cached, pending });
+  return pending;
 }
 
 function resolveLocalSkillPath(srcCfg, entryUrl) {
@@ -1671,6 +1699,8 @@ const MIME = {
   '.webp': 'image/webp',
   '.gif': 'image/gif',
 };
+const SKILL_REGISTRY_TTL_MS = 5 * 60 * 1000;
+const skillRegistryCache = new Map();
 
 function requireApproval(res, { operation, payload, sessionId = '', approvalId = '' }) {
   const authorization = authorizeOperation({ operation, payload, sessionId, approvalId });
@@ -2420,14 +2450,8 @@ async function handle(req, res) {
       return res.end(JSON.stringify({ error: `未知 source: ${source}`, sources: Object.keys(SKILL_SOURCES) }));
     }
     try {
-      const raw = await readSkillSourceIndex(srcCfg);
-      let skills = [];
-      if (srcCfg.type === 'index') {
-        const data = JSON.parse(raw);
-        skills = data.skills || [];
-      } else if (srcCfg.type === 'manifest') {
-        skills = parseClowderManifest(raw, srcCfg.rawBase);
-      }
+      const registry = await loadSkillRegistry(source, srcCfg);
+      let skills = registry.skills;
       // 标记本地已安装的
       const installed = new Set(
         existsSync(SKILLS_DIR) ? readdirSync(SKILLS_DIR, { withFileTypes: true })
@@ -2435,7 +2459,14 @@ async function handle(req, res) {
       );
       skills = skills.map(s => ({ ...s, installed: installed.has(s.name) }));
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ source, label: srcCfg.label, skills }));
+      return res.end(JSON.stringify({
+        source,
+        label: srcCfg.label,
+        skills,
+        sources: Object.keys(SKILL_SOURCES),
+        cached: registry.cached,
+        stale: Boolean(registry.stale),
+      }));
     } catch (err) {
       res.writeHead(502, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: `拉取失败: ${err.message}` }));
@@ -2682,6 +2713,22 @@ async function handle(req, res) {
     const mime = guessMime(basename(guard.abs));
     res.writeHead(200, { 'Content-Type': mime });
     return res.end(readFileSync(guard.abs));
+  }
+
+  // POST /api/workspace/open-html — 使用系统默认浏览器打开工作区 HTML
+  if (req.method === 'POST' && pathname === '/api/workspace/open-html') {
+    try {
+      const body = await readBody(req);
+      const target = resolveWorkspaceHtmlPath(wsRoot(), body.path, WORKSPACE_DENYLIST);
+      openPathWithDefaultApp(target.abs);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, path: target.rel }));
+    } catch (error) {
+      const message = String(error?.message || error);
+      const status = /不存在/.test(message) ? 404 : /不在|禁止|仅支持|无效|缺少|不是文件/.test(message) ? 400 : 500;
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: message }));
+    }
   }
 
   // GET /api/invocations — 返回 agent 调用记录，用于轻量成本/稳定性看板

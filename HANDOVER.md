@@ -375,3 +375,12 @@ P0 → P2 → P4 → P1 → P3 → P5
 - 根因：`doPlan()` 把空选择硬编码回退到 Codex，`/api/plan` 也直接信任前端 agent，没有复用聊天模式的可用性选择。
 - 修复：前端默认选第一个 `available` agent；服务端再次执行可用性解析，失效 agent 自动回退到 Kimi 并通过 SSE 告知。
 - 验证：隔离 API 与真实 UI 均生成 5 个任务卡，`structuredMode=native`，无拆任务错误。
+
+### Skills、Shell 与 HTML 产物交互（2026-06-20）
+
+- Skills 两套视图改为共享 registry 缓存和进行中的请求；应用加载后后台预取 `clowder-ai`。服务端增加 5 分钟 TTL、并发请求合并和过期缓存失败回退。
+- 顶部手工 Shell 按钮和确认弹窗已移除，避免让用户把 Agent 能力误解为需要自己输入 PowerShell；`shell-exec` Skill、执行 API、审批和审计保持不变。
+- 参考 LobsterAI 的 `file://` 解析与 `shell.openPath()` 路径，新增工作区 HTML 链接和 `POST /api/workspace/open-html`；Windows 使用系统文件关联打开默认浏览器。
+- 安全边界：仅允许当前工作区内的真实 `.html/.htm` 文件，拒绝越界、符号链接越界、敏感目录、目录目标和其他扩展名。
+- 验证：`npm run check`、17 项测试、浏览器 console 均通过；页面检测到 7 个历史 HTML 路径链接；`clowder-ai` 56 项，热缓存 API 约 5ms。
+- 已知问题：390px 下旧版三栏主界面仍存在页面级横向布局问题，不由本轮三个交互改动引入，后续应单独做响应式布局收敛。

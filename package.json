@@ -6,7 +6,7 @@
   "scripts": {
     "plan": "node plan.mjs",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check server.mjs && node --check web/app.js && node --check storage.mjs && node --check governance.mjs && node --check scheduler.mjs && node --check collaboration-context.mjs"
+    "check": "node --check server.mjs && node --check web/app.js && node --check storage.mjs && node --check governance.mjs && node --check scheduler.mjs && node --check collaboration-context.mjs && node --check commandSafety.mjs"
   },
   "engines": {
     "node": ">=22.5"

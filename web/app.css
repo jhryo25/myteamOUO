@@ -729,45 +729,6 @@ body {
 }
 .subagent-view-btn:hover { background: var(--blue); color: #fff; }
 
-/* shell exec */
-.shell-page-btn {
-  padding: 5px 14px; border-radius: 6px; border: 1px solid var(--border);
-  background: var(--surface2); color: var(--accent); cursor: pointer;
-  font-size: 13px; font-weight: 700; margin-left: 4px;
-}
-.shell-page-btn:hover { background: var(--accent-soft); }
-
-.shell-modal-overlay {
-  position: fixed; inset: 0; background: rgba(0,0,0,.45);
-  display: flex; align-items: center; justify-content: center; z-index: 1000;
-}
-.shell-modal {
-  background: var(--surface); border-radius: 12px; padding: 24px;
-  max-width: 480px; width: 90%; box-shadow: 0 8px 32px rgba(0,0,0,.18);
-}
-.shell-modal-title { font-size: 16px; font-weight: 700; margin-bottom: 8px; }
-.shell-modal-level {
-  display: inline-block; padding: 3px 10px; border-radius: 6px;
-  font-size: 12px; font-weight: 600; margin-bottom: 10px;
-}
-.shell-modal-level.caution { background: rgba(192,149,53,.12); color: #c09535; }
-.shell-modal-level.destructive { background: var(--red-soft); color: var(--red); }
-.shell-modal-cmd {
-  font-family: Consolas, monospace; font-size: 13px;
-  background: #1e1e1e; color: #d4d4d4; padding: 10px; border-radius: 6px;
-  margin-bottom: 16px; word-break: break-all; max-height: 120px; overflow-y: auto;
-}
-.shell-modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
-.shell-modal-deny {
-  padding: 8px 18px; border-radius: 6px; border: 1px solid var(--border);
-  background: var(--surface2); cursor: pointer; font-size: 13px;
-}
-.shell-modal-allow {
-  padding: 8px 18px; border-radius: 6px; border: none;
-  background: var(--accent); color: #fff; cursor: pointer; font-size: 13px; font-weight: 600;
-}
-.shell-modal-allow:hover { opacity: .9; }
-
 .shell-result-block {
   margin: 8px 0; border-radius: 8px; overflow: hidden;
   border: 1px solid var(--border); background: var(--surface);
@@ -1899,6 +1860,28 @@ body {
   font-family: Consolas, monospace;
   font-size: 90%;
 }
+.local-html-link {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+.local-html-link code {
+  color: inherit;
+  font-family: Consolas, monospace;
+  font-size: 90%;
+}
+.local-html-link:hover { color: var(--accent); }
+.local-html-link:disabled { cursor: wait; opacity: .65; }
 .rb-h1, .rb-h2, .rb-h3 {
   font-weight: 700;
   color: var(--text);

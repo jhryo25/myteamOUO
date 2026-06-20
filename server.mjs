@@ -38,6 +38,7 @@ import {
   appendSubagentMessage,
   listSubagentMessages,
   createTurnPartsCollector,
+  transitionSessionRunState,
 } from './collaboration-context.mjs';
 
 let ENV = loadEnv();
@@ -896,6 +897,15 @@ function parseClowderManifest(yamlText, rawBase) {
 const WORKSPACE_DENYLIST = ['.env', '.pem', '.key', 'id_rsa', '.git', 'node_modules', 'secrets'];
 // 按 mtime 扫描的"常规产出区"（workspace 根 + 常见产出目录）
 const WORKSPACE_SCAN_DIRS = ['', 'docs', 'src', 'web', 'scripts', 'output', 'reports', 'dist'];
+const WORKSPACE_TEXT_EXTS = new Set([
+  'txt','md','markdown','html','htm','css','js','mjs','cjs','ts','tsx','jsx','json','yaml','yml',
+  'py','rb','go','rs','java','c','cpp','h','sh','bash','zsh','fish','sql','xml','svg','toml','ini',
+  'example','gitignore','csv','log','conf','cfg','vue','svelte',
+]);
+
+function isWorkspaceTextFile(filePath) {
+  return WORKSPACE_TEXT_EXTS.has(extname(filePath).slice(1).toLowerCase());
+}
 
 function artifactId(sessionId, path, content) {
   const raw = `${sessionId}:${path || ''}:${(content || '').slice(0, 200)}`;
@@ -1093,7 +1103,61 @@ function newSession(name) {
     history: [],
     continuity: null,
     mode: null, // 'chat' | 'plan' | 'mixed'，由首次/最近一次操作决定
+    run_state: { status: 'idle', updatedAt: Date.now() },
   };
+}
+
+function extractWorkspaceFileArtifacts(text, { sessionId, agent, messageIndex }) {
+  if (!text) return [];
+  const root = resolve(currentWorkspace());
+  const candidates = new Set();
+  const likelyFile = /\.(?:html?|md|markdown|json|csv|txt|log|ya?ml|toml|css|[cm]?js|tsx?|jsx|py|sql|svg)$/i;
+  const add = value => {
+    let candidate = String(value || '').trim()
+      .replace(/^file:\/\/\//i, '')
+      .replace(/[),.;:，。；：]+$/, '')
+      .replace(/\\/g, '/');
+    if (!candidate || /^https?:\/\//i.test(candidate) || !likelyFile.test(candidate)) return;
+    candidates.add(candidate);
+  };
+  for (const match of text.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)) add(match[1]);
+  for (const match of text.matchAll(/`([^`\r\n]+)`/g)) add(match[1]);
+  for (const match of text.matchAll(/(?:[A-Za-z]:[\\/]|(?:\.{0,2}[\\/])|(?:reports?|outputs?|docs|dist|build|public)[\\/])[^\s<>"'`]+\.(?:html?|md|markdown|json|csv|txt|log|ya?ml|toml|css|[cm]?js|tsx?|jsx|py|sql|svg)/gi)) add(match[0]);
+
+  const artifacts = [];
+  for (const candidate of candidates) {
+    try {
+      const abs = realpathSync(resolve(root, candidate));
+      if (abs !== root && !abs.startsWith(root + sep)) continue;
+      const rel = relative(root, abs);
+      if (WORKSPACE_DENYLIST.some(deny => rel.startsWith(deny) || rel.includes(sep + deny) || basename(abs).includes(deny))) continue;
+      const st = statSync(abs);
+      if (!st.isFile() || st.size > 1024 * 1024 || !isWorkspaceTextFile(abs)) continue;
+      const content = readFileSync(abs, 'utf8');
+      const lang = extToLang(abs);
+      const type = lang === 'html' ? 'html' : lang === 'json' ? 'json' : (lang === 'md' || lang === 'markdown') ? 'markdown' : 'code';
+      const path = rel.replace(/\\/g, '/');
+      artifacts.push({
+        id: artifactId(sessionId, path, content), type, lang, path, content,
+        agent, sessionId, messageIndex, source: 'workspace-reference', createdAt: st.mtimeMs,
+        preview: content.trim().slice(0, 80),
+      });
+    } catch { /* missing or unreadable references are omitted from the file panel */ }
+  }
+  return artifacts;
+}
+
+function setSessionRunState(session, status, patch = {}) {
+  if (!session) return null;
+  session.run_state = transitionSessionRunState(session.run_state, status, patch);
+  saveSessions();
+  return session.run_state;
+}
+
+function publicSessionRunState(state) {
+  if (!state) return { status: 'idle' };
+  const { input, error, ...safe } = state;
+  return safe;
 }
 
 function recordSessionMode(session, mode) {
@@ -1143,6 +1207,7 @@ function loadSessions() {
     sessions = stored.sessions.map((session) => ({
       ...session,
       history: Array.isArray(session.history) ? session.history.slice(-40) : [],
+      run_state: session.run_state || { status: 'idle', updatedAt: Date.now() },
     }));
     activeSessionId = stored.activeId && getSession(stored.activeId) ? stored.activeId : sessions[0].id;
     const now = Date.now();
@@ -1173,6 +1238,7 @@ function loadSessions() {
         history: Array.isArray(s.history) ? s.history.slice(-40) : [],
         continuity: s.continuity && typeof s.continuity === 'object' ? s.continuity : null,
         mode: s.mode || null,
+        run_state: s.run_state || { status: 'idle', updatedAt: Date.now() },
       }));
       activeSessionId = data.activeId && getSession(data.activeId)
         ? data.activeId : sessions[0].id;
@@ -1223,6 +1289,17 @@ function refreshSessionContinuity(session, source = 'manual') {
 
 // 启动时加载
 loadSessions();
+let recoveredInterruptedSessions = false;
+for (const session of sessions) {
+  if (['running', 'interrupting'].includes(session.run_state?.status)) {
+    session.run_state = transitionSessionRunState(session.run_state, 'interrupted', {
+      reason: 'service_restarted',
+      interruptedAt: Date.now(),
+    });
+    recoveredInterruptedSessions = true;
+  }
+}
+if (recoveredInterruptedSessions) saveSessions();
 
 const scheduleService = new ScheduleService({
   execute: async (schedule, run) => {
@@ -1462,17 +1539,24 @@ function busDetach(sessionId, res) {
   }
 }
 
-function abortChildren({ sessionId = '', clientRunId = '' } = {}) {
-  if (!sessionId && !clientRunId) return 0;
+async function abortChildren({ sessionId = '', clientRunId = '' } = {}) {
+  if (!sessionId && !clientRunId) return { count: 0, settled: true };
   let count = 0;
+  const waits = [];
   for (const [id, record] of activeChildren) {
     if (clientRunId && record.clientRunId !== clientRunId) continue;
     if (!clientRunId && sessionId && record.sessionId !== sessionId) continue;
     record.aborted = true;
     count++;
+    waits.push(new Promise(resolveClose => record.child.once('close', resolveClose)));
     try { record.child.kill('SIGTERM'); } catch { /* already dead */ }
   }
-  return count;
+  if (!waits.length) return { count, settled: true };
+  const settled = await Promise.race([
+    Promise.all(waits).then(() => true),
+    new Promise(resolveWait => setTimeout(() => resolveWait(false), 5000)),
+  ]);
+  return { count, settled };
 }
 
 function safeTurnValue(value) {
@@ -1927,12 +2011,24 @@ async function handle(req, res) {
 
   if (req.method === 'POST' && pathname === '/api/abort') {
     const body = await readBody(req);
-    const count = abortChildren({
-      sessionId: String(body.sessionId || ''),
+    const sessionId = String(body.sessionId || '');
+    const session = getSession(sessionId);
+    if (session?.run_state?.status === 'running') {
+      setSessionRunState(session, 'interrupting', {
+        reason: 'user_stopped',
+        interruptedAt: Date.now(),
+      });
+    }
+    const { count, settled } = await abortChildren({
+      sessionId,
       clientRunId: String(body.clientRunId || ''),
     });
+    if (settled && session?.run_state?.status === 'interrupting') {
+      setSessionRunState(session, 'interrupted', { interruptedAt: Date.now() });
+    }
+    if (sessionId) busBroadcast(sessionId, 'aborted', { sessionId, reason: 'user_stopped', resumable: settled });
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ aborted: count }));
+    return res.end(JSON.stringify({ aborted: count, settled, runState: publicSessionRunState(session?.run_state) }));
   }
 
   // GET /api/sessions — 返回所有 session 列表 + 当前激活
@@ -1946,6 +2042,7 @@ async function handle(req, res) {
         created_at: s.created_at,
         mode: s.mode || null,
         message_count: s.history.length,
+        run_state: publicSessionRunState(s.run_state),
       })),
     }));
   }
@@ -2072,31 +2169,54 @@ async function handle(req, res) {
   if (req.method === 'POST' && pathname === '/api/chat') {
     const body = await readBody(req);
     const message = (body.message || '').trim();
+    const resumeRequested = Boolean(body.resume);
     const clientRunId = String(body.clientRunId || '');
     const attachments = Array.isArray(body.attachments) ? body.attachments : [];
-    if (!message && !attachments.length) {
+    if (!message && !attachments.length && !resumeRequested) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: 'message 不能为空' }));
     }
 
     const session = (body.sessionId && getSession(body.sessionId)) || getActiveSession();
+    if (resumeRequested && !['interrupted', 'error'].includes(session?.run_state?.status)) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: '当前会话没有可继续的中断任务' }));
+    }
     // 客户端指定 sessionId 时同步切换激活
     if (body.sessionId && getSession(body.sessionId)) activeSessionId = body.sessionId;
 
     // 解析 @mention 路由；如果默认 codex 不可启动，就自动选一个可用 agent。
-    const requestedAgent = parseAtMention(message) || agentKeys()[0] || 'codex';
+    const requestedAgent = (resumeRequested ? session.run_state?.agent : parseAtMention(message)) || agentKeys()[0] || 'codex';
     const { agentKey, status: agentStatus } = await resolveRunnableAgent(requestedAgent);
-    const textMessage = stripAtMentions(message).trim();
+    const resumeMessage = message || '请从上次中断的位置继续。先检查当前会话上下文和已有输出，不要重复已经完成的部分，然后完成剩余工作。';
+    const textMessage = stripAtMentions(resumeMessage).trim();
     const imageOnlyMessage = attachments.length && !textMessage
       ? '请分析我刚上传的图片，并直接回复你观察到的内容、问题和建议。'
       : textMessage;
     const cleanMessage = `${imageOnlyMessage}${attachmentPrompt(attachments)}`.trim();
 
-    maybeAutoRenameSession(session, cleanMessage || message);
+    maybeAutoRenameSession(session, cleanMessage || resumeMessage);
     recordSessionMode(session, 'chat');
 
+    try {
+      setSessionRunState(session, 'running', {
+        mode: 'chat',
+        agent: agentKey,
+        input: resumeRequested ? (session.run_state?.input || resumeMessage) : message,
+        clientRunId,
+        startedAt: Date.now(),
+        resumed: resumeRequested,
+        reason: null,
+        interruptedAt: null,
+        finishedAt: null,
+      });
+    } catch (error) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: error.message }));
+    }
+
     // 存入对话历史（按 session）
-    session.history.push({ role: 'user', text: message, agent: null, attachments });
+    session.history.push({ role: 'user', text: resumeRequested ? (message || '继续上次对话') : message, agent: null, attachments, kind: resumeRequested ? 'chat-resume' : undefined });
     refreshSessionContinuity(session, 'user_message');
     saveSessions();
 
@@ -2117,8 +2237,13 @@ async function handle(req, res) {
         clientRunId,
         turnCollector,
       });
+      const interrupted = ['interrupting', 'interrupted'].includes(session.run_state?.status) || session.run_state?.clientRunId !== clientRunId;
+      if (interrupted) turnCollector.append({ type: 'interrupted', message: '回复已中断，可从当前上下文继续。' });
       const msgIndex = session.history.length;
-      const chatArtifacts = extractArtifacts(fullReply, { sessionId: session.id, agent: agentKey, messageIndex: msgIndex });
+      const chatArtifacts = [
+        ...extractArtifacts(fullReply, { sessionId: session.id, agent: agentKey, messageIndex: msgIndex }),
+        ...extractWorkspaceFileArtifacts(fullReply, { sessionId: session.id, agent: agentKey, messageIndex: msgIndex }),
+      ];
       session.history.push({
         role: 'assistant',
         text: fullReply,
@@ -2127,11 +2252,15 @@ async function handle(req, res) {
         artifacts: chatArtifacts,
         startedAt: turnStartedAt,
         finishedAt: Date.now(),
+        kind: interrupted ? 'chat-interrupted' : undefined,
+        interrupted,
       });
       if (session.history.length > 40) session.history.splice(0, session.history.length - 40);
       refreshSessionContinuity(session, 'post_run');
-      saveSessions();
-      sseSend(res, 'done', { agent: agentKey, sessionId: session.id });
+      if (!interrupted) setSessionRunState(session, 'completed', { finishedAt: Date.now() });
+      else if (session.run_state?.status === 'interrupting') setSessionRunState(session, 'interrupted', { interruptedAt: Date.now() });
+      else saveSessions();
+      sseSend(res, interrupted ? 'aborted' : 'done', { agent: agentKey, sessionId: session.id, resumable: interrupted });
     } catch (err) {
       // 不再 pop 用户消息，保留失败现场让用户刷新后能看到
       turnCollector.append({ type: 'error', message: err.message, status: 'error' });
@@ -2145,7 +2274,8 @@ async function handle(req, res) {
         finishedAt: Date.now(),
       });
       refreshSessionContinuity(session, 'tool_result');
-      saveSessions();
+      if (session.run_state?.status === 'running') setSessionRunState(session, 'error', { error: err.message, finishedAt: Date.now() });
+      else saveSessions();
       sseSend(res, 'error', { message: err.message });
     }
     return res.end();
@@ -2637,8 +2767,16 @@ async function handle(req, res) {
     const target = getSession(sid);
     const artifacts = [];
     if (target) {
-      for (const msg of target.history) {
+      for (let messageIndex = 0; messageIndex < target.history.length; messageIndex++) {
+        const msg = target.history[messageIndex];
         if (Array.isArray(msg.artifacts)) artifacts.push(...msg.artifacts);
+        if (msg.role === 'assistant' && msg.text) {
+          artifacts.push(...extractWorkspaceFileArtifacts(msg.text, {
+            sessionId: target.id,
+            agent: msg.agent || '',
+            messageIndex,
+          }));
+        }
       }
     }
     // 按 createdAt 倒序，同 path 去重（保留最新）
@@ -2673,15 +2811,6 @@ async function handle(req, res) {
     return { abs: real, rel };
   }
 
-  function wsIsTextFile(filePath) {
-    const textExts = new Set([
-      'txt','md','markdown','html','htm','css','js','mjs','cjs','ts','tsx','jsx','json','yaml','yml',
-      'py','rb','go','rs','java','c','cpp','h','sh','bash','zsh','fish','sql','xml','svg','toml','ini',
-      'env','example','gitignore','csv','log','conf','cfg','vue','svelte',
-    ]);
-    return textExts.has(extname(filePath).slice(1).toLowerCase());
-  }
-
   // GET /api/workspace/recent?limit=20 — 最近修改的文件（常规产出区扫描）
   if (req.method === 'GET' && pathname === '/api/workspace/recent') {
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '20', 10), 50);
@@ -2712,7 +2841,7 @@ async function handle(req, res) {
     files.sort((a, b) => b.mtime - a.mtime);
     const result = files.slice(0, limit).map(f => ({
       ...f,
-      type: wsIsTextFile(f.name) ? 'text' : 'binary',
+      type: isWorkspaceTextFile(f.name) ? 'text' : 'binary',
       lang: extToLang(f.name),
       mimeType: guessMime(f.name),
     }));
@@ -2737,7 +2866,7 @@ async function handle(req, res) {
       res.writeHead(413, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: '文件超过 1MB 限制', size: st.size }));
     }
-    if (!wsIsTextFile(guard.abs)) {
+    if (!isWorkspaceTextFile(guard.abs)) {
       res.writeHead(415, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: '二进制文件暂不支持文本预览', size: st.size }));
     }

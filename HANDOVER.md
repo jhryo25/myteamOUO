@@ -400,3 +400,13 @@ P0 → P2 → P4 → P1 → P3 → P5
 - 实时结果和历史恢复复用任务时间线：首项默认展开，其余可按需展开；展示负责人、拆分原因、步骤、取舍、待确认项和验收标准。
 - 保留任务 Agent 下拉和按 Agent 执行入口；下拉操作不会误触任务折叠。
 - 新增前端契约测试，禁止计划流重新调用 `appendTyping()` 输出机器协议。
+
+### 会话文件与中断恢复（2026-06-20）
+
+- HTML 打开失败改为右下角去重 Toast；404 后链接标记为 missing 并禁用，不再向聊天正文追加重复系统记录。
+- 顶部文件按钮打开同页分栏面板：本次对话文件、最近工作区文件、列表、HTML/Markdown/JSON/代码预览、复制和系统浏览器打开。
+- `/api/artifacts` 会从历史 Agent 文本中补扫真实工作区文件引用，旧会话无需重新执行即可形成文件集合；越界、敏感、缺失、二进制和超过 1MB 的文件不会进入面板。
+- 会话新增 `idle / running / interrupting / interrupted / completed / error` 状态机。停止时先进入 `interrupting`，等待子进程关闭后才允许继续，避免旧请求与续跑请求交叉写历史。
+- 中断和服务重启残留会话显示「继续对话」恢复卡；续跑复用原 Agent、历史和 Continuity Capsule，并明确要求跳过已完成部分。
+- 参考 LobsterAI `stopSession → idle` 与 `continueSession(sessionId, prompt)` 的职责划分，但 myteam 保留更明确的 `interrupted` 状态，不引入 OpenClaw 原生 session runtime。
+- 验证：22 项单测通过；现有会话识别 17 个真实文件；临时 Kimi 会话完成 `running → interrupting → interrupted → running`，测试进程与会话已清理。

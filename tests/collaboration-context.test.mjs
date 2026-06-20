@@ -19,6 +19,7 @@ import {
   appendSubagentMessage,
   listSubagentMessages,
   createTurnPartsCollector,
+  transitionSessionRunState,
 } from '../collaboration-context.mjs';
 import { readAgentRegistry, selectRunnableAgent } from '../agent-utils.mjs';
 
@@ -127,6 +128,15 @@ test('turn parts collector preserves order and pairs tool calls with results', (
   assert.equal(collector.parts[1].status, 'completed');
   assert.equal(collector.parts[2].name, 'shell');
   assert.equal(collector.finalText(), '已经完成。');
+});
+
+test('session run state resumes only from a terminal or interrupted state', () => {
+  const running = transitionSessionRunState(null, 'running', { agent: 'kimi', input: 'hello' });
+  const interrupted = transitionSessionRunState(running, 'interrupted', { reason: 'user_stopped' });
+  const resumed = transitionSessionRunState(interrupted, 'running', { resumedFrom: interrupted.updatedAt });
+  assert.equal(resumed.status, 'running');
+  assert.equal(resumed.agent, 'kimi');
+  assert.throws(() => transitionSessionRunState(interrupted, 'completed'), /invalid session run transition/);
 });
 
 test('subagent lifecycle and messages persist in jsonl', () => {

@@ -23,6 +23,8 @@
 | Memory | 保留显式 lessons/memory 和 Continuity Capsule，不引入后台推断式记忆写入 |
 | Scheduler | 采用进程内 timer + SQLite 恢复，不引入 OpenClaw gateway；错过触发默认 skipped |
 | 流式运行时 | 采用 LobsterAI/Euphony 的消息分层和可见状态设计，不引入 OpenClaw event runtime 或 Euphony 依赖；继续由本地 CLI parser 转换为统一 parts 和 SSE |
+| 会话继续 | 参考 LobsterAI `stopSession` 与 `continueSession` 的分离职责；myteam 用持久化 `interrupted` 状态、同一历史上下文和普通 CLI 新调用实现语义续跑，不伪装成 CLI 原生 session resume |
+| 文件面板 | 参考 LobsterAI artifact list + renderer；myteam 在同页分栏中预览会话文件和近期工作区文件，不引入 Electron 文件协议或 watcher |
 
 ## 暂不采用
 

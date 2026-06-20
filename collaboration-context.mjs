@@ -483,3 +483,25 @@ export function createTurnPartsCollector({ now = () => Date.now() } = {}) {
     finalText: () => parts.filter(part => part.type === 'final').map(part => part.text || '').join(''),
   };
 }
+
+const SESSION_RUN_TRANSITIONS = Object.freeze({
+  idle: new Set(['running']),
+  running: new Set(['completed', 'interrupting', 'interrupted', 'error']),
+  interrupting: new Set(['interrupted', 'error']),
+  completed: new Set(['running']),
+  interrupted: new Set(['running']),
+  error: new Set(['running']),
+});
+
+export function transitionSessionRunState(current, nextStatus, patch = {}) {
+  const previous = current?.status || 'idle';
+  if (!SESSION_RUN_TRANSITIONS[previous]?.has(nextStatus)) {
+    throw new Error(`invalid session run transition: ${previous} -> ${nextStatus}`);
+  }
+  return {
+    ...(current || {}),
+    ...patch,
+    status: nextStatus,
+    updatedAt: Date.now(),
+  };
+}

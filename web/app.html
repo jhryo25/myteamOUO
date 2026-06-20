@@ -16,7 +16,7 @@
   <div class="agent-pills" id="agentPills">
     <span class="agent-pill"><span class="dot"></span>连接中…</span>
   </div>
-  <button class="artifacts-btn" id="artifactsBtn" title="📁 产物面板">📁</button>
+  <button class="artifacts-btn" id="artifactsBtn" title="会话文件与预览" aria-label="会话文件与预览"><span aria-hidden="true">📁</span><span class="artifacts-btn-count hidden" id="artifactsBtnCount">0</span></button>
   <button class="hub-btn" id="hubBtn" title="打开 Hub">Hub</button>
   <button class="skills-page-btn" id="skillsPageBtn" title="Skills 管理">Skills</button>
   <button class="settings-btn" id="settingsBtn" title="Agent 配置">⚙</button>
@@ -279,17 +279,18 @@
 <!-- ── 产物面板（右侧滑入式，与聊天区同屏并存）── -->
 <div class="artifacts-panel hidden" id="artifactsPanel">
   <div class="artifacts-panel-header">
-    <span class="artifacts-panel-title">📁 产物</span>
+    <span class="artifacts-panel-title">会话文件</span>
     <div class="artifacts-panel-tabs">
-      <button class="ap-tab active" data-aptab="chat">💬 聊天提取</button>
-      <button class="ap-tab" data-aptab="workspace">🗂 工作区</button>
+      <button class="ap-tab active" data-aptab="chat">本次对话</button>
+      <button class="ap-tab" data-aptab="workspace">最近文件</button>
     </div>
+    <button class="artifacts-panel-refresh" id="artifactsRefreshBtn" title="刷新文件列表" aria-label="刷新文件列表">↻</button>
     <button class="artifacts-panel-close" id="artifactsPanelClose">✕</button>
   </div>
   <div class="artifacts-panel-body">
     <!-- 文件列表区 -->
     <div class="artifacts-list" id="artifactsList">
-      <div class="artifacts-empty">暂无产物。让 agent 输出代码块或文件后会自动收集。</div>
+      <div class="artifacts-empty">暂无会话文件。Agent 输出或引用文件后会自动收集。</div>
     </div>
     <!-- 预览区 -->
     <div class="artifacts-preview-wrap" id="artifactsPreviewWrap">

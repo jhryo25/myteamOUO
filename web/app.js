@@ -189,8 +189,30 @@ function copyCode(btn) {
 const chatEl = document.getElementById('chatMessages');
 const welcome = document.getElementById('chatWelcome');
 
+function showToast(message, tone = 'info', duration = 3200) {
+  let stack = document.getElementById('toastStack');
+  if (!stack) {
+    stack = document.createElement('div');
+    stack.id = 'toastStack';
+    stack.className = 'toast-stack';
+    document.body.appendChild(stack);
+  }
+  let toast = [...stack.querySelectorAll('.app-toast')].find(item => item.dataset.message === message);
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.className = `app-toast ${tone}`;
+    toast.dataset.message = message;
+    toast.textContent = message;
+    stack.appendChild(toast);
+  }
+  clearTimeout(toast._removeTimer);
+  toast._removeTimer = setTimeout(() => toast.remove(), duration);
+  return toast;
+}
+
 async function openLocalHtml(path, button) {
   const oldText = button?.innerHTML;
+  let missing = false;
   if (button) {
     button.disabled = true;
     button.dataset.opening = 'true';
@@ -202,15 +224,24 @@ async function openLocalHtml(path, button) {
       body: JSON.stringify({ path }),
     });
     const data = await response.json();
-    if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+    if (!response.ok || data.error) {
+      const failure = new Error(data.error || `HTTP ${response.status}`);
+      failure.status = response.status;
+      throw failure;
+    }
     if (button) button.title = `已使用默认浏览器打开 ${data.path}`;
     return data;
   } catch (error) {
-    addSystemMsg(`无法打开 HTML：${error.message}`);
+    missing = error.status === 404;
+    if (missing && button) {
+      button.classList.add('missing');
+      button.title = '文件不存在或已移动';
+    }
+    showToast(`无法打开文件：${error.message}`, 'error');
     throw error;
   } finally {
     if (button) {
-      button.disabled = false;
+      button.disabled = missing;
       button.dataset.opening = 'false';
       if (oldText) button.innerHTML = oldText;
     }
@@ -1612,11 +1643,17 @@ document.getElementById('stopBtn').onclick = async () => {
   const run = getSessionRun();
   if (run?.controller) {
     run.controller.abort();
-    await fetch('/api/abort', {
+    const response = await fetch('/api/abort', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionId: currentSessionId, clientRunId: run.clientRunId }),
     });
+    if (response.ok) {
+      const result = await response.json();
+      if (!result.settled) await waitForSessionRecovery();
+      else await loadSessions();
+      renderSessionRecovery();
+    }
   }
 };
 
@@ -1892,25 +1929,30 @@ goalInput.addEventListener('keydown', e => {
 });
 
 // ── chat 模式 ─────────────────────────────────────────────────
-async function doChat(message, sessionId = currentSessionId) {
+async function doChat(message, sessionId = currentSessionId, options = {}) {
+  const isResume = Boolean(options.resume);
   let attachments = [];
-  try {
-    attachments = await uploadPendingImages();
-  } catch (err) {
-    addSystemMsg(`图片发送失败：${err.message}`);
-    return;
+  if (!isResume) {
+    try {
+      attachments = await uploadPendingImages();
+    } catch (err) {
+      addSystemMsg(`图片发送失败：${err.message}`);
+      return;
+    }
   }
-  goalInput.value = '';
-  goalInput.style.height = '';
-  clearPendingImages();
+  if (!isResume) {
+    goalInput.value = '';
+    goalInput.style.height = '';
+    clearPendingImages();
+  }
   mentionHint.classList.add('hidden');
 
-  addUserBubble(message, { attachments });
+  addUserBubble(isResume ? '继续上次对话' : message, { attachments });
 
   let bubble = null;
 
   const agentAttachments = attachments.map(({ previewUrl, ...attachment }) => attachment);
-  await ssePost('/api/chat', { message, sessionId, attachments: agentAttachments, mode: 'chat' }, {
+  await ssePost('/api/chat', { message, sessionId, attachments: agentAttachments, mode: 'chat', resume: isResume }, {
     start: ({ agent }) => {
       setActiveAgent(agent);
       bubble = startAgentBubble(agent, sessionId);
@@ -1925,17 +1967,19 @@ async function doChat(message, sessionId = currentSessionId) {
       finishTyping();
       hideRunningPanel();
       addSystemMsg(`✗ ${msg}`);
+      loadSessions().then(() => renderSessionRecovery());
     },
     done: () => {
       const stats = collectFinishStats();
       finishTyping(stats);
       hideRunningPanel();
       loadSessions();
+      loadArtifacts();
     },
     aborted: () => {
       finishTyping();
       hideRunningPanel();
-      addSystemMsg('⏹ 已中断');
+      loadSessions().then(() => renderSessionRecovery());
     },
   });
 
@@ -3800,6 +3844,7 @@ drawerSaveBtn.onclick = async () => {
 
 // ── Session 管理 ──────────────────────────────────────────────
 let currentSessionId = null;
+let sessionStateById = new Map();
 const HISTORY_PAGE_SIZE = 20;
 let historyPage = { hasMore: false, nextBefore: null, loading: false };
 
@@ -3838,6 +3883,7 @@ function renderSessionList(sessions, activeId) {
   });
   newestFirst.forEach(s => {
     const isRunning = Boolean(sessionRuns.get(s.id)?.running);
+    const isInterrupted = s.run_state?.status === 'interrupted';
     const item = document.createElement('div');
     item.className = 'session-item' + (s.id === activeId ? ' active' : '') + (isRunning ? ' running' : '');
     item.dataset.id = s.id;
@@ -3850,6 +3896,7 @@ function renderSessionList(sessions, activeId) {
       </div>
       <div class="session-item-meta">
         ${isRunning ? '<span class="session-running-badge"><span class="session-running-dot"></span>运行中</span>' : ''}
+        ${isInterrupted ? '<span class="session-mode-badge interrupted">可继续</span>' : ''}
         ${sessionModeBadge(s.mode)}
         <span>${timeStr}</span>
         ${s.message_count ? `<span>· ${s.message_count} 条</span>` : ''}
@@ -3927,6 +3974,7 @@ async function loadSessions() {
   try {
     const { activeId, sessions } = await fetch('/api/sessions').then(r => r.json());
     currentSessionId = activeId;
+    sessionStateById = new Map(sessions.map(session => [session.id, session.run_state || { status: 'idle' }]));
     renderSessionList(sessions, activeId);
     return activeId;
   } catch (err) {
@@ -4097,9 +4145,43 @@ function renderTurnParts(parts, fallbackText = '') {
     if (part.type === 'final') {
       return `<section class="turn-final"><div class="turn-final-label">最终输出</div><div class="bubble agent-bubble">${renderRichText(part.text || '')}</div></section>`;
     }
+    if (part.type === 'interrupted') return `<div class="turn-interrupted">回复已中断，可继续完成剩余工作。</div>`;
     if (part.type === 'error') return `<div class="turn-error">${esc(part.message || 'Agent 执行失败')}</div>`;
     return '';
   }).join('')}</div>`;
+}
+
+function renderSessionRecovery() {
+  chatEl.querySelector('.session-recovery')?.remove();
+  const state = sessionStateById.get(currentSessionId);
+  if (!['interrupted', 'error'].includes(state?.status)) return;
+  hideWelcome();
+  const card = document.createElement('div');
+  card.className = 'session-recovery';
+  const interrupted = state.status === 'interrupted';
+  card.innerHTML = `
+    <div class="session-recovery-copy">
+      <div class="session-recovery-title">${interrupted ? '上次回复已中断' : '上次执行未完成'}</div>
+      <div class="session-recovery-desc">保留当前会话上下文，继续完成剩余工作，不重复已经完成的部分。</div>
+    </div>
+    <button class="session-recovery-btn">继续对话</button>`;
+  card.querySelector('button').onclick = async event => {
+    event.currentTarget.disabled = true;
+    card.remove();
+    await doChat('', currentSessionId, { resume: true });
+  };
+  chatEl.appendChild(card);
+  scrollChat();
+}
+
+async function waitForSessionRecovery(attempts = 12) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    await loadSessions();
+    if (['interrupted', 'error'].includes(sessionStateById.get(currentSessionId)?.status)) return true;
+    await new Promise(resolveWait => setTimeout(resolveWait, 300));
+  }
+  showToast('Agent 仍在停止中，请稍后再继续', 'info');
+  return false;
 }
 
 function renderAssistantHistoryBubble(h) {
@@ -4225,6 +4307,7 @@ async function loadHistory({ older = false } = {}) {
     }
     historyPage.hasMore = Boolean(page?.hasMore);
     historyPage.nextBefore = page?.nextBefore ?? null;
+    if (!older) renderSessionRecovery();
   } catch {
     // Chat still works if history cannot be loaded.
   } finally {
@@ -4239,6 +4322,7 @@ async function loadHistory({ older = false } = {}) {
   await loadSessions();
   await loadHistory();
   await restoreRunningState();
+  loadArtifacts();
 })();
 
 // Reconnect to a running session live SSE stream after a page refresh.
@@ -4376,6 +4460,8 @@ async function restoreRunningState() {
 const artifactsBtn = document.getElementById('artifactsBtn');
 const artifactsPanel = document.getElementById('artifactsPanel');
 const artifactsPanelClose = document.getElementById('artifactsPanelClose');
+const artifactsRefreshBtn = document.getElementById('artifactsRefreshBtn');
+const artifactsBtnCount = document.getElementById('artifactsBtnCount');
 const artifactsList = document.getElementById('artifactsList');
 const artifactsPreviewWrap = document.getElementById('artifactsPreviewWrap');
 const artifactsPreviewHeader = document.getElementById('artifactsPreviewHeader');
@@ -4410,6 +4496,7 @@ function toggleArtifactsPanel() {
 
 artifactsBtn.onclick = toggleArtifactsPanel;
 artifactsPanelClose.onclick = closeArtifactsPanel;
+artifactsRefreshBtn.onclick = () => loadArtifacts();
 
 // ── Tab 切换 ─────────────────────────────────────────────────
 artifactsPanel.querySelectorAll('.ap-tab').forEach(btn => {
@@ -4417,7 +4504,10 @@ artifactsPanel.querySelectorAll('.ap-tab').forEach(btn => {
     artifactsPanel.querySelectorAll('.ap-tab').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     apActiveTab = btn.dataset.aptab;
+    apCurrentArtifact = null;
     renderArtifactList();
+    if (apActiveTab === 'chat' && apArtifacts.length) selectArtifact(apArtifacts[0]);
+    else if (apActiveTab === 'workspace' && apWsFiles.length) selectWsFile(apWsFiles[0]);
   };
 });
 
@@ -4431,6 +4521,8 @@ async function loadArtifacts() {
     ]);
     apArtifacts = chatData.artifacts || [];
     apWsFiles = wsData.files || [];
+    artifactsBtnCount.textContent = apArtifacts.length > 99 ? '99+' : String(apArtifacts.length);
+    artifactsBtnCount.classList.toggle('hidden', apArtifacts.length === 0);
     renderArtifactList();
     // 默认选中第一项
     if (!apCurrentArtifact) {
@@ -4461,7 +4553,7 @@ function apRelativeTime(ts) {
 function renderArtifactList() {
   if (apActiveTab === 'chat') {
     if (!apArtifacts.length) {
-      artifactsList.innerHTML = '<div class="artifacts-empty">暂无产物。让 agent 输出代码块后会自动收集。</div>';
+      artifactsList.innerHTML = '<div class="artifacts-empty">暂无会话文件。Agent 输出或引用文件后会自动收集。</div>';
       return;
     }
     artifactsList.innerHTML = apArtifacts.map((a, i) => `
@@ -4549,7 +4641,7 @@ function renderArtifactPreview() {
     artifactsPreviewContent.innerHTML = '';
     const iframe = document.createElement('iframe');
     iframe.className = 'ap-iframe';
-    iframe.sandbox = 'allow-same-origin allow-scripts';
+    iframe.sandbox = 'allow-scripts';
     iframe.srcdoc = a.content || '';
     artifactsPreviewContent.appendChild(iframe);
     return;
@@ -4581,7 +4673,7 @@ function renderWsFilePreview(f, content) {
   if (lang === 'html') {
     const iframe = document.createElement('iframe');
     iframe.className = 'ap-iframe';
-    iframe.sandbox = 'allow-same-origin allow-scripts';
+    iframe.sandbox = 'allow-scripts';
     iframe.srcdoc = content;
     artifactsPreviewContent.appendChild(iframe);
   } else if ((lang === 'md' || lang === 'markdown') && typeof marked !== 'undefined') {
@@ -4609,7 +4701,6 @@ artifactsCopyBtn.onclick = async () => {
 
 // ── session 切换时刷新 ────────────────────────────────────────
 function refreshArtifactsOnSessionChange() {
-  if (!apVisible) return;
   apCurrentArtifact = null;
   apArtifacts = [];
   loadArtifacts();

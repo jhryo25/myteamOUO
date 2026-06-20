@@ -49,3 +49,14 @@ test('plan UI keeps structured JSON out of the assistant text bubble', () => {
   assert.doesNotMatch(planFlow[0], /chunk: \(\{ text \}\) => \{ appendTyping\(/);
   assert.match(source, /function renderPlanTaskDetail\(/);
 });
+
+test('file errors use toast UI and interrupted chat exposes resume action', () => {
+  const source = readFileSync(new URL('../web/app.js', import.meta.url), 'utf8');
+  const openHtml = source.match(/async function openLocalHtml\([\s\S]*?\n}\n\nchatEl/);
+  assert.ok(openHtml, 'openLocalHtml flow should exist');
+  assert.match(openHtml[0], /showToast\(/);
+  assert.doesNotMatch(openHtml[0], /addSystemMsg\(/);
+  assert.match(source, /resume: isResume/);
+  assert.match(source, /function renderSessionRecovery\(/);
+  assert.match(source, /function loadArtifacts\(/);
+});

@@ -328,8 +328,7 @@ function parseCodex(line) {
 }
 
 function parseKimi(line) {
-  // kimi --output-format stream-json：role=assistant 行
-  // content 字段是正文，thinking/reasoning_content 是思考
+  // kimi --output-format stream-json：正文、工具调用和工具结果是独立 NDJSON 行。
   try {
     const e = JSON.parse(line);
     if (e.role === 'assistant') {
@@ -346,11 +345,57 @@ function parseKimi(line) {
       if (typeof e.thinking === 'string') thinking = e.thinking;
       else if (typeof e.reasoning === 'string') thinking = e.reasoning;
       else if (typeof e.reasoning_content === 'string') thinking = e.reasoning_content;
-      if (!text && !thinking) return null;
-      return { text, thinking };
+      const activities = Array.isArray(e.tool_calls)
+        ? e.tool_calls.map((call) => {
+            const fn = call?.function || {};
+            let input = fn.arguments;
+            try { input = typeof input === 'string' ? JSON.parse(input) : input; } catch {}
+            return {
+              id: String(call?.id || ''),
+              phase: 'started',
+              name: String(fn.name || call?.name || '工具'),
+              summary: summarizeToolInput(input),
+            };
+          })
+        : [];
+      if (!text && !thinking && activities.length === 0) return null;
+      return { text, thinking, activities };
+    }
+    if (e.role === 'tool') {
+      return {
+        text: '',
+        thinking: '',
+        activities: [{
+          id: String(e.tool_call_id || ''),
+          phase: 'completed',
+          name: '',
+          summary: summarizeToolResult(e.content),
+        }],
+      };
     }
   } catch {}
   return null;
+}
+
+function summarizeToolInput(input) {
+  if (input === null || input === undefined || input === '') return '';
+  if (typeof input !== 'object') return String(input).replace(/\s+/g, ' ').slice(0, 120);
+  const preferred = ['path', 'file_path', 'command', 'query', 'pattern', 'url', 'description'];
+  for (const key of preferred) {
+    if (input[key] !== null && input[key] !== undefined && input[key] !== '') {
+      return String(input[key]).replace(/\s+/g, ' ').slice(0, 120);
+    }
+  }
+  return Object.keys(input).slice(0, 4).join('、');
+}
+
+function summarizeToolResult(content) {
+  const text = typeof content === 'string' ? content : JSON.stringify(content ?? '');
+  if (!text) return '无返回内容';
+  const total = text.match(/Total lines in file:\s*(\d+)/i)?.[1];
+  if (total) return `返回 ${total} 行`;
+  const lines = text.split(/\r?\n/).length;
+  return lines > 1 ? `返回 ${lines} 行` : `返回 ${text.length} 个字符`;
 }
 
 function parseText(line) {

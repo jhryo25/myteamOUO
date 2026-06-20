@@ -341,8 +341,12 @@ function startAgentBubble(agentKey, sessionId = currentSessionId) {
         </button>
         <div class="thinking-body hidden" id="body-${uid}"></div>
       </div>
+      <div class="agent-activity-feed hidden" aria-live="polite"></div>
       <div class="bubble agent-bubble typing-cursor" id="${uid}">
-        <div class="thinking-line"><span class="thinking-dot"></span><span>正在连接 ${esc(agentKey)}...</span></div>
+        <div class="agent-waiting" aria-label="正在启动 ${esc(displayName)}">
+          <span class="agent-waiting-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>${esc(displayName)} 启动中</span>
+        </div>
       </div>
       <div class="bubble-actions">
         <button class="bubble-action-btn" data-action="copy" title="复制">⎘</button>
@@ -424,6 +428,7 @@ function _flushTyper(bubble) {
 
 function appendTyping(text) {
   if (!agentTypingBubble || !text) return;
+  agentTypingBubble.classList.remove('hidden');
   let st = typerStates.get(agentTypingBubble);
   if (!st) {
     st = { pending: '', displayed: '', rafId: null };
@@ -442,14 +447,21 @@ function appendThinking(text) {
   const cnt   = wrap.querySelector('[id^="cnt-"]');
   const prev  = wrap.querySelector('[id^="prev-"]');
   if (!panel || !body) return;
-  // panel stays hidden during streaming; revealed in finishTyping
-  // panel.classList.remove('hidden');
+  if (!agentTypingBubble.dataset.raw) agentTypingBubble.classList.add('hidden');
+  // 参考 LobsterAI：真实思考流到达后立即展示，生成期间默认展开。
+  panel.classList.remove('hidden');
+  body.classList.remove('hidden');
+  const toggle = wrap.querySelector('.thinking-toggle');
+  if (toggle) {
+    toggle.setAttribute('aria-expanded', 'true');
+    const chevron = toggle.querySelector('.thinking-chevron');
+    if (chevron) chevron.textContent = '⌄';
+  }
   body.dataset.raw = (body.dataset.raw || '') + text;
   body.textContent = body.dataset.raw;
   const len = (body.dataset.raw || '').length;
   if (cnt) cnt.textContent = `${len} 字`;
   // 默认折叠状态下，预览显示最新一行片段（参考 clowder-ai ThinkingContent preview）
-  const toggle = wrap.querySelector('.thinking-toggle');
   const isExpanded = toggle?.getAttribute('aria-expanded') === 'true';
   if (prev) {
     if (isExpanded) {
@@ -463,8 +475,17 @@ function appendThinking(text) {
   }
 }
 
-function updateAgentStatus(text) {
+function updateAgentStatus(text, phase = '') {
   if (!agentTypingBubble || agentTypingBubble.dataset.raw) return;
+  if (phase === 'waiting' || phase === 'starting') {
+    agentTypingBubble.classList.remove('hidden');
+    agentTypingBubble.innerHTML = `<div class="agent-waiting" aria-label="${esc(text || 'Agent 运行中')}">
+      <span class="agent-waiting-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span>${esc(text || 'Agent 运行中')}</span>
+    </div>`;
+    scrollChat();
+    return;
+  }
   agentTypingBubble.innerHTML = `<div class="thinking-line"><span class="thinking-dot"></span><span>${esc(text || 'agent 正在处理...')}</span></div>`;
   scrollChat();
 }
@@ -480,16 +501,18 @@ function collectFinishStats() {
 }
 
 function finishTyping(stats = null) {
-  if (!agentTypingBubble) return;
+  if (!agentTypingBubble) return false;
   // 强制 flush 打字机：把剩余字符全部填入
   const st = typerStates.get(agentTypingBubble);
+  let raw = agentTypingBubble.dataset.raw || '';
   if (st) {
     if (st.rafId) clearTimeout(st.rafId);
     st.displayed = st.pending;
+    raw = st.pending;
+    agentTypingBubble.dataset.raw = raw;
     typerStates.delete(agentTypingBubble);
   }
   agentTypingBubble.classList.remove('typing-cursor');
-  const raw = agentTypingBubble.dataset.raw || '';
   if (raw) {
     try { agentTypingBubble.innerHTML = renderRichText(raw); } catch (err) { console.error('renderRichText failed:', err); }
   }
@@ -537,6 +560,7 @@ function finishTyping(stats = null) {
     }
   }
   agentTypingBubble = null;
+  return Boolean(raw.trim());
 }
 
 function scrollChat() {
@@ -1165,6 +1189,35 @@ function updateSendBtnState() {
   }
 }
 
+function appendAgentActivity(activity = {}) {
+  if (!agentTypingBubble) return;
+  const wrap = agentTypingBubble.closest('.bubble-content-wrap');
+  const feed = wrap?.querySelector('.agent-activity-feed');
+  if (!feed) return;
+  feed.classList.remove('hidden');
+  if (!agentTypingBubble.dataset.raw) agentTypingBubble.classList.add('hidden');
+
+  const id = String(activity.id || `activity-${Date.now()}`);
+  let row = [...feed.querySelectorAll('.agent-activity-row')].find(item => item.dataset.activityId === id);
+  if (!row) {
+    row = document.createElement('div');
+    row.className = 'agent-activity-row running';
+    row.dataset.activityId = id;
+    row.innerHTML = '<span class="agent-activity-dot"></span><div class="agent-activity-copy"><strong></strong><span></span></div>';
+    feed.appendChild(row);
+  }
+
+  if (activity.name) row.dataset.activityName = activity.name;
+  const name = row.dataset.activityName || '工具';
+  const completed = activity.phase === 'completed';
+  row.classList.toggle('running', !completed);
+  row.classList.toggle('completed', completed);
+  row.querySelector('strong').textContent = completed ? `${name} 已完成` : `正在调用 ${name}`;
+  const detail = row.querySelector('.agent-activity-copy span');
+  detail.textContent = activity.summary || (completed ? '已返回结果' : '等待工具返回');
+  scrollChat();
+}
+
 function approvalRiskLabel(risk) {
   return ({ high: '高风险', medium: '中风险', low: '低风险' })[risk] || risk || '未知风险';
 }
@@ -1331,7 +1384,13 @@ function ssePost(url, body, handlers) {
       if (err.name === 'AbortError') {
         if (requestSessionId === currentSessionId) handlers.aborted?.();
       } else {
-        if (requestSessionId === currentSessionId) handlers.error?.({ message: err.message });
+        if (requestSessionId === currentSessionId) {
+          const rawMessage = String(err?.message || '');
+          const message = /network|failed to fetch|fetch failed/i.test(rawMessage)
+            ? '连接已中断，任务可能仍在后台运行；刷新页面可恢复进度'
+            : rawMessage;
+          handlers.error?.({ message });
+        }
       }
       resolve(null);
     }).finally(() => {
@@ -1671,7 +1730,8 @@ async function doChat(message, sessionId = currentSessionId) {
     },
     chunk: ({ text }) => { appendTyping(text); bumpRunningChars('chunk', (text || '').length); },
     thinking: ({ text }) => { appendThinking(text); bumpRunningChars('thinking', (text || '').length); },
-    status: ({ text }) => updateAgentStatus(text),
+    activity: appendAgentActivity,
+    status: ({ text, phase }) => updateAgentStatus(text, phase),
     error: ({ message: msg }) => {
       finishTyping();
       hideRunningPanel();
@@ -1722,9 +1782,10 @@ async function doPlan(goal) {
 
   await ssePost('/api/plan', { goal, agent, sessionId: currentSessionId, attachments: agentAttachments, mode: 'plan' }, {
     start: ({ agent }) => setActiveAgent(agent),
-    status: ({ text }) => updateAgentStatus(text),
+    status: ({ text, phase }) => updateAgentStatus(text, phase),
     chunk: ({ text }) => { appendTyping(text); bumpRunningChars('chunk', (text || '').length); },
     thinking: ({ text }) => { appendThinking(text); bumpRunningChars('thinking', (text || '').length); },
+    activity: appendAgentActivity,
     error: ({ message, raw }) => {
       finishTyping();
       hideRunningPanel();
@@ -1776,13 +1837,14 @@ async function runDispatch(options = {}) {
       },
       chunk:        ({ text }) => { appendTyping(text); bumpRunningChars('chunk', (text || '').length); },
       thinking:     ({ text }) => { appendThinking(text); bumpRunningChars('thinking', (text || '').length); },
-      status:       ({ text }) => updateAgentStatus(text),
+      activity:     appendAgentActivity,
+      status:       ({ text, phase }) => updateAgentStatus(text, phase),
       'task-done':  ({ id, title, agent, summary }) => {
         const stats = collectFinishStats();
-        finishTyping(stats);
+        const hadOutput = finishTyping(stats);
         hideRunningPanel();
         updateTaskDot(id, 'done');
-        if (title) addResultCard(title, agent, summary, true);
+        if (title && !hadOutput) addResultCard(title, agent, summary, true);
       },
       'task-failed':({ id, title, agent, error }) => {
         finishTyping();
@@ -3269,7 +3331,7 @@ agentAddBtn.onclick = async () => {
   const result = await showCreateAgentDialog(availableAgents);
   if (!result) return;
 
-  const { key, label, baseAgent, template } = result;
+  const { key, label, baseAgent, template, model, baseUrl, apiKey } = result;
   if (agentConfigList.some(a => a.key === key)) {
     drawerSaveTip.textContent = `@${key} 已存在`;
     drawerSaveTip.className = 'drawer-save-tip err';
@@ -3290,9 +3352,10 @@ agentAddBtn.onclick = async () => {
     argsTemplate: baseAgent?.argsTemplate || '-p {prompt}',
     checkTemplate: baseAgent?.checkTemplate || '--help',
     envKey: baseAgent?.envKey || '',
-    baseUrl: baseAgent?.baseUrl || '',
-    apiKey: baseAgent?.apiKey || '',
-    model: '',
+    inheritFrom: baseAgent?.key || '',
+    baseUrl,
+    apiKey,
+    model,
     roleDescription: tpl.roleDescription || '',
     personality: tpl.personality || '',
     strengths: tpl.strengths || [],
@@ -3306,13 +3369,12 @@ agentAddBtn.onclick = async () => {
   await saveAgentList([...agentConfigList, newAgent], { scrollToKey: key });
 };
 
-// 新建 Agent 对话框：基础 CLI + key + label + 角色模板
+// 新建 Agent 变体：复用一个已可启动 CLI，可选覆盖模型/API 配置和角色。
 function showCreateAgentDialog(availableAgents) {
   return new Promise((resolve) => {
-    const baseOptions = ['<option value="">— 从零开始（不基于已有 CLI）—</option>']
-      .concat(availableAgents.map((a, i) =>
-        `<option value="${i}">基于 ${esc(a.label)} (@${esc(a.key)})</option>`
-      )).join('');
+    const baseOptions = availableAgents.map((a, i) =>
+      `<option value="${i}">${esc(a.label)} (@${esc(a.key)})</option>`
+    ).join('');
 
     const tplOptions = ROLE_TEMPLATES.map(t =>
       `<option value="${esc(t.key)}">${esc(t.label)}</option>`
@@ -3321,31 +3383,51 @@ function showCreateAgentDialog(availableAgents) {
     const overlay = document.createElement('div');
     overlay.className = 'dialog-overlay';
     overlay.innerHTML = `
-      <div class="dialog-box" style="min-width:420px;">
-        <div class="dialog-title">新建 Agent / 变体</div>
+      <div class="dialog-box agent-create-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-create-title">
+        <div class="dialog-title" id="agent-create-title">新建 Agent 变体</div>
+        <p class="agent-create-intro">变体复用已有 Agent 的本机 CLI，只覆盖 mention、模型或角色。不会安装新的 CLI。</p>
         <div class="dialog-form">
           <label class="dialog-field">
-            <span>基础 CLI</span>
-            <select class="dialog-input" data-field="base">${baseOptions}</select>
-            <small class="dialog-hint">同一 CLI 可以创建多个变体，使用不同模型/角色</small>
+            <span>1. 复用哪个 Agent？ <b class="field-required">必填</b></span>
+            <select class="dialog-input" data-field="base" ${availableAgents.length ? '' : 'disabled'}>
+              ${baseOptions || '<option>没有可启动的 Agent</option>'}
+            </select>
           </label>
+          <div class="agent-inherit-preview" data-field="inherit-preview"></div>
           <label class="dialog-field">
-            <span>Key（用于 @mention，小写字母数字）</span>
-            <input class="dialog-input" data-field="key" placeholder="例如: claude-sonnet" />
+            <span>2. Mention 标识 <b class="field-required">必填</b></span>
+            <div class="agent-key-input"><span>@</span><input class="dialog-input" data-field="key" placeholder="例如 kimi-research" autocomplete="off" /></div>
+            <small class="dialog-hint">对话中用这个标识指定变体，仅支持小写字母、数字、短横线和下划线。</small>
           </label>
           <label class="dialog-field">
             <span>显示名称</span>
-            <input class="dialog-input" data-field="label" placeholder="例如: Claude Sonnet" />
+            <input class="dialog-input" data-field="label" placeholder="例如 Kimi Research" />
+          </label>
+          <div class="agent-create-section-title">模型连接 <span>可选</span></div>
+          <label class="dialog-field">
+            <span>模型 ID</span>
+            <input class="dialog-input" data-field="model" placeholder="留空则继承基础 Agent" autocomplete="off" />
           </label>
           <label class="dialog-field">
-            <span>角色模板（可选）</span>
+            <span>API 地址</span>
+            <input class="dialog-input" data-field="baseUrl" placeholder="例如 https://api.example.com/v1" autocomplete="off" />
+            <small class="dialog-hint">使用本机 CLI 默认账号时不要填；只有接入自定义兼容接口时才需要。</small>
+          </label>
+          <label class="dialog-field">
+            <span>API Key</span>
+            <input class="dialog-input" data-field="apiKey" type="password" placeholder="留空则继承基础 Agent" autocomplete="new-password" />
+          </label>
+          <label class="dialog-field">
+            <span>角色模板</span>
             <select class="dialog-input" data-field="template">${tplOptions}</select>
             <small class="dialog-hint">套用后自动填入角色描述、性格、擅长、限制</small>
           </label>
+          ${availableAgents.length ? '' : '<div class="agent-create-error">请先在设置中配置并检测至少一个可启动的 Agent CLI。</div>'}
+          <div class="agent-create-error hidden" data-field="error"></div>
         </div>
         <div class="dialog-actions">
           <button class="dialog-cancel-btn">取消</button>
-          <button class="dialog-confirm-btn">创建</button>
+          <button class="dialog-confirm-btn" ${availableAgents.length ? '' : 'disabled'}>创建变体</button>
         </div>
       </div>
     `;
@@ -3355,16 +3437,28 @@ function showCreateAgentDialog(availableAgents) {
     const keyInp = overlay.querySelector('[data-field="key"]');
     const labelInp = overlay.querySelector('[data-field="label"]');
     const tplSel = overlay.querySelector('[data-field="template"]');
+    const modelInp = overlay.querySelector('[data-field="model"]');
+    const baseUrlInp = overlay.querySelector('[data-field="baseUrl"]');
+    const apiKeyInp = overlay.querySelector('[data-field="apiKey"]');
+    const inheritPreview = overlay.querySelector('[data-field="inherit-preview"]');
+    const errorEl = overlay.querySelector('[data-field="error"]');
 
-    // 选基础 CLI 时自动填默认 label
-    baseSel.onchange = () => {
-      const idx = baseSel.value;
-      if (idx !== '' && availableAgents[idx]) {
-        labelInp.placeholder = `${availableAgents[idx].label} (变体)`;
-      } else {
-        labelInp.placeholder = '例如: Claude Sonnet';
+    const renderBase = () => {
+      const base = availableAgents[Number(baseSel.value)];
+      if (!base) {
+        inheritPreview.innerHTML = '';
+        return;
       }
+      labelInp.placeholder = `${base.label} 变体`;
+      modelInp.placeholder = base.model ? `当前：${base.model}` : '留空则使用 CLI 默认模型';
+      baseUrlInp.placeholder = base.baseUrl ? `当前：${base.baseUrl}` : '例如 https://api.example.com/v1';
+      inheritPreview.innerHTML = `
+        <div><span>自动继承</span><strong>${esc(base.label)} 的 CLI 配置</strong></div>
+        <code title="${esc(base.path || '')}">${esc(base.path || '未配置路径')}</code>
+        <small>可执行路径和启动参数无需重复填写。</small>`;
     };
+    baseSel.onchange = renderBase;
+    renderBase();
 
     setTimeout(() => keyInp.focus(), 50);
 
@@ -3373,7 +3467,18 @@ function showCreateAgentDialog(availableAgents) {
     overlay.querySelector('.dialog-confirm-btn').onclick = () => {
       const rawKey = keyInp.value.trim();
       const key = rawKey.toLowerCase().replace(/^@+/, '').replace(/[^a-z0-9_-]+/g, '-');
-      if (!key) { keyInp.focus(); keyInp.style.borderColor = 'var(--red)'; return; }
+      errorEl.classList.add('hidden');
+      keyInp.style.borderColor = '';
+      if (!key) {
+        errorEl.textContent = '请填写 mention 标识，例如 kimi-research。';
+        errorEl.classList.remove('hidden');
+        keyInp.focus(); keyInp.style.borderColor = 'var(--red)'; return;
+      }
+      if (agentConfigList.some(agent => agent.key === key)) {
+        errorEl.textContent = `@${key} 已存在，请换一个标识。`;
+        errorEl.classList.remove('hidden');
+        keyInp.focus(); keyInp.style.borderColor = 'var(--red)'; return;
+      }
       // 拦截疑似 API key（≥24 位纯十六进制）误填到 key 字段
       if (/^[0-9a-f]{24,}$/.test(key)) {
         keyInp.style.borderColor = 'var(--red)';
@@ -3382,9 +3487,18 @@ function showCreateAgentDialog(availableAgents) {
         return;
       }
       const idx = baseSel.value;
-      const baseAgent = (idx !== '' && availableAgents[idx]) || null;
-      const label = labelInp.value.trim() || (baseAgent ? `${baseAgent.label} (变体)` : key);
-      close({ key, label, baseAgent, template: tplSel.value });
+      const baseAgent = availableAgents[Number(idx)] || null;
+      if (!baseAgent) return;
+      const label = labelInp.value.trim() || `${baseAgent.label} 变体`;
+      close({
+        key,
+        label,
+        baseAgent,
+        template: tplSel.value,
+        model: modelInp.value.trim() || baseAgent.model || '',
+        baseUrl: baseUrlInp.value.trim() || baseAgent.baseUrl || '',
+        apiKey: apiKeyInp.value.trim(),
+      });
     };
     overlay.querySelector('.dialog-cancel-btn').onclick = () => close(null);
     overlay.onclick = (e) => { if (e.target === overlay) close(null); };
@@ -3936,9 +4050,10 @@ async function reconnectSessionStream(sessionId, agentKey, taskTitle) {
         try { parsed = JSON.parse(data); } catch { continue; }
         if (event === 'nostream') { break; }
         if (event === 'start') { ensureBubble(parsed.agent || agentKey); continue; }
-        if (event === 'status') { ensureBubble(parsed.agent || agentKey); updateAgentStatus(parsed.text); continue; }
+        if (event === 'status') { ensureBubble(parsed.agent || agentKey); updateAgentStatus(parsed.text, parsed.phase); continue; }
         if (event === 'chunk' && parsed.text) { ensureBubble(parsed.agent || agentKey); appendTyping(parsed.text); bumpRunningChars('chunk', (parsed.text||'').length); continue; }
         if (event === 'thinking' && parsed.text) { appendThinking(parsed.text); bumpRunningChars('thinking', (parsed.text||'').length); continue; }
+        if (event === 'activity') { appendAgentActivity(parsed); continue; }
         if (event === 'done') { finishTyping(collectFinishStats()); hideRunningPanel(); loadSessions(); break; }
         if (event === 'error') { finishTyping(); hideRunningPanel(); addSystemMsg(`? ${parsed.message||''}`); break; }
       }

@@ -11,6 +11,7 @@
 | 调度 | Cron 任务关联 Cowork session 和运行历史 | P8 支持五段 Cron、时区、审批暂停、互斥和运行历史 |
 | 子代理 | 状态机、消息缓存和数据库持久化 | P1/P5 使用结构化 spawn 协议和 SQLite run/message 生命周期 |
 | 上下文 | continuity、memory 与工作区状态恢复 | P2-P4 使用 Capsule、Top-K Evidence 和 Workspace Bridge |
+| 流式交互 | thinking 消息流式期间默认展开，tool use/result 独立成组，只有无可渲染内容时显示等待指示器 | myteam 将 Kimi NDJSON 规范化为 thinking / activity / chunk 三类 SSE；展示工具开始、完成和摘要 |
 
 ## 简化采用
 
@@ -21,6 +22,7 @@
 | 产物预览 | 继续使用浏览器原生 HTML/Markdown/JSON 预览，不复制 LobsterAI 大型多格式渲染器 |
 | Memory | 保留显式 lessons/memory 和 Continuity Capsule，不引入后台推断式记忆写入 |
 | Scheduler | 采用进程内 timer + SQLite 恢复，不引入 OpenClaw gateway；错过触发默认 skipped |
+| 流式运行时 | 采用 LobsterAI 的消息分层和可见状态设计，不引入 OpenClaw event runtime；继续由本地 CLI parser 转换为 SSE |
 
 ## 暂不采用
 

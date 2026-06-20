@@ -1551,7 +1551,7 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
     const touch = () => { lastActivity = Date.now(); };
     const thinkingTimer = setTimeout(() => {
       if (!fullText && !settled) {
-        sseSend(res, 'status', { agent: agentKey, phase: 'thinking', text: `${agentKey} 正在思考，还没有输出` });
+        sseSend(res, 'status', { agent: agentKey, phase: 'waiting', text: `${agentKey} 运行中` });
       }
     }, 1500);
     const TIMEOUT_MS = 30 * 60 * 1000; // 教训1: 30min
@@ -1580,6 +1580,7 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
       // 兼容旧 parser 返回字符串 vs 新 parser 返回 { text, thinking }
       const text = typeof out === 'string' ? out : (out.text || '');
       const thinking = typeof out === 'string' ? '' : (out.thinking || '');
+      const activities = typeof out === 'string' ? [] : (out.activities || []);
       if (text) {
         fullText += text;
         if (fullText.length === text.length) {
@@ -1590,6 +1591,9 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
       }
       if (thinking) {
         sseSend(res, 'thinking', { text: thinking });
+      }
+      for (const activity of activities) {
+        sseSend(res, 'activity', activity);
       }
     });
 
@@ -2199,10 +2203,11 @@ async function handle(req, res) {
     const nextAgents = Array.isArray(body.agents)
       ? body.agents.map(incoming => {
           const prev = currentByKey.get(incoming.key) || {};
+          const inherited = currentByKey.get(incoming.inheritFrom) || {};
           // apiKey 为空字符串时保留已有值（前端不传明文则不覆盖）
           const apiKey = (incoming.apiKey !== undefined && String(incoming.apiKey).trim() !== '')
             ? String(incoming.apiKey).trim()
-            : (prev.apiKey || '');
+            : (prev.apiKey || inherited.apiKey || '');
           return { ...prev, ...incoming, apiKey };
         })
       : current.map(agent => ({

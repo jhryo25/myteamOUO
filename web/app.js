@@ -3716,7 +3716,12 @@ function sessionModeBadge(mode) {
 function renderSessionList(sessions, activeId) {
   const list = document.getElementById('sessionList');
   list.innerHTML = '';
-  sessions.forEach(s => {
+  const newestFirst = [...sessions].sort((a, b) => {
+    const aTime = Date.parse(a.created_at) || 0;
+    const bTime = Date.parse(b.created_at) || 0;
+    return bTime - aTime;
+  });
+  newestFirst.forEach(s => {
     const isRunning = Boolean(sessionRuns.get(s.id)?.running);
     const item = document.createElement('div');
     item.className = 'session-item' + (s.id === activeId ? ' active' : '') + (isRunning ? ' running' : '');

@@ -113,8 +113,8 @@ function renderRichText(raw) {
   const placeholders = [];
   let text = raw;
 
-  // 自定义块 :::type attrs...\n body \n:::
-  text = text.replace(/:::(\w+)([^\n]*)\n([\s\S]*?)\n:::/g, (m, type, attrs, body) => {
+  // 自定义块允许模型按列表层级缩进；结束标记也兼容 CRLF 和行尾空格。
+  text = text.replace(/^[ \t]*:::(card|checklist|role)([^\r\n]*)\r?\n([\s\S]*?)\r?\n[ \t]*:::[ \t]*$/gm, (m, type, attrs, body) => {
     const idx = placeholders.length;
     placeholders.push(renderCustomBlock(type, attrs, body));
     return `\x00BLOCK${idx}\x00`;
@@ -458,6 +458,10 @@ function startAgentBubble(agentKey, sessionId = currentSessionId) {
 // 轻量流式 markdown：仅安全处理换行/粗体/inline code，避免半截代码块、半截 JSON 暴露源文本
 function streamRender(raw) {
   let s = String(raw || '');
+  // 流式阶段先隐藏 Rich Block 协议行，完成后再由 renderRichText 生成组件。
+  s = s
+    .replace(/^[ \t]*:::(?:card|checklist|role)\b[^\r\n]*$/gm, '')
+    .replace(/^[ \t]*:::[ \t]*$/gm, '');
   // 隐藏未闭合的 ``` 代码块（等完成后再渲染）
   const fenceCount = (s.match(/```/g) || []).length;
   if (fenceCount % 2 === 1) {

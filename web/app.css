@@ -2023,27 +2023,27 @@ body {
 
 .rb-role {
   display: flex;
-  gap: 10px;
-  background: linear-gradient(135deg, #fef0e0 0%, #fde9d4 100%);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 10px 12px;
-  margin: 8px 0;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 0;
+  margin: 5px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
 }
 .rb-role-avatar {
-  width: 36px; height: 36px;
+  width: 28px; height: 28px;
   border-radius: 50%;
-  background: var(--accent);
-  color: #fff;
+  background: var(--accent-soft);
+  color: var(--accent);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 18px;
+  font-size: 13px;
   font-weight: 700;
   flex-shrink: 0;
 }
 .rb-role-body { flex: 1; }
-.rb-role-name { font-weight: 700; color: var(--text); font-size: 13px; }
+.rb-role-name { font-weight: 700; color: var(--text); font-size: 12px; }
 .rb-role-tag {
   font-size: 11px;
   color: var(--accent);

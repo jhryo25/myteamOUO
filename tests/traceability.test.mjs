@@ -63,7 +63,7 @@ test('refreshed dispatch state stays linked to the conversation session', () => 
 });
 
 test('automatic reviewer advances the gate and writes a visible review result', () => {
-  assert.match(server, /gate_status: data\.verdict === 'pass' \? 'passed' : 'rework'/);
+  assert.match(server, /gate_status: data\.verdict === 'pass' \? \(deferGate \? 'waiting' : 'passed'\) : 'rework'/);
   assert.match(server, /test_status: data\.verdict === 'pass' \? 'agent_passed' : 'agent_rework'/);
   assert.match(server, /kind: 'task-review'/);
   assert.match(app, /function createTaskReviewCard\(/);
@@ -103,7 +103,7 @@ test('agent rate-limit failures are persisted and surfaced in conversation histo
   assert.match(server, /normalizeAgentFailure\(agentKey, detail \|\| `exit code \$\{code\}`/);
   assert.match(server, /type: 'error',[\s\S]*?retryable: Boolean\(err\.retryable\)/);
   assert.match(server, /taskTurnRecord\.kind = 'task-error'/);
-  assert.match(server, /sseSend\(res, 'part', errorPart\)/);
+  assert.match(server, /sseSend\(workflowRes, 'part', errorPart\)/);
 });
 
 test('deleting the final conversation leaves one hidden draft instead of an undeletable visible loop', () => {

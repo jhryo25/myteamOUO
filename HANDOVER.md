@@ -475,3 +475,41 @@ P0 → P2 → P4 → P1 → P3 → P5
 3. 所有 CLI、Reviewer、文件写入和审批写入必须成为带幂等键的副作用 task；不能放在未来 `interrupt()` 之前。
 4. 先迁一条单任务纵向链：`prepare → execute → review → rework/complete → human gate`，再迁多任务和 subagent。
 5. LangGraph SQLite checkpointer 使用独立文件（建议 `.myteam/langgraph.sqlite`）；业务 Task/Session/Approval/Artifact 继续由 `.myteam/myteam.sqlite` 管理。
+
+---
+
+## LangGraph 重构 P1–P4 交接（2026-06-21）
+
+### 完成范围
+
+- P1：新增 `workflow/ports.mjs`，把 Agent 执行、Reviewer、Task transition、派生任务、澄清与事件输出定义为图端口；浏览器和 CLI dispatch 已共享 `LangGraphDispatchEngine`。
+- P2：接入 `@langchain/langgraph` 与 SQLite checkpointer；澄清和人工 Gate 使用 `interrupt()` / `Command({ resume })`，提供工作流查询与恢复 API。
+- P3：父图实现多任务队列与动态 spawn，Task subgraph 实现执行、Review、受限返工和人工 Gate；事件继续投影到现有 SSE。
+- P4：Chat、Plan、Schedule 通过 `LangGraphTurnEngine` 统一进入 checkpointed turn graph，原 CLI adapter 与协议保持兼容。
+
+### 新增模块
+
+- `workflow/dispatch-graph.mjs`：父 dispatch graph、task subgraph、run/resume/getState。
+- `workflow/turn-graph.mjs`：Chat、Plan、Schedule 共用的单轮图。
+- `workflow/checkpointer.mjs`：共享 `SqliteSaver`，默认 `.myteam/langgraph.sqlite`。
+- `workflow/ports.mjs`：副作用端口校验与默认实现。
+- `tests/langgraph-workflow.test.mjs`：P1–P4 核心行为测试。
+- `docs/langgraph-p1-p4-implementation.md`：架构、API、持久化边界和限制。
+
+### 运行接口
+
+- `GET /api/workflows/:workflowRunId`：读取 checkpoint 状态。
+- `POST /api/workflows/:workflowRunId/resume`：恢复当前进程内暂停的澄清或人工 Gate。
+- `/api/dispatch` SSE 新增 `workflow-start`、`workflow-interrupt`、`paused`，原任务进度事件继续保留。
+
+### 重要边界
+
+- `.myteam/myteam.sqlite` 仍是业务数据真相；`.myteam/langgraph.sqlite` 只保存图快照。
+- `workflowRunId` 是 LangGraph `thread_id`，不要改用 `sessionId` 或 `clientRunId`。
+- interrupt 之前的 CLI/Reviewer 副作用不能因恢复而重复；现有测试对此有明确断言。
+- SQLite checkpoint 已验证可由新 engine 实例恢复。真实服务重启后暂时只能查询 checkpoint；因为 CLI adapter 仍是请求期闭包，HTTP resume 会明确返回 `workflow_adapter_unavailable`。下一步应持久化 adapter 描述并在启动时重建。
+
+### 验证
+
+- `npm run check` 通过。
+- `npm test`：96/96 通过。

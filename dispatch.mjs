@@ -1,106 +1,126 @@
-// myteam dispatch 命令
-// 读取 tasks.jsonl 中 pending 任务，按 agent 字段分发给 Kimi/Claude/Codex 执行，结果写回
+// myteam CLI dispatch — 与服务端共享 LangGraph workflow engine
 // 用法：node dispatch.mjs [--run-id <id>] [--task-id <id>] [--agent codex|claude|kimi]
 
-import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { loadEnv, buildCliConfig, invokeAgent, readTasks, writeAllTasks, buildExecPrompt } from './agent-utils.mjs';
+import { randomUUID } from 'node:crypto';
+import {
+  appendTask,
+  buildCliConfig,
+  buildExecPrompt,
+  buildReviewPrompt,
+  extractJson,
+  invokeAgent,
+  loadEnv,
+  readTasks,
+} from './agent-utils.mjs';
+import { parseSpawnSubagentDirectives, SPAWN_SUBAGENT_PROTOCOL } from './collaboration-context.mjs';
+import { repository } from './storage.mjs';
+import { transitionTaskLifecycle } from './workflow-state.mjs';
+import { getSharedCheckpointer } from './workflow/checkpointer.mjs';
+import { LangGraphDispatchEngine } from './workflow/dispatch-graph.mjs';
 
-const ENV = loadEnv();
-const CLI_CONFIG = buildCliConfig(ENV);
-
-const TASKS_FILE = '.myteam/tasks.jsonl';
-
-// ── tasks.jsonl 辅助函数 ──────────────────────────────────────────
-function updateTask(tasks, id, patch) {
-  return tasks.map(t => t.id === id ? { ...t, ...patch } : t);
-}
-
-// ── 执行单条任务 ──────────────────────────────────────────────
-async function execTask(task, agentOverride) {
-  const agentKey = agentOverride || task.agent || 'codex';
-  const effectiveAgent = CLI_CONFIG[agentKey] ? agentKey : 'codex';
-
-  if (!CLI_CONFIG[effectiveAgent]?.path) {
-    return { success: false, error: `${effectiveAgent} 路径未配置` };
-  }
-
-  const prompt = buildExecPrompt(task);
-  console.log(`  → 调用 ${effectiveAgent}...`);
-
-  try {
-    const result = await invokeAgent(CLI_CONFIG, effectiveAgent, prompt);
-    return { success: true, result, agent: effectiveAgent };
-  } catch (err) {
-    return { success: false, error: err.message, agent: effectiveAgent };
-  }
-}
-
-// ── 解析参数 ──────────────────────────────────────────────────
+const CLI_CONFIG = buildCliConfig(loadEnv());
 const args = process.argv.slice(2);
-let filterRunId = null;
-let filterTaskId = null;
-let agentOverride = null;
+let filterRunId = '';
+let filterTaskId = '';
+let agentOverride = '';
 
-for (let i = 0; i < args.length; i++) {
-  if (args[i] === '--run-id' && args[i + 1])   filterRunId  = args[++i];
-  if (args[i] === '--task-id' && args[i + 1])  filterTaskId = args[++i];
-  if (args[i] === '--agent' && args[i + 1])    agentOverride = args[++i];
+for (let index = 0; index < args.length; index++) {
+  if (args[index] === '--run-id' && args[index + 1]) filterRunId = args[++index];
+  if (args[index] === '--task-id' && args[index + 1]) filterTaskId = args[++index];
+  if (args[index] === '--agent' && args[index + 1]) agentOverride = args[++index];
 }
 
-// ── 主流程 ────────────────────────────────────────────────────
-let tasks = readTasks();
-if (!tasks.length) {
-  console.error(`找不到 ${TASKS_FILE}，请先运行 plan 命令。`);
-  process.exit(1);
-}
-
-// 筛选要执行的任务
-let pending = tasks.filter(t => t.status === 'pending');
-if (filterRunId)  pending = pending.filter(t => t.run_id  === filterRunId);
-if (filterTaskId) pending = pending.filter(t => t.id      === filterTaskId);
+let pending = readTasks().filter((task) => task.status === 'pending');
+if (filterRunId) pending = pending.filter((task) => task.run_id === filterRunId);
+if (filterTaskId) pending = pending.filter((task) => task.id === filterTaskId);
 
 if (!pending.length) {
-  console.log('没有待执行的 pending 任务。');
-  if (filterRunId)  console.log(`  run_id: ${filterRunId}`);
-  if (filterTaskId) console.log(`  task_id: ${filterTaskId}`);
+  console.log('没有符合条件的 pending 任务。');
   process.exit(0);
 }
 
-console.log(`\n开始执行 ${pending.length} 条任务...\n`);
+const configuredAgents = Object.entries(CLI_CONFIG)
+  .filter(([, config]) => config?.path)
+  .map(([key]) => key);
 
-let done = 0, failed = 0;
-
-for (const task of pending) {
-  console.log(`[${task.id}] ${task.title}`);
-
-  // 标记 in_progress
-  tasks = updateTask(tasks, task.id, { status: 'in_progress', started_at: new Date().toISOString() });
-  writeAllTasks(tasks);
-
-  const { success, result, error, agent } = await execTask(task, agentOverride);
-
-  if (success) {
-    tasks = updateTask(tasks, task.id, {
-      status: 'done',
-      finished_at: new Date().toISOString(),
-      executed_by: agent,
-      result: result?.slice(0, 2000), // 截断避免 jsonl 过大
-    });
-    console.log(`  ✓ 完成\n`);
-    done++;
-  } else {
-    tasks = updateTask(tasks, task.id, {
-      status: 'failed',
-      finished_at: new Date().toISOString(),
-      executed_by: agent,
-      error,
-    });
-    console.error(`  ✗ 失败：${error}\n`);
-    failed++;
-  }
-
-  writeAllTasks(tasks);
+function resolveAgent(task) {
+  if (agentOverride && CLI_CONFIG[agentOverride]?.path) return agentOverride;
+  if (CLI_CONFIG[task.agent]?.path) return task.agent;
+  return configuredAgents[0] || task.agent || 'codex';
 }
 
-console.log(`\n执行完毕：${done} 成功 / ${failed} 失败`);
-console.log('运行 `python myteam.py ui` 刷新验收页面。');
+const ports = {
+  emit(event, data) {
+    if (event === 'task-start') console.log(`[${data.id}] ${data.title}`);
+    if (event === 'task-review-done') console.log(`  review: ${data.verdict || 'unknown'}`);
+    if (event === 'task-failed') console.error(`  failed: ${data.error}`);
+    if (event === 'worklist-chain') console.log(`  spawn: ${data.from} -> ${data.to}`);
+  },
+  async transitionTask(task, nextState, meta) {
+    const latest = readTasks().find((item) => item.id === task.id) || task;
+    const updated = transitionTaskLifecycle(latest, nextState, meta);
+    repository.upsert('tasks', updated);
+    return updated;
+  },
+  async executeTask(task) {
+    const agent = resolveAgent(task);
+    if (!CLI_CONFIG[agent]?.path) throw new Error(`${agent} 路径未配置`);
+    const prompt = `${buildExecPrompt(task)}\n\n【子代理派生协议】\n${SPAWN_SUBAGENT_PROTOCOL}`;
+    const result = await invokeAgent(CLI_CONFIG, agent, prompt);
+    return {
+      result,
+      agent,
+      artifacts: [],
+      spawnRequests: parseSpawnSubagentDirectives(result, Object.keys(CLI_CONFIG)),
+    };
+  },
+  async reviewTask(task, execution) {
+    const reviewer = configuredAgents.find((key) => key !== execution.agent)
+      || configuredAgents.find((key) => key === execution.agent);
+    if (!reviewer) return { verdict: 'skipped', reason: '没有可用 reviewer' };
+    const raw = await invokeAgent(
+      CLI_CONFIG,
+      reviewer,
+      buildReviewPrompt(task, execution.agent, execution.result),
+      { silent: true, timeoutMs: 5 * 60 * 1000 },
+    );
+    const parsed = extractJson(raw || '');
+    if (!parsed || !['pass', 'rework'].includes(parsed.verdict)) {
+      return { verdict: 'skipped', reviewer, reason: 'reviewer 输出无法解析' };
+    }
+    return { ...parsed, reviewer };
+  },
+  async materializeSpawns(parent, requests) {
+    return requests
+      .filter((request) => request.agent && request.agent !== parent.agent)
+      .map((request) => appendTask({
+        id: `${parent.run_id}-w${randomUUID().slice(0, 8)}`,
+        run_id: parent.run_id,
+        session_id: parent.session_id,
+        created_at: new Date().toISOString(),
+        goal: parent.goal,
+        title: request.label || request.task,
+        why: '由 LangGraph CLI workflow 派生',
+        steps: [request.task],
+        accept: request.accept || '',
+        agent: request.agent,
+        status: 'pending',
+        phase: 'pending',
+        parent_task_id: parent.id,
+        chain_depth: Number(parent.chain_depth || 0) + 1,
+        spawn_protocol: 'spawn_subagent',
+      }));
+  },
+};
+
+const workflowRunId = `dispatch-cli:${filterRunId || randomUUID()}:${Date.now()}`;
+const engine = new LangGraphDispatchEngine(ports, { checkpointer: getSharedCheckpointer() });
+const snapshot = await engine.run({
+  workflowRunId,
+  sessionId: pending[0]?.session_id || '',
+  tasks: pending,
+  options: { maxReworkAttempts: 1, maxSpawnDepth: 2, requireHumanGate: false },
+});
+
+console.log(`执行完毕：${snapshot.values.completedTaskIds.length} 成功 / ${snapshot.values.failedTaskIds.length} 失败`);
+console.log(`workflow: ${workflowRunId}`);

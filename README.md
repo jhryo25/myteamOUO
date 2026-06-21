@@ -3,7 +3,7 @@
 > 一个本地优先的多 Agent 协作控制台：把 Codex、Claude Code、Kimi 等本机 CLI 串成可拆解、可执行、可审查、可恢复的任务流水线。
 
 [![Node.js](https://img.shields.io/badge/Node.js-22.5%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
-[![Tests](https://img.shields.io/badge/tests-25%20passed-brightgreen)](#验证)
+[![Tests](https://img.shields.io/badge/tests-96%20passed-brightgreen)](#验证)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ## 30 秒理解这个项目
@@ -27,7 +27,7 @@ flowchart LR
     A[用户目标] --> B[结构化拆解]
     B --> C[按能力分配 Agent]
     C --> D[执行与流式进度]
-    D --> E[Reviewer Gate]
+    D --> E[LangGraph Reviewer Gate]
     E -->|通过| F[产物与经验沉淀]
     E -->|返工| C
     D -->|中断| G[保存上下文与状态]
@@ -111,7 +111,8 @@ myteamOUO 参考了 [Clowder AI](https://github.com/zts212653/clowder-ai) 的多
 | SQLite 本地持久化 | 不引入云数据库，同时获得事务、迁移和可恢复状态 |
 | 显式人工 Gate | 在自动化成熟前，让关键决策仍由人掌握 |
 | 按需 Skills 与 Top-K Evidence | 控制上下文噪声和调用成本 |
-| 暂不引入 Electron/OpenClaw/LangGraph | 保持轻量定位，避免 MVP 过早承担完整运行时复杂度 |
+| LangGraph 只负责工作流编排 | CLI、业务任务和审批仍由现有边界负责，避免框架侵入业务数据 |
+| 暂不引入 Electron/OpenClaw | 保持轻量定位，避免 MVP 过早承担完整桌面运行时复杂度 |
 
 更完整的取舍记录见 [LobsterAI 对比](docs/lobsterai-comparison.md)、[Clowder AI 差距](docs/clowder-html-gap.md) 和 [架构评估](docs/architecture-evaluation.md)。
 
@@ -145,13 +146,17 @@ Browser UI
   ├─ Skills / Approvals / Schedules / Artifacts
   └─ SSE live events + history replay
              │
-server.mjs ──┼─ Agent adapters / Plan / Dispatch / Reviewer Gate
-             ├─ Skill registry / Artifact service
-             └─ REST API / SSE buses
+server.mjs ──┼─ Agent adapters / Skill registry / Artifact service
+             ├─ REST API / SSE buses
+             └─ LangGraph ports
+             │
+workflow/ ───┼─ Dispatch graph / Task subgraph
+             ├─ Chat / Plan / Schedule turn graph
+             └─ SQLite checkpointer / interrupt + resume
              │
   ┌──────────┼───────────────┐
 storage.mjs  governance.mjs  scheduler.mjs
-SQLite       policy/audit    Cron/run history
+business DB  policy/audit    Cron/run history
              │
 Codex CLI / Claude Code / Kimi / custom variants
 ```
@@ -160,6 +165,10 @@ Codex CLI / Claude Code / Kimi / custom variants
 
 - `agent-utils.mjs`：CLI 配置、启动、Prompt 与输出解析；
 - `collaboration-context.mjs`：结构化计划、连续上下文、证据检索、子代理协议；
+- `workflow/dispatch-graph.mjs`：多任务队列、Reviewer、返工、人工 Gate 与派生任务图；
+- `workflow/turn-graph.mjs`：Chat、Plan、Schedule 共用的 checkpointed turn graph；
+- `workflow/checkpointer.mjs`：独立的 `.myteam/langgraph.sqlite` checkpoint 存储；
+- `workflow/ports.mjs`：LangGraph 与 CLI、Task、审批、事件等副作用之间的端口；
 - `storage.mjs`：SQLite、WAL、迁移和旧数据导入；
 - `governance.mjs`：风险策略、审批指纹和脱敏审计；
 - `scheduler.mjs`：Cron、时区、互斥和审批暂停；
@@ -172,7 +181,7 @@ npm run check
 npm test
 ```
 
-当前自动化测试覆盖结构化计划、首次使用模板、人工验收评分卡、上下文恢复、Agent 回退、工具事件、路径安全、SQLite、审批指纹、审计脱敏、调度互斥和中断恢复等关键链路；本地测试结果为 `25/25` 通过。
+当前自动化测试覆盖结构化计划、LangGraph 多任务队列与派生任务、受限返工、人工中断/恢复、SQLite checkpoint、首次使用模板、上下文恢复、Agent 回退、工具事件、路径安全、审批指纹、审计脱敏、调度互斥和中断恢复等关键链路；本地测试结果为 `96/96` 通过。
 
 ## 当前边界与下一步
 
@@ -182,6 +191,7 @@ npm test
 - 需要真实的任务成功率、人工介入次数、恢复成功率和 Token/成本指标；
 - 需要带来源引用和生命周期管理的本地知识检索，而不只是轻量关键词证据；
 - 需要统一 Adapter/MCP 扩展协议，并逐步覆盖 Agent 内部工具权限；
+- 服务重启后可以读取 LangGraph checkpoint；当前 HTTP 恢复执行仍要求原进程保留对应副作用 adapter，后续需把 adapter 配置持久化为可重建描述；
 - 需要用 2–3 个高频场景验证用户价值，而不是继续横向堆功能。
 
 详细路线见 [竞品对比与迭代路线](docs/myteam-roadmap-vs-lobsterai-clowder.md)。
@@ -191,6 +201,7 @@ npm test
 - [产品与技术交接](HANDOVER.md)
 - [问题与限制](ISSUES.md)
 - [产品复盘课程](docs/problem-course.md)
+- [LangGraph P1–P4 实现说明](docs/langgraph-p1-p4-implementation.md)
 - [美股日报数据源说明](docs/data-source-us-stock.md)
 
 ## License

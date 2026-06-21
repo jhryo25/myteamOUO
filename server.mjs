@@ -16,7 +16,11 @@ import {
   createWorkflowTaskId,
   recoverInterruptedTaskRecords,
   synchronizeTaskRecord,
+  transitionTaskLifecycle,
 } from './workflow-state.mjs';
+import { LangGraphDispatchEngine } from './workflow/dispatch-graph.mjs';
+import { getSharedCheckpointer } from './workflow/checkpointer.mjs';
+import { LangGraphTurnEngine } from './workflow/turn-graph.mjs';
 import { getDangerLevel, openPathWithDefaultApp, resolveWorkspaceHtmlPath } from './commandSafety.mjs';
 import { repository } from './storage.mjs';
 import {
@@ -1426,6 +1430,9 @@ if (taskRecovery.recovered > 0) {
   console.warn(`[myteam] recovered ${taskRecovery.recovered} interrupted task(s) after service restart`);
 }
 
+const langGraphCheckpointer = getSharedCheckpointer();
+const langGraphTurnEngine = new LangGraphTurnEngine({ checkpointer: langGraphCheckpointer });
+
 const scheduleService = new ScheduleService({
   execute: async (schedule, run) => {
     const { agentKey } = await resolveRunnableAgent(schedule.agent);
@@ -1446,7 +1453,14 @@ const scheduleService = new ScheduleService({
           })
         : `这是经用户批准的定时任务。请完成目标并给出简洁结果。\n\n目标：${schedule.goal}`;
     targetSession.history.push({ role: 'user', text: schedule.goal, agent: null, kind: 'schedule-goal', scheduleId: schedule.id, runId: run.id });
-    const result = await invokeAgent(CLI_CONFIG, agentKey, prompt, { silent: true });
+    const turn = await langGraphTurnEngine.run({
+      workflowRunId: `schedule:${run.id}`,
+      sessionId: targetSession.id,
+      mode: `schedule-${schedule.mode}`,
+      input: { prompt, agentKey },
+      metadata: { scheduleId: schedule.id, scheduleRunId: run.id },
+    }, () => invokeAgent(CLI_CONFIG, agentKey, prompt, { silent: true }));
+    const result = String(turn.output || '');
     targetSession.history.push({ role: 'assistant', text: result, agent: agentKey, kind: 'schedule-result', scheduleId: schedule.id, runId: run.id });
     if (targetSession.history.length > 40) targetSession.history.splice(0, targetSession.history.length - 40);
     refreshSessionContinuity(targetSession, 'scheduled_run');
@@ -1607,6 +1621,16 @@ function sseSend(res, event, data) {
 const activeChildren = new Map(); // id → { child, sessionId, clientRunId, aborted, agentKey, mode, taskTitle, startedAt }
 // dispatch 生命周期锁：覆盖同一批任务从第一项到最后一项之间的空档，不能只看 activeChildren。
 const activeDispatches = new Map(); // lockId → { sessionId, runIds, startedAt, clientRunId }
+const workflowEngines = new Map(); // workflowRunId → { engine, setResponse, updatedAt }
+const WORKFLOW_ENGINE_LIMIT = 100;
+
+function rememberWorkflowEngine(workflowRunId, value) {
+  workflowEngines.delete(workflowRunId);
+  workflowEngines.set(workflowRunId, { ...value, updatedAt: Date.now() });
+  while (workflowEngines.size > WORKFLOW_ENGINE_LIMIT) {
+    workflowEngines.delete(workflowEngines.keys().next().value);
+  }
+}
 let childIdSeq = 0;
 
 // -- per-session SSE broadcast bus (for refresh reconnect) --
@@ -2432,9 +2456,10 @@ async function handle(req, res) {
     const chatSkillContext = buildSkillContext(chatSkills);
     const prompt = buildChatPrompt(cleanMessage, agentKey, session.history)
       + (chatSkillContext ? `\n\n【本次 Skills】\n${chatSkillContext}` : '');
+    const chatWorkflowId = `chat:${session.id}:${clientRunId || randomUUID().slice(0, 8)}`;
 
     sseInit(res);
-    sseSend(res, 'start', { agent: agentKey, sessionId: session.id });
+    sseSend(res, 'start', { agent: agentKey, sessionId: session.id, workflowRunId: chatWorkflowId, engine: 'langgraph' });
 
     let fullReply = '';
     const turnCollector = createTurnPartsCollector();
@@ -2443,13 +2468,20 @@ async function handle(req, res) {
       if (!agentStatus?.available) {
         throw new Error(`${agentKey} 不可用：${agentStatus?.error || '没有可启动的 agent'}`);
       }
-      fullReply = await streamAgent(agentKey, prompt, res, 'chunk', {
+      const turn = await langGraphTurnEngine.run({
+        workflowRunId: chatWorkflowId,
         sessionId: session.id,
-        clientRunId,
-        turnCollector,
         mode: 'chat',
-        skills: chatSkills,
-      });
+        input: { prompt, agentKey },
+        metadata: { clientRunId, skills: chatSkills.map((skill) => skill.name) },
+      }, () => streamAgent(agentKey, prompt, res, 'chunk', {
+          sessionId: session.id,
+          clientRunId,
+          turnCollector,
+          mode: 'chat',
+          skills: chatSkills,
+        }));
+      fullReply = String(turn.output || '');
       const interrupted = ['interrupting', 'interrupted'].includes(session.run_state?.status) || session.run_state?.clientRunId !== clientRunId;
       if (interrupted) turnCollector.append({ type: 'interrupted', message: '回复已中断，可从当前上下文继续。' });
       const msgIndex = session.history.length;
@@ -3532,6 +3564,8 @@ async function handle(req, res) {
     }
 
     const session = (body.sessionId && getSession(body.sessionId)) || getActiveSession();
+    const runId = createWorkflowRunId();
+    const planWorkflowId = `plan:${runId}`;
     session.ephemeral = false;
     if (body.sessionId && getSession(body.sessionId)) activeSessionId = body.sessionId;
     recordSessionMode(session, 'plan');
@@ -3541,7 +3575,7 @@ async function handle(req, res) {
     saveSessions();
 
     sseInit(res);
-    sseSend(res, 'start', { goal, agent: agentKey, sessionId: session.id });
+    sseSend(res, 'start', { goal, agent: agentKey, sessionId: session.id, workflowRunId: planWorkflowId, engine: 'langgraph' });
 
     try {
       if (!agentStatus?.available) {
@@ -3553,20 +3587,26 @@ async function handle(req, res) {
       const effectiveGoal = goal || '请根据上传的图片内容制定合理的执行计划';
       const selectedPlanSkills = selectSkills({ text: effectiveGoal, agent: agentKey, phase: 'plan' });
       const skillContext = buildSkillContext(selectedPlanSkills);
-      const runId = createWorkflowRunId();
       // 拆任务阶段不让 agent 直接看图（避免 view_image 工具调用导致 exit 1）；
       // 只告知"有图"，由后续执行 agent 阶段处理读图。
       const imgPrompt = attachmentPromptForPlan(attachments);
       const prompt = `${PLAN_PROMPT}${skillContext ? `\n\n本次按需加载的 Skills：\n${skillContext}` : ''}\n\n用户目标：${effectiveGoal}${imgPrompt}`;
-      const raw = await streamAgent(agentKey, prompt, res, 'chunk', {
-        skipRoleCard: true,
+      const turn = await langGraphTurnEngine.run({
+        workflowRunId: planWorkflowId,
         sessionId: session.id,
-        clientRunId,
-        runId,
         mode: 'plan',
-        skills: selectedPlanSkills,
-        outputSchemaPath: agentKey === 'codex' ? PLAN_SCHEMA_FILE : '',
-      });
+        input: { prompt, agentKey, runId },
+        metadata: { clientRunId, skills: selectedPlanSkills.map((skill) => skill.name) },
+      }, () => streamAgent(agentKey, prompt, res, 'chunk', {
+          skipRoleCard: true,
+          sessionId: session.id,
+          clientRunId,
+          runId,
+          mode: 'plan',
+          skills: selectedPlanSkills,
+          outputSchemaPath: agentKey === 'codex' ? PLAN_SCHEMA_FILE : '',
+        }));
+      const raw = String(turn.output || '');
       const parsedPlan = parseStructuredPlanOutput(raw, {
         goal: effectiveGoal,
         defaultAgent: agentKey,
@@ -3661,10 +3701,59 @@ async function handle(req, res) {
     return res.end();
   }
 
+  const workflowStateMatch = pathname.match(/^\/api\/workflows\/([^/]+)$/);
+  if (req.method === 'GET' && workflowStateMatch) {
+    const workflowRunId = decodeURIComponent(workflowStateMatch[1]);
+    let record = workflowEngines.get(workflowRunId);
+    if (!record) {
+      const readonlyPorts = {
+        async executeTask() { throw new Error('workflow runtime adapter is not attached'); },
+        async reviewTask() { throw new Error('workflow runtime adapter is not attached'); },
+        async transitionTask(task) { return task; },
+      };
+      record = { engine: new LangGraphDispatchEngine(readonlyPorts, { checkpointer: langGraphCheckpointer }) };
+    }
+    const snapshot = await record.engine.getState(workflowRunId);
+    if (!snapshot.values || !Object.keys(snapshot.values).length) {
+      return json(res, 404, { error: 'workflow 不存在' });
+    }
+    return json(res, 200, snapshot);
+  }
+
+  const workflowResumeMatch = pathname.match(/^\/api\/workflows\/([^/]+)\/resume$/);
+  if (req.method === 'POST' && workflowResumeMatch) {
+    const workflowRunId = decodeURIComponent(workflowResumeMatch[1]);
+    const record = workflowEngines.get(workflowRunId);
+    if (!record) {
+      return json(res, 409, {
+        error: 'workflow checkpoint 存在，但当前进程没有可恢复的 Agent adapter；请从任务面板重新派发。',
+        code: 'workflow_adapter_unavailable',
+      });
+    }
+    const body = await readBody(req);
+    sseInit(res);
+    record.setResponse?.(res);
+    try {
+      const snapshot = await record.engine.resume(workflowRunId, body.value ?? body);
+      const paused = snapshot.interrupts.length > 0;
+      sseSend(res, paused ? 'paused' : 'done', {
+        workflowRunId,
+        status: paused ? 'interrupted' : snapshot.values.status,
+        done: snapshot.values.completedTaskIds?.length || 0,
+        failed: snapshot.values.failedTaskIds?.length || 0,
+        interrupts: snapshot.interrupts,
+      });
+    } catch (error) {
+      sseSend(res, 'error', { message: error.message, code: 'workflow_resume_failed' });
+    }
+    return res.end();
+  }
+
   // POST /api/dispatch { runId?, taskId?, agent? } — SSE
   // 支持 A2A Worklist：agent 回复中的 @mention 自动触发链式任务
   if (req.method === 'POST' && pathname === '/api/dispatch') {
     const body = await readBody(req);
+    let workflowRes = res;
     const clientRunId = String(body.clientRunId || '');
     const sessionId = String(body.sessionId || '');
     const filterRun = body.runId || '';
@@ -3769,7 +3858,7 @@ async function handle(req, res) {
     // 自动 reviewer：对齐 clowder-ai cross-model review 铁律
     // 选一个 != executor 的可用 agent 做静默调用，解析 JSON 写回 task。
     // 失败/无可用 reviewer 时降级为 review_status=skipped，不影响主流程。
-    async function runAutoReview(task, executorAgent, executionResult, collaborationContext = '') {
+    async function runAutoReview(task, executorAgent, executionResult, collaborationContext = '', { deferGate = false } = {}) {
       const recordReviewHistory = (outcome) => {
         if (!dispatchSession) return;
         const verdictText = outcome.verdict === 'pass' ? '验收通过'
@@ -3801,12 +3890,12 @@ async function handle(req, res) {
             reviewer: null,
             reviewed_at: new Date().toISOString(),
           });
-          sseSend(res, 'task-review-skip', { id: task.id, reason: 'no-reviewer' });
+          sseSend(workflowRes, 'task-review-skip', { id: task.id, reason: 'no-reviewer' });
           recordReviewHistory(outcome);
           return outcome;
         }
         const reviewStrategy = reviewer.key === executorAgent ? 'self_review' : 'cross_agent';
-        sseSend(res, 'task-review-start', { id: task.id, title: task.title, reviewer: reviewer.key, strategy: reviewStrategy });
+        sseSend(workflowRes, 'task-review-start', { id: task.id, title: task.title, reviewer: reviewer.key, strategy: reviewStrategy });
         const reviewPrompt = buildReviewPrompt(task, executorAgent, executionResult)
           + (collaborationContext ? '\n\n【协作上下文】\n' + collaborationContext : '');
         // 静默调用：reviewer 不流式发到前端，避免和 executor 输出混在一起
@@ -3817,7 +3906,7 @@ async function handle(req, res) {
           raw = await invokeAgent(CLI_CONFIG, reviewer.key, reviewPrompt + repairInstruction, { silent: true, timeoutMs: 5 * 60 * 1000 });
           data = extractJson(raw || '');
           if (data && typeof data === 'object' && ['pass', 'rework'].includes(data.verdict)) break;
-          sseSend(res, 'task-review-retrying', { id: task.id, reviewer: reviewer.key, attempt, maxAttempts: 3 });
+          sseSend(workflowRes, 'task-review-retrying', { id: task.id, reviewer: reviewer.key, attempt, maxAttempts: 3 });
         }
         if (!data || typeof data !== 'object' || !['pass', 'rework'].includes(data.verdict)) {
           const outcome = { verdict: 'agent_repair_pending', reviewer: reviewer.key, strategy: reviewStrategy, reason: 'Reviewer 协议输出连续失败，已加入内部验收修复队列' };
@@ -3835,7 +3924,7 @@ async function handle(req, res) {
             started_at: null,
             finished_at: null,
           });
-          sseSend(res, 'task-review-repair', { id: task.id, title: task.title, reviewer: reviewer.key, reason: outcome.reason });
+          sseSend(workflowRes, 'task-review-repair', { id: task.id, title: task.title, reviewer: reviewer.key, reason: outcome.reason });
           recordReviewHistory(outcome);
           return outcome;
         }
@@ -3858,9 +3947,9 @@ async function handle(req, res) {
           reviewer: reviewer.key,
           review_strategy: reviewStrategy,
           reviewed_at: new Date().toISOString(),
-          gate_status: data.verdict === 'pass' ? 'passed' : 'rework',
+          gate_status: data.verdict === 'pass' ? (deferGate ? 'waiting' : 'passed') : 'rework',
           test_status: data.verdict === 'pass' ? 'agent_passed' : 'agent_rework',
-          phase: data.verdict === 'pass' ? 'done' : 'impl',
+          phase: data.verdict === 'pass' ? (deferGate ? 'gate' : 'done') : 'impl',
           review_only_pending: false,
         };
         if (data.verdict === 'rework') Object.assign(reviewPatch, {
@@ -3872,7 +3961,7 @@ async function handle(req, res) {
           finished_at: null,
         });
         patchTask(task.id, reviewPatch);
-        sseSend(res, 'task-review-done', {
+        sseSend(workflowRes, 'task-review-done', {
           id: task.id,
           title: task.title,
           ...outcome,
@@ -3892,14 +3981,14 @@ async function handle(req, res) {
           started_at: null,
           finished_at: null,
         });
-        sseSend(res, 'task-review-repair', { id: task.id, title: task.title, reason: outcome.reason });
+        sseSend(workflowRes, 'task-review-repair', { id: task.id, title: task.title, reason: outcome.reason });
         recordReviewHistory(outcome);
         return outcome;
       }
     }
 
     // 执行单个任务并返回结果文本（用于 worklist 链检测）
-    async function executeTask(task, depth = 0, chainHistory = []) {
+    async function executeTask(task, depth = 0, chainHistory = [], { graphManaged = false } = {}) {
       // 优先用 agentOverride（全局覆盖），其次用任务分配的 agent（需可用），最后 fallback 到第一个可用 agent
       let agentKey = agentOverride;
       if (!agentKey) {
@@ -3911,12 +4000,21 @@ async function handle(req, res) {
           // 任务指定的 agent 不可用，找第一个可用的
           const fallback = statuses.find(a => a.available);
           agentKey = fallback?.key || agentKeys()[0] || 'codex';
-          sseSend(res, 'system', { text: `⚠️ ${task.agent} 不可用，改用 ${agentKey} 执行任务「${task.title}」` });
+          sseSend(workflowRes, 'system', { text: `⚠️ ${task.agent} 不可用，改用 ${agentKey} 执行任务「${task.title}」` });
         }
       }
       if (task.review_only_pending && task.previous_result) {
+        if (graphManaged) {
+          return {
+            result: task.previous_result,
+            agent: task.executed_by || agentKey,
+            artifacts: task.artifacts || [],
+            spawnRequests: [],
+            collaborationContext: buildTaskCollaborationContext(task),
+          };
+        }
         patchTask(task.id, { status: 'in_progress', started_at: new Date().toISOString() });
-        sseSend(res, 'task-review-start', { id: task.id, title: task.title, reviewer: agentKey, strategy: 'protocol_repair' });
+        sseSend(workflowRes, 'task-review-start', { id: task.id, title: task.title, reviewer: agentKey, strategy: 'protocol_repair' });
         const outcome = await runAutoReview(task, task.executed_by || agentKey, task.previous_result, buildTaskCollaborationContext(task));
         if (outcome?.verdict === 'pass') {
           patchTask(task.id, { status: 'done', result: task.previous_result, finished_at: new Date().toISOString(), review_only_pending: false });
@@ -3941,7 +4039,7 @@ async function handle(req, res) {
         started_at: new Date().toISOString(),
         subagent_run_id: subagentRunId || null,
       });
-      sseSend(res, 'task-start', {
+      sseSend(workflowRes, 'task-start', {
         id: task.id,
         title: task.title,
         agent: agentKey,
@@ -4005,7 +4103,7 @@ async function handle(req, res) {
           }
           flushTaskTurnRecord();
         }
-        const result = await streamAgent(agentKey, execPrompt, res, `task-chunk:${task.id}`, {
+        const result = await streamAgent(agentKey, execPrompt, workflowRes, `task-chunk:${task.id}`, {
           sessionId,
           clientRunId,
           taskId: task.id,
@@ -4030,14 +4128,14 @@ async function handle(req, res) {
           phase: 'impl', // SOP: pending → impl
         });
         const summary = result ? result.slice(0, 200) : '';
-        sseSend(res, 'task-done', {
+        sseSend(workflowRes, 'task-done', {
           id: task.id,
           title: task.title,
           agent: agentKey,
           summary,
           subagentRunId: subagentRunId || null,
         });
-        done++;
+        if (!graphManaged) done++;
         if (depth > 0) {
           pushChainMessage(task.id, { type: 'task-done', agent: agentKey, title: task.title, summary, subagentRunId });
           appendSubagentMessage(subagentRunId, { type: 'assistant', content: result || '' });
@@ -4060,7 +4158,7 @@ async function handle(req, res) {
         if (currentSkills.length > 0) {
           const nextSkills = getNextSkills(currentSkills[0].name);
           if (nextSkills.length > 0) {
-            sseSend(res, 'skill-next-recommend', {
+            sseSend(workflowRes, 'skill-next-recommend', {
               id: task.id,
               currentSkill: currentSkills[0].name,
               nextSkills: nextSkills.map(s => ({ name: s.name, category: s.category, prompt: s.prompt })),
@@ -4070,7 +4168,7 @@ async function handle(req, res) {
 
         // 跨 agent 自动 review（对齐 clowder-ai cross-model review 铁律）
         // 链式 worklist 任务（chain_depth > 0）跳过 review，避免审查链爆炸
-        if (depth === 0) {
+        if (!graphManaged && depth === 0) {
           await runAutoReview(
             { ...task, ...readTasks().find(t => t.id === task.id) },
             agentKey,
@@ -4080,9 +4178,10 @@ async function handle(req, res) {
         }
 
         // A2A Worklist：扫描回复中的 @mention，自动创建并执行链式任务
+        let spawnRequests = [];
         if (result && depth < WORKLIST_MAX_DEPTH) {
           const structuredSpawns = parseSpawnSubagentDirectives(result, agentKeys());
-          const spawnRequests = structuredSpawns.length
+          spawnRequests = structuredSpawns.length
             ? structuredSpawns
             : parseA2AMentions(result).map((agent) => ({
                 agent,
@@ -4090,7 +4189,7 @@ async function handle(req, res) {
                 label: task.title,
                 accept: '',
               }));
-          for (const spawnRequest of spawnRequests) {
+          if (!graphManaged) for (const spawnRequest of spawnRequests) {
             const nextAgent = spawnRequest.agent;
             if (nextAgent === agentKey) continue; // 跳过自己，防止死循环
             
@@ -4101,7 +4200,7 @@ async function handle(req, res) {
               && tail[0] === tail[2] && tail[1] === tail[3]
               && tail[0] !== tail[1];
             if (isPingPong) {
-              sseSend(res, 'worklist-circuit-break', {
+              sseSend(workflowRes, 'worklist-circuit-break', {
                 reason: `乒乓球熔断：${tail.join(' → ')} 交替循环，终止链式执行`,
                 chain_history: newHistory,
               });
@@ -4131,7 +4230,7 @@ async function handle(req, res) {
               spawn_protocol: structuredSpawns.length ? 'spawn_subagent' : 'mention-fallback',
             };
             appendTask(chainTask);
-            sseSend(res, 'worklist-chain', {
+            sseSend(workflowRes, 'worklist-chain', {
               from: agentKey,
               to: nextAgent,
               parent_id: task.id,
@@ -4140,7 +4239,13 @@ async function handle(req, res) {
             await executeTask(chainTask, depth + 1, newHistory);
           }
         }
-        return result;
+        return graphManaged ? {
+          result,
+          agent: agentKey,
+          artifacts: taskArtifacts,
+          spawnRequests,
+          collaborationContext,
+        } : result;
       } catch (err) {
         if (taskTurnRecord && dispatchSession) {
           const errorPart = taskTurnCollector?.append({
@@ -4152,7 +4257,7 @@ async function handle(req, res) {
             status: 'error',
           });
           if (errorPart) {
-            sseSend(res, 'part', errorPart);
+            sseSend(workflowRes, 'part', errorPart);
             persistTaskTurnPart(errorPart);
           }
           taskTurnRecord.kind = 'task-error';
@@ -4170,7 +4275,7 @@ async function handle(req, res) {
           error: err.message,
         });
         appendLesson(task, err);
-        sseSend(res, 'task-failed', {
+        sseSend(workflowRes, 'task-failed', {
           id: task.id,
           title: task.title,
           agent: agentKey,
@@ -4178,7 +4283,7 @@ async function handle(req, res) {
           code: err.code || 'agent_failed',
           retryable: Boolean(err.retryable),
         });
-        failed++;
+        if (!graphManaged) failed++;
         if (depth > 0) {
           pushChainMessage(task.id, { type: 'task-failed', agent: agentKey, title: task.title, error: err.message, subagentRunId });
           appendSubagentMessage(subagentRunId, { type: 'system', content: 'Subagent failed: ' + err.message, isError: true });
@@ -4188,17 +4293,135 @@ async function handle(req, res) {
             error: err.message,
           });
         }
+        if (graphManaged) throw err;
         return null;
       }
     }
 
-    for (const task of pending) {
-      await executeTask(task, 0);
+    async function materializeGraphSpawns(parentTask, requests) {
+      const created = [];
+      const parentAgent = parentTask.executed_by || parentTask.agent;
+      const chainHistory = [...(parentTask.chain_history || []), parentAgent].filter(Boolean);
+      for (const spawnRequest of requests || []) {
+        const nextAgent = spawnRequest.agent;
+        if (!nextAgent || nextAgent === parentAgent || !agentKeys().includes(nextAgent)) continue;
+        const tail = [...chainHistory, nextAgent].slice(-4);
+        const isPingPong = tail.length >= 4
+          && tail[0] === tail[2] && tail[1] === tail[3]
+          && tail[0] !== tail[1];
+        if (isPingPong) {
+          sseSend(workflowRes, 'worklist-circuit-break', {
+            reason: `乒乓球熔断：${tail.join(' → ')} 交替循环，终止链式执行`,
+            chain_history: tail,
+          });
+          continue;
+        }
+        const chainId = randomUUID().slice(0, 8);
+        const upstreamSummary = String(parentTask.result || parentTask.previous_result || '')
+          .slice(0, 300).replace(/\n+/g, ' ').trim();
+        const chainTask = {
+          id: `${parentTask.run_id}-w${chainId}`,
+          run_id: parentTask.run_id,
+          created_at: new Date().toISOString(),
+          session_id: dispatchSession?.id || sessionId,
+          goal: parentTask.goal,
+          title: `[A2A] ${parentAgent} → @${nextAgent}: ${spawnRequest.label || parentTask.title}`,
+          why: '由 LangGraph task subgraph 消费 spawn_subagent 协议派生',
+          steps: [
+            ...(upstreamSummary ? [`上游 ${parentAgent} 的分析：${upstreamSummary}`] : []),
+            spawnRequest.task,
+          ],
+          accept: spawnRequest.accept || '',
+          agent: nextAgent,
+          status: 'pending',
+          phase: 'pending',
+          parent_task_id: parentTask.id,
+          chain_depth: Number(parentTask.chain_depth || 0) + 1,
+          chain_history: chainHistory,
+          spawn_protocol: 'spawn_subagent',
+        };
+        created.push(appendTask(chainTask));
+      }
+      return created;
     }
 
-    sseSend(res, 'done', { done, failed });
-    activeDispatches.delete(dispatchLockId);
-    return res.end();
+    const graphWorkflowId = String(body.workflowId
+      || `dispatch:${selectedRunIds.join('+') || filterTask || 'pending'}:${clientRunId || randomUUID().slice(0, 8)}`);
+    const graphPorts = {
+      emit(event, data) {
+        if (event === 'workflow-interrupt') sseSend(workflowRes, 'workflow-interrupt', { workflowRunId: graphWorkflowId, ...data });
+        if (event === 'worklist-chain') sseSend(workflowRes, 'worklist-chain', data);
+      },
+      async transitionTask(task, nextState, meta) {
+        const latest = readTasks().find((item) => item.id === task.id) || task;
+        const updated = transitionTaskLifecycle(latest, nextState, meta);
+        repository.upsert('tasks', updated);
+        return updated;
+      },
+      async executeTask(task) {
+        return executeTask(task, Number(task.chain_depth || 0), task.chain_history || [], { graphManaged: true });
+      },
+      async reviewTask(task, execution) {
+        return runAutoReview(
+          task,
+          execution?.agent || task.executed_by || task.agent,
+          execution?.result || task.previous_result || '',
+          execution?.collaborationContext || buildTaskCollaborationContext(task),
+          { deferGate: Boolean(body.humanGate) },
+        );
+      },
+      materializeSpawns: materializeGraphSpawns,
+      async applyClarification(task, answer) {
+        const answers = Array.isArray(answer?.answers) ? answer.answers : [];
+        const updated = synchronizeTaskRecord(task, {
+          open_questions: [],
+          clarification_answers: [...(task.clarification_answers || []), ...answers],
+          status: 'pending',
+        }, {
+          eventId: `langgraph:clarification:${graphWorkflowId}:${task.id}`,
+          reason: 'clarification_completed',
+        });
+        repository.upsert('tasks', updated);
+        return updated;
+      },
+    };
+    const engine = new LangGraphDispatchEngine(graphPorts, { checkpointer: langGraphCheckpointer });
+    rememberWorkflowEngine(graphWorkflowId, {
+      engine,
+      setResponse(nextResponse) { workflowRes = nextResponse; },
+    });
+    activeDispatches.get(dispatchLockId).workflowRunId = graphWorkflowId;
+    sseSend(res, 'workflow-start', { workflowRunId: graphWorkflowId, engine: 'langgraph' });
+
+    try {
+      const snapshot = await engine.run({
+        workflowRunId: graphWorkflowId,
+        sessionId: dispatchSession?.id || sessionId,
+        clientRunId,
+        tasks: pending,
+        options: {
+          maxReworkAttempts: Math.max(0, Math.min(3, Number(body.maxReworkAttempts ?? 1))),
+          maxSpawnDepth: WORKLIST_MAX_DEPTH,
+          requireHumanGate: Boolean(body.humanGate),
+          reviewSpawned: false,
+        },
+      });
+      const paused = snapshot.interrupts.length > 0;
+      const graphDone = snapshot.values.completedTaskIds?.length || 0;
+      const graphFailed = snapshot.values.failedTaskIds?.length || 0;
+      sseSend(workflowRes, paused ? 'paused' : 'done', {
+        workflowRunId: graphWorkflowId,
+        status: paused ? 'interrupted' : snapshot.values.status,
+        done: graphDone,
+        failed: graphFailed,
+        interrupts: snapshot.interrupts,
+      });
+    } catch (error) {
+      sseSend(workflowRes, 'error', { message: error.message, code: 'langgraph_dispatch_failed' });
+    } finally {
+      activeDispatches.delete(dispatchLockId);
+    }
+    return workflowRes.end();
   }
 
   if (req.method === 'POST' && pathname === '/api/skills/install-source') {

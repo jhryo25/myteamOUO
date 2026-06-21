@@ -134,10 +134,13 @@ test('bulk task selection is reconciled with the currently visible task set', ()
   assert.match(app, /reconcileBulkSelection\(filtered\);\s*renderTasks\(filtered\)/);
 });
 
-test('review protocol failures are retried internally instead of becoming user acceptance work', () => {
-  assert.match(server, /attempt <= 3/);
+test('review protocol failures preserve Agent output, halt the workflow, and retry only Reviewer', () => {
+  assert.match(server, /attempt <= 2/);
   assert.match(server, /task-review-retrying/);
-  assert.match(server, /review_status: 'agent_repair_pending'/);
+  assert.match(server, /verdict: 'review_error'/);
+  assert.match(server, /review_status: 'failed'/);
   assert.match(server, /review_only_pending: true/);
-  assert.match(app, /Agent 修复验收中/);
+  assert.match(server, /retry-review/);
+  assert.match(app, /只重试 Reviewer/);
+  assert.doesNotMatch(server, /已加入内部验收修复队列/);
 });

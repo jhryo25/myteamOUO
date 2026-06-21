@@ -39,6 +39,7 @@ execute → review → human_gate? → complete
 - `<spawn_subagent>` 结果由父图物化并追加到队列，保留父任务与工作流关联。
 - 返工由 `maxReworkAttempts` 限制，派生深度由 `maxSpawnDepth` 限制。
 - 图事件继续映射到现有 SSE；新增 `workflow-start`、`workflow-interrupt` 与 `paused`。
+- Web 端把这些事件统一渲染为工作流卡片：运行时展示当前节点，暂停时提供通过/返工/澄清恢复，完成时保留 checkpoint 摘要，失败时重置并精确重新派发 `taskIds`。
 
 ## P4：其他入口统一
 
@@ -92,5 +93,5 @@ SQLite checkpoint 能跨进程读取，图引擎也已验证能用新实例恢�
 ## 验证
 
 - `npm run check`
-- `npm test`：`96/96`
+- `npm test`：`100/100`
 - 行为测试见 `tests/langgraph-workflow.test.mjs`：多任务与 spawn、受限返工、人工 Gate、澄清、SQLite 跨实例恢复、Chat/Plan/Schedule turn graph。

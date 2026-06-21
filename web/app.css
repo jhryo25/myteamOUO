@@ -3750,6 +3750,71 @@ body.artifacts-resizing { cursor: col-resize; user-select: none; }
 .session-recovery-desc { color: var(--muted); font-size: 11px; }
 .session-recovery-btn { flex: 0 0 auto; border: 1px solid var(--accent); border-radius: 5px; background: var(--accent); color: #fff; cursor: pointer; padding: 6px 10px; font-size: 11px; font-weight: 700; }
 .session-recovery-btn:disabled { opacity: .55; cursor: wait; }
+.workflow-card {
+  display: flex;
+  width: min(760px, calc(100% - 56px));
+  align-items: flex-start;
+  gap: 12px;
+  margin: 10px 14px 10px 42px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+  box-shadow: 0 5px 18px rgba(70, 45, 20, .07);
+}
+.workflow-card.paused { border-color: color-mix(in srgb, var(--yellow) 60%, var(--border)); background: color-mix(in srgb, var(--yellow) 8%, var(--surface)); }
+.workflow-card.failed { border-color: color-mix(in srgb, var(--red) 45%, var(--border)); background: color-mix(in srgb, var(--red) 6%, var(--surface)); }
+.workflow-card.completed { border-color: color-mix(in srgb, var(--green) 42%, var(--border)); background: color-mix(in srgb, var(--green) 6%, var(--surface)); }
+.workflow-card-icon { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center; border-radius: 9px; background: var(--accent); color: #fff; font-size: 13px; font-weight: 800; }
+.workflow-card.paused .workflow-card-icon { background: var(--yellow); color: var(--text); }
+.workflow-card.failed .workflow-card-icon { background: var(--red); }
+.workflow-card.completed .workflow-card-icon { background: var(--green); }
+.workflow-card-main { min-width: 0; flex: 1; }
+.workflow-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.workflow-card-head strong { color: var(--text); font-size: 13px; }
+.workflow-status { flex: 0 0 auto; padding: 3px 7px; border-radius: 999px; background: var(--surface); color: var(--muted); font-size: 9px; font-weight: 700; }
+.workflow-current { display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center; gap: 6px; margin-top: 7px; font-size: 10px; }
+.workflow-current span { color: var(--muted); }
+.workflow-current b { padding: 2px 5px; border-radius: 4px; background: var(--surface2); color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.workflow-current em { overflow: hidden; color: var(--text); font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.workflow-error { margin-top: 8px; padding: 7px 9px; border-radius: 6px; background: var(--red-soft); color: var(--red); font-size: 10px; line-height: 1.45; }
+.workflow-live { display: flex; align-items: center; gap: 8px; margin-top: 9px; padding: 8px 9px; border-radius: 7px; background: var(--surface); }
+.workflow-live-dot { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 15%, transparent); animation: pulse 1.4s infinite; }
+.workflow-live div { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.workflow-live strong { overflow: hidden; color: var(--text); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.workflow-live small { color: var(--muted); font-size: 9px; }
+.workflow-retry-hint { display: flex; flex-direction: column; gap: 2px; margin-top: 9px; padding: 8px 9px; border: 1px solid color-mix(in srgb, var(--red) 25%, var(--border)); border-radius: 7px; background: var(--surface); }
+.workflow-retry-hint strong { color: var(--text); font-size: 10px; }
+.workflow-retry-hint span { color: var(--muted); font-size: 9px; line-height: 1.4; }
+.workflow-failures { display: grid; gap: 6px; margin-top: 10px; padding: 9px; border: 1px solid color-mix(in srgb, var(--red) 25%, var(--border)); border-radius: 8px; background: var(--surface); }
+.workflow-failures-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-bottom: 3px; color: var(--text); font-size: 10px; font-weight: 800; }
+.workflow-failures-title span { color: var(--muted); font-size: 9px; font-weight: 400; }
+.workflow-failure-row { display: flex; align-items: center; gap: 10px; padding-top: 6px; border-top: 1px solid var(--border); }
+.workflow-failure-row > div { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }
+.workflow-failure-row strong { overflow: hidden; color: var(--text); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.workflow-failure-row span { overflow: hidden; color: var(--muted); font-size: 9px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.workflow-failure-row em { flex: 0 0 auto; color: var(--muted); font-size: 9px; font-style: normal; }
+.workflow-review { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; margin-top: 10px; padding: 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); font-size: 10px; }
+.workflow-review span { color: var(--muted); }
+.workflow-review strong { color: var(--text); }
+.workflow-review p { grid-column: 1 / -1; margin: 2px 0; color: var(--text); line-height: 1.45; }
+.workflow-comment { grid-column: 1 / -1; width: 100%; resize: vertical; border: 1px solid var(--border); border-radius: 6px; outline: 0; background: var(--bg); color: var(--text); padding: 7px 8px; font: 10px/1.45 inherit; }
+.workflow-comment:focus, .workflow-questions input:focus { border-color: var(--accent); }
+.workflow-questions { display: grid; gap: 7px; margin-top: 9px; }
+.workflow-questions label { display: grid; grid-template-columns: minmax(140px, .8fr) minmax(160px, 1fr); align-items: center; gap: 8px; color: var(--text); font-size: 10px; }
+.workflow-questions input { min-width: 0; border: 1px solid var(--border); border-radius: 6px; outline: 0; background: var(--surface); color: var(--text); padding: 7px 8px; font-size: 10px; }
+.workflow-checkpoint { margin-top: 9px; color: var(--muted); font-size: 10px; }
+.workflow-checkpoint summary { width: max-content; cursor: pointer; color: var(--accent); font-weight: 700; }
+.workflow-checkpoint-grid { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 7px; }
+.workflow-checkpoint-grid b { color: var(--text); }
+.workflow-checkpoint code { display: block; margin-top: 6px; overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.workflow-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.workflow-action { border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); cursor: pointer; padding: 6px 9px; font-size: 10px; font-weight: 700; }
+.workflow-action:hover { border-color: var(--accent); color: var(--accent); }
+.workflow-action.primary { border-color: var(--accent); background: var(--accent); color: #fff; }
+.workflow-action.danger { border-color: color-mix(in srgb, var(--red) 55%, var(--border)); color: var(--red); }
+.workflow-action.quiet { margin-left: auto; color: var(--muted); font-weight: 500; }
+.workflow-action:disabled, .workflow-card input:disabled, .workflow-card textarea:disabled { opacity: .55; cursor: wait; }
 .session-running-task,
 .task-review-chat-card {
   display: flex;
@@ -3794,5 +3859,14 @@ body.artifacts-resizing { cursor: col-resize; user-select: none; }
   .artifacts-panel-body { grid-template-columns: 1fr; grid-template-rows: minmax(120px, 32%) minmax(0, 1fr); }
   .artifacts-list { border-right: 0; border-bottom: 1px solid var(--border); }
   .session-recovery { width: calc(100% - 42px); margin-left: 42px; }
+  .workflow-card { width: calc(100% - 24px); margin: 9px 12px; padding: 12px; }
+  .workflow-card-head { align-items: flex-start; flex-direction: column; gap: 5px; }
+  .workflow-current { grid-template-columns: auto 1fr; }
+  .workflow-current em { grid-column: 1 / -1; white-space: normal; }
+  .workflow-questions label { grid-template-columns: 1fr; gap: 4px; }
+  .workflow-failures-title { align-items: flex-start; flex-direction: column; }
+  .workflow-failure-row { align-items: flex-start; flex-direction: column; }
+  .workflow-failure-row .workflow-action { width: 100%; }
+  .workflow-action.quiet { margin-left: 0; }
 }
 

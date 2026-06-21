@@ -3,7 +3,7 @@
 > 一个本地优先的多 Agent 协作控制台：把 Codex、Claude Code、Kimi 等本机 CLI 串成可拆解、可执行、可审查、可恢复的任务流水线。
 
 [![Node.js](https://img.shields.io/badge/Node.js-22.5%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
-[![Tests](https://img.shields.io/badge/tests-96%20passed-brightgreen)](#验证)
+[![Tests](https://img.shields.io/badge/tests-100%20passed-brightgreen)](#验证)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ## 30 秒理解这个项目
@@ -92,6 +92,7 @@ flowchart LR
 - 实时 SSE 与 SQLite 历史回放使用同一套时间线语义。
 - 会话状态覆盖 `running / interrupting / interrupted / completed / error`。
 - 用户停止任务后等待旧子进程收口，再允许继续，避免新旧回复交叉写入。
+- LangGraph 工作流卡片展示当前节点与 checkpoint；暂停时可直接通过、返工或补充澄清，失败节点可按原任务集合重新派发。
 
 ### 6. 扩展与自动化
 
@@ -181,7 +182,7 @@ npm run check
 npm test
 ```
 
-当前自动化测试覆盖结构化计划、LangGraph 多任务队列与派生任务、受限返工、人工中断/恢复、SQLite checkpoint、首次使用模板、上下文恢复、Agent 回退、工具事件、路径安全、审批指纹、审计脱敏、调度互斥和中断恢复等关键链路；本地测试结果为 `96/96` 通过。
+当前自动化测试覆盖结构化计划、LangGraph 多任务队列与派生任务、受限返工、Reviewer 协议解析与单节点重试、失败后停止队列、人工中断/恢复、工作流卡片与实时活动恢复、SQLite checkpoint、首次使用模板、上下文恢复、Agent 回退、工具事件、路径安全、审批指纹、审计脱敏、调度互斥和中断恢复等关键链路；本地测试结果为 `100/100` 通过。
 
 ## 当前边界与下一步
 

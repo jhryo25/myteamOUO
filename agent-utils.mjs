@@ -454,6 +454,14 @@ export function resolveAgentParser(agentKey, cfg = {}) {
   return parseText;
 }
 
+// Parser 既支持旧版字符串，也支持结构化 { text, thinking, activities }。
+// 静默调用（Plan/Reviewer）只应收集正文；直接拼接对象会得到 "[object Object]"。
+export function parsedAgentOutputText(parsed) {
+  if (typeof parsed === 'string') return parsed;
+  if (!parsed || typeof parsed !== 'object') return '';
+  return typeof parsed.text === 'string' ? parsed.text : '';
+}
+
 export function buildSpawnCommand(cfg, args) {
   const isCmd = cfg.path.toLowerCase().endsWith('.cmd');
   if (isCmd) {
@@ -613,7 +621,7 @@ export function invokeAgent(CLI_CONFIG, agentKey, prompt, {
     rl.on('line', (line) => {
       touch(); // 教训1: readline 接管后在这里刷新 watchdog
       if (!line.trim()) return;
-      const text = parser(line);
+      const text = parsedAgentOutputText(parser(line));
       if (text) {
         if (!silent) process.stdout.write(text);
         fullText += text;
@@ -691,6 +699,29 @@ export function extractJson(text) {
     if (repaired) { try { return JSON.parse(repaired); } catch {} }
   }
   return null;
+}
+
+export function parseReviewResult(raw) {
+  const text = typeof raw === 'string' ? raw : '';
+  const parsed = extractJson(text);
+  const candidate = parsed?.review && typeof parsed.review === 'object'
+    ? parsed.review
+    : parsed?.result && typeof parsed.result === 'object'
+      ? parsed.result
+      : parsed;
+  const explicit = String(candidate?.verdict || '').trim().toLowerCase();
+  const fallback = text.match(/\bverdict\s*["']?\s*[:=：]\s*["']?\s*(pass|rework)\b/i)?.[1]?.toLowerCase() || '';
+  const verdict = ['pass', 'rework'].includes(explicit) ? explicit : fallback;
+  if (!verdict) return null;
+  const rawScore = Number(candidate?.score);
+  const score = Number.isFinite(rawScore)
+    ? Math.max(0, Math.min(10, rawScore > 10 && rawScore <= 100 ? rawScore / 10 : rawScore))
+    : candidate?.score;
+  return {
+    ...(candidate && typeof candidate === 'object' ? candidate : {}),
+    verdict,
+    score,
+  };
 }
 
 // Best-effort repair of truncated/malformed JSON: trim trailing commas,

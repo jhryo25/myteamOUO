@@ -122,6 +122,50 @@ test('LangGraph task subgraph loops through bounded rework before completing', a
   assert.equal(fake.records.get('t1').lifecycle.state, 'completed');
 });
 
+test('review protocol failure halts the queue and preserves execution for reviewer-only retry', async () => {
+  const fake = fakePorts({
+    reviewTask() {
+      return { verdict: 'review_error', code: 'review_protocol_failed', retryable: true, reason: 'invalid reviewer payload' };
+    },
+  });
+  const engine = new LangGraphDispatchEngine(fake.ports, { checkpointer: new MemorySaver() });
+  const state = await engine.run({
+    workflowRunId: 'wf-review-failed',
+    sessionId: 'session-test',
+    tasks: [task('t1'), task('t2')],
+  });
+
+  assert.equal(state.values.status, 'failed');
+  assert.deepEqual(state.values.failedTaskIds, ['t1']);
+  assert.equal(fake.calls.execute, 1, 'the next task must not start after reviewer failure');
+  assert.equal(fake.calls.review, 1);
+  assert.equal(fake.records.has('t2'), false);
+  assert.equal(fake.records.get('t1').failure_stage, 'review');
+  assert.equal(fake.records.get('t1').review_only_pending, true);
+  assert.equal(fake.records.get('t1').previous_result, 'result:t1');
+});
+
+test('review-only retry skips Agent execution and reruns only Reviewer', async () => {
+  const fake = fakePorts();
+  const engine = new LangGraphDispatchEngine(fake.ports, { checkpointer: new MemorySaver() });
+  const state = await engine.run({
+    workflowRunId: 'wf-review-only',
+    sessionId: 'session-test',
+    tasks: [task('t1', {
+      status: 'pending',
+      phase: 'review',
+      review_only_pending: true,
+      previous_result: 'saved Agent result',
+      executed_by: 'kimi',
+    })],
+  });
+
+  assert.equal(state.values.status, 'completed');
+  assert.equal(fake.calls.execute, 0);
+  assert.equal(fake.calls.review, 1);
+  assert.ok(fake.events.some(item => item.event === 'task-review-resume'));
+});
+
 test('human gate interrupt resumes without repeating execution or review side effects', async () => {
   const fake = fakePorts();
   const engine = new LangGraphDispatchEngine(fake.ports, { checkpointer: new MemorySaver() });
@@ -134,6 +178,8 @@ test('human gate interrupt resumes without repeating execution or review side ef
 
   assert.ok(paused.interrupts.length > 0);
   assert.equal(paused.interrupts[0].value.kind, 'human_gate');
+  assert.equal(paused.checkpoint.threadId, 'wf-human-gate');
+  assert.ok(Number.isInteger(paused.checkpoint.step));
   assert.equal(fake.calls.execute, 1);
   assert.equal(fake.calls.review, 1);
 

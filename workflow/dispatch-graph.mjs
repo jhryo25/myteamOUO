@@ -57,6 +57,38 @@ export function createTaskSubgraph(rawPorts) {
 
   const execute = async (state) => {
     const task = normalizeTaskRecord(state.currentTask || {});
+    if (task.review_only_pending && task.previous_result) {
+      ports.emit('task-review-resume', {
+        id: task.id,
+        title: task.title,
+        reviewer: task.reviewer || null,
+        message: '复用已保存的 Agent 结果，只重试 Reviewer',
+      });
+      const reviewBase = task.lifecycle?.state === 'reviewing'
+        ? task
+        : await ports.transitionTask(task, 'running', {
+          eventId: `langgraph:review-resume-prepare:${state.workflowRunId}:${task.id}`,
+          reason: 'review_only_retry_prepare',
+          patch: { error: null, failure_stage: null, retryable: null },
+        });
+      const reviewing = await ports.transitionTask(reviewBase, 'reviewing', {
+        eventId: `langgraph:review-resume:${state.workflowRunId}:${task.id}`,
+        reason: 'review_only_retry',
+        patch: { review_status: null },
+      });
+      return {
+        currentTask: reviewing,
+        execution: {
+          result: task.previous_result,
+          agent: task.executed_by || task.agent,
+          artifacts: task.artifacts || [],
+          spawnRequests: [],
+        },
+        review: null,
+        taskOutcome: 'executed',
+        error: null,
+      };
+    }
     const startedAt = nowIso();
     ports.emit('task-start', { id: task.id, title: task.title, agent: task.agent });
     const running = await ports.transitionTask(task, 'running', {
@@ -98,7 +130,7 @@ export function createTaskSubgraph(rawPorts) {
       const failed = await ports.transitionTask(running, 'failed', {
         eventId: `langgraph:execute-failed:${state.workflowRunId}:${task.id}:${state.reworkAttempts}`,
         reason: 'execution_failed',
-        patch: { error: message, finished_at: nowIso() },
+        patch: { error: message, failure_stage: 'execute', retryable: error?.retryable !== false, finished_at: nowIso() },
       });
       ports.emit('task-failed', { id: task.id, title: task.title, agent: running.agent, error: message });
       return { currentTask: failed, taskOutcome: 'failed', error: message };
@@ -115,6 +147,24 @@ export function createTaskSubgraph(rawPorts) {
     ports.emit('task-review-start', { id: task.id, title: task.title, reviewer: null, strategy: 'langgraph' });
     try {
       const outcome = await ports.reviewTask(task, state.execution, workflowContext(state));
+      if (outcome?.verdict === 'review_error') {
+        const message = String(outcome.reason || 'Reviewer failed');
+        const failed = await ports.transitionTask(task, 'failed', {
+          eventId: `langgraph:review-error:${state.workflowRunId}:${task.id}:${state.reworkAttempts}`,
+          reason: outcome.code || 'review_failed',
+          patch: {
+            error: message,
+            failure_stage: 'review',
+            retryable: outcome.retryable !== false,
+            review_status: 'failed',
+            review_only_pending: true,
+            previous_result: state.execution?.result?.slice(0, 2000) || task.previous_result || null,
+            finished_at: nowIso(),
+          },
+        });
+        ports.emit('task-review-failed', { id: task.id, title: task.title, ...outcome, error: message });
+        return { currentTask: failed, review: outcome, taskOutcome: 'failed', error: message };
+      }
       const verdict = ['pass', 'rework', 'skipped'].includes(outcome?.verdict)
         ? outcome.verdict
         : 'rework';
@@ -124,7 +174,7 @@ export function createTaskSubgraph(rawPorts) {
       const failed = await ports.transitionTask(task, 'failed', {
         eventId: `langgraph:review-failed:${state.workflowRunId}:${task.id}:${state.reworkAttempts}`,
         reason: 'review_failed',
-        patch: { error: message, finished_at: nowIso() },
+        patch: { error: message, failure_stage: 'review', retryable: true, finished_at: nowIso() },
       });
       ports.emit('task-review-repair', { id: task.id, title: task.title, reason: message });
       return { currentTask: failed, taskOutcome: 'failed', error: message };
@@ -168,7 +218,7 @@ export function createTaskSubgraph(rawPorts) {
       const failed = await ports.transitionTask(state.currentTask, 'failed', {
         eventId: `langgraph:rework-limit:${state.workflowRunId}:${state.currentTask.id}:${attempt}`,
         reason: 'rework_limit_exceeded',
-        patch: { error: message, finished_at: nowIso() },
+        patch: { error: message, failure_stage: 'rework', retryable: true, finished_at: nowIso() },
       });
       ports.emit('task-failed', { id: failed.id, title: failed.title, error: message });
       return { currentTask: failed, reworkAttempts: attempt, taskOutcome: 'failed', error: message };
@@ -340,6 +390,23 @@ export function createDispatchGraph(rawPorts, { checkpointer = new MemorySaver()
   };
 
   const advance = (state) => ({ cursor: state.cursor + 1, currentTask: null });
+  const halt = async (state) => {
+    const tasks = [...state.tasks];
+    tasks[state.cursor] = state.currentTask;
+    const failedTaskIds = [...new Set([...state.failedTaskIds, state.currentTask?.id].filter(Boolean))];
+    const summary = {
+      workflowRunId: state.workflowRunId,
+      sessionId: state.sessionId,
+      status: 'failed',
+      done: state.completedTaskIds.length,
+      failed: failedTaskIds.length,
+      blockedTaskId: state.currentTask?.id || null,
+      remaining: Math.max(0, state.tasks.length - state.cursor - 1),
+    };
+    await ports.onWorkflowComplete(summary, { ...state, tasks, failedTaskIds, status: 'failed' });
+    ports.emit('workflow-failed', summary);
+    return { tasks, failedTaskIds, status: 'failed' };
+  };
   const finish = async (state) => {
     const status = state.failedTaskIds.length ? 'completed_with_errors' : 'completed';
     const summary = {
@@ -362,6 +429,7 @@ export function createDispatchGraph(rawPorts, { checkpointer = new MemorySaver()
     .addNode('run_task', taskSubgraph)
     .addNode('enqueue_spawns', enqueueSpawns)
     .addNode('advance', advance)
+    .addNode('halt', halt)
     .addNode('finish', finish)
     .addEdge(START, 'initialize')
     .addEdge('initialize', 'select_task')
@@ -371,10 +439,14 @@ export function createDispatchGraph(rawPorts, { checkpointer = new MemorySaver()
       finish: 'finish',
     })
     .addEdge('clarify', 'run_task')
-    .addEdge('run_task', 'enqueue_spawns')
+    .addConditionalEdges('run_task', (state) => state.taskOutcome === 'failed' ? 'halt' : 'enqueue_spawns', {
+      halt: 'halt',
+      enqueue_spawns: 'enqueue_spawns',
+    })
     .addEdge('enqueue_spawns', 'advance')
     .addEdge('advance', 'select_task')
     .addEdge('finish', END)
+    .addEdge('halt', END)
     .compile({ checkpointer, name: 'myteam-dispatch-workflow' });
 }
 
@@ -408,6 +480,12 @@ export class LangGraphDispatchEngine {
       next: [...(snapshot.next || [])],
       interrupts: interruptSnapshot(snapshot),
       config: snapshot.config,
+      checkpoint: {
+        threadId: String(workflowRunId),
+        createdAt: snapshot.createdAt || null,
+        step: Number.isFinite(snapshot.metadata?.step) ? snapshot.metadata.step : null,
+        source: snapshot.metadata?.source || null,
+      },
     };
   }
 

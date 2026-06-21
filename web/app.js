@@ -958,17 +958,271 @@ function addResultCard(title, agent, summary, ok) {
   scrollChat();
 }
 
+const WORKFLOW_SESSION_KEY = 'myteam.workflowBySession';
+const workflowViewState = new Map();
+
+function readWorkflowSessionMap() {
+  try { return JSON.parse(localStorage.getItem(WORKFLOW_SESSION_KEY) || '{}') || {}; }
+  catch { return {}; }
+}
+
+function rememberSessionWorkflow(sessionId, workflowRunId) {
+  if (!sessionId || !workflowRunId) return;
+  const entries = readWorkflowSessionMap();
+  entries[sessionId] = workflowRunId;
+  localStorage.setItem(WORKFLOW_SESSION_KEY, JSON.stringify(entries));
+}
+
+function rememberedSessionWorkflow(sessionId = currentSessionId) {
+  return sessionId ? String(readWorkflowSessionMap()[sessionId] || '') : '';
+}
+
+function workflowInterruptValue(interrupts = []) {
+  const interrupt = Array.isArray(interrupts) ? interrupts[0] : null;
+  return interrupt?.value || interrupt || null;
+}
+
+function normalizeWorkflowView(input = {}) {
+  const previous = workflowViewState.get(input.workflowRunId || input.checkpoint?.threadId || '') || {};
+  const values = input.values || previous.values || {};
+  const interrupts = input.interrupts ?? previous.interrupts ?? [];
+  const interrupt = workflowInterruptValue(interrupts);
+  const workflowRunId = String(input.workflowRunId || values.workflowRunId || input.checkpoint?.threadId || previous.workflowRunId || '');
+  const failedTaskIds = input.failedTaskIds || values.failedTaskIds || previous.failedTaskIds || [];
+  const completedTaskIds = input.completedTaskIds || values.completedTaskIds || previous.completedTaskIds || [];
+  const failedTasks = input.failedTasks || previous.failedTasks
+    || (values.tasks || []).filter(task => failedTaskIds.map(String).includes(String(task.id)));
+  const failedTask = failedTasks.find(task => task.status === 'failed' || ['failed', 'agent_repair_pending'].includes(task.review_status))
+    || failedTasks[0]
+    || null;
+  const currentTask = input.task || input.currentTask || interrupt?.task || values.currentTask || failedTask || previous.currentTask || null;
+  const explicitStatus = String(input.status || values.status || previous.status || 'running');
+  const terminalStatus = ['completed', 'completed_with_errors', 'failed', 'error', 'adapter_unavailable', 'cancelled'].includes(explicitStatus);
+  const live = terminalStatus ? { ...(input.live || previous.live || {}), active: false } : (input.live || previous.live || null);
+  const status = interrupts.length
+    ? 'interrupted'
+    : live?.active && !terminalStatus
+      ? 'running'
+      : explicitStatus;
+  return {
+    ...previous,
+    ...input,
+    workflowRunId,
+    values,
+    status,
+    interrupts,
+    interrupt,
+    currentTask,
+    live,
+    error: input.error ?? currentTask?.error ?? previous.error ?? '',
+    failedTaskIds: [...new Set(failedTaskIds.map(String))],
+    failedTasks,
+    completedTaskIds: [...new Set(completedTaskIds.map(String))],
+    done: Number(input.done ?? completedTaskIds.length ?? previous.done ?? 0),
+    failed: Number(input.failed ?? failedTaskIds.length ?? previous.failed ?? 0),
+    next: input.next || previous.next || [],
+    checkpoint: input.checkpoint || previous.checkpoint || null,
+  };
+}
+
+function workflowStatusCopy(view) {
+  if (view.status === 'interrupted') return { tone: 'paused', icon: 'Ⅱ', label: '等待你的操作', title: '工作流已暂停' };
+  if (['completed_with_errors', 'failed', 'error', 'adapter_unavailable'].includes(view.status) || view.failed > 0) {
+    return { tone: 'failed', icon: '!', label: '存在失败节点', title: '工作流需要处理' };
+  }
+  if (view.status === 'completed') return { tone: 'completed', icon: '✓', label: 'Checkpoint 已完成', title: '工作流执行完成' };
+  return { tone: 'running', icon: '↻', label: 'Checkpoint 运行中', title: 'LangGraph 工作流' };
+}
+
+function workflowQuestionText(question) {
+  return typeof question === 'string' ? question : String(question?.question || question?.text || '请补充信息');
+}
+
+function workflowCheckpointMeta(view) {
+  const node = view.next?.length
+    ? view.next.join(' → ')
+    : view.status === 'completed'
+      ? 'END'
+      : (view.failed > 0 || view.failedTaskIds.length ? 'FAILED' : '等待恢复');
+  const step = Number.isFinite(view.checkpoint?.step) ? `step ${view.checkpoint.step}` : 'step —';
+  const saved = view.checkpoint?.createdAt ? new Date(view.checkpoint.createdAt).toLocaleString() : '刚刚同步';
+  return { node, step, saved };
+}
+
+function renderWorkflowCard(input = {}) {
+  const view = normalizeWorkflowView(input);
+  if (!view.workflowRunId || (currentSessionId && input.sessionId && input.sessionId !== currentSessionId)) return null;
+  workflowViewState.set(view.workflowRunId, view);
+  rememberSessionWorkflow(currentSessionId, view.workflowRunId);
+  hideWelcome();
+
+  chatEl.querySelectorAll('.workflow-card').forEach(card => {
+    if (card.dataset.workflowId !== view.workflowRunId) card.remove();
+  });
+  let row = chatEl.querySelector(`.workflow-card[data-workflow-id="${CSS.escape(view.workflowRunId)}"]`);
+  if (!row) {
+    row = document.createElement('section');
+    row.className = 'workflow-card';
+    row.dataset.workflowId = view.workflowRunId;
+    chatEl.appendChild(row);
+  }
+
+  const copy = workflowStatusCopy(view);
+  const meta = workflowCheckpointMeta(view);
+  const taskTitle = view.currentTask?.title || view.currentTask?.id || '等待选择任务';
+  const interruptKind = view.interrupt?.kind || '';
+  const questions = Array.isArray(view.interrupt?.questions) ? view.interrupt.questions : [];
+  const review = view.interrupt?.review || view.values?.review || null;
+  const retryCandidates = view.failedTasks?.length
+    ? view.failedTasks
+    : (['failed', 'error', 'adapter_unavailable'].includes(view.status) && view.currentTask?.id ? [view.currentTask] : []);
+
+  const clarificationMarkup = interruptKind === 'clarification'
+    ? `<div class="workflow-questions">${questions.map((question, index) => `
+        <label><span>${esc(workflowQuestionText(question))}</span><input data-workflow-answer="${index}" data-question="${esc(workflowQuestionText(question))}" placeholder="输入后继续"></label>`).join('')}</div>`
+    : '';
+  const reviewMarkup = interruptKind === 'human_gate'
+    ? `<div class="workflow-review">
+        <span>Reviewer：${esc(review?.reviewer || '自动审查')}</span>
+        <strong>${esc(review?.verdict === 'pass' ? '建议通过' : review?.verdict || '等待人工确认')}</strong>
+        ${review?.suggestion ? `<p>${esc(review.suggestion)}</p>` : ''}
+        <textarea class="workflow-comment" rows="2" placeholder="可选：补充通过说明或返工要求"></textarea>
+      </div>`
+    : '';
+  const pausedActions = interruptKind === 'human_gate'
+    ? `<button class="workflow-action primary" data-workflow-action="pass">通过并继续</button><button class="workflow-action" data-workflow-action="rework">要求返工</button>`
+    : interruptKind === 'clarification'
+      ? `<button class="workflow-action primary" data-workflow-action="clarify">提交信息并继续</button>`
+      : '';
+  const retryRows = retryCandidates.map(task => {
+    const reviewOnly = (task.failure_stage === 'review' || task.review_only_pending) && task.previous_result;
+    const scope = reviewOnly ? 'review' : 'execute';
+    const actionable = task.status === 'failed' || ['failed', 'agent_repair_pending'].includes(task.review_status);
+    const canRetry = actionable && task.retryable !== false;
+    const stateText = !actionable ? '已重置，等待执行' : reviewOnly ? 'Agent 结果已保留' : 'Agent 执行失败';
+    return `<div class="workflow-failure-row">
+      <div><strong>${esc(task.title || task.id)}</strong><span>${esc(stateText)}${task.error ? ` · ${task.error}` : ''}</span></div>
+      ${canRetry ? `<button class="workflow-action danger" data-workflow-action="retry" data-retry-scope="${scope}" data-task-ids="${esc(String(task.id))}">${reviewOnly ? '只重试 Reviewer' : '重试 Agent'}</button>` : `<em>${actionable ? '不可自动重试' : '无需重试'}</em>`}
+    </div>`;
+  }).join('');
+  const retryPanel = retryRows
+    ? `<div class="workflow-failures"><div class="workflow-failures-title">失败节点处理 <span>逐项判断，不会一键重跑全部任务</span></div>${retryRows}</div>`
+    : '';
+  const liveText = view.live?.statusText || view.activityText || '';
+  const liveMarkup = view.status === 'running'
+    ? `<div class="workflow-live"><span class="workflow-live-dot"></span><div><strong>${esc(liveText || '工作流正在运行')}</strong><small>${esc(view.live?.agent ? `${view.live.agent} · ${view.live.phase || 'working'}` : (view.phase || 'LangGraph 正在切换节点'))}</small></div></div>`
+    : '';
+
+  row.className = `workflow-card ${copy.tone}`;
+  row.innerHTML = `
+    <div class="workflow-card-icon" aria-hidden="true">${copy.icon}</div>
+    <div class="workflow-card-main">
+      <div class="workflow-card-head"><strong>${copy.title}</strong><span class="workflow-status">${copy.label}</span></div>
+      <div class="workflow-current"><span>当前节点</span><b>${esc(meta.node)}</b><em>${esc(taskTitle)}</em></div>
+      ${liveMarkup}
+      ${view.error ? `<div class="workflow-error">${esc(view.error)}</div>` : ''}
+      ${reviewMarkup}${clarificationMarkup}${retryPanel}
+      <details class="workflow-checkpoint">
+        <summary>Checkpoint 状态</summary>
+        <div class="workflow-checkpoint-grid">
+          <span>完成 <b>${view.done}</b></span><span>失败 <b>${view.failed}</b></span><span>${esc(meta.step)}</span><span>${esc(meta.saved)}</span>
+        </div>
+        <code title="${esc(view.workflowRunId)}">${esc(view.workflowRunId)}</code>
+      </details>
+      <div class="workflow-actions">${pausedActions}<button class="workflow-action quiet" data-workflow-action="refresh">刷新状态</button></div>
+    </div>`;
+
+  row.querySelectorAll('[data-workflow-action]').forEach(button => {
+    button.onclick = async () => {
+      const action = button.dataset.workflowAction;
+      const setBusy = busy => row.querySelectorAll('button, input, textarea').forEach(control => { control.disabled = busy; });
+      setBusy(true);
+      try {
+        if (action === 'refresh') await refreshWorkflowCard(view.workflowRunId);
+        if (action === 'pass' || action === 'rework') {
+          const comment = row.querySelector('.workflow-comment')?.value.trim() || '';
+          await runDispatch({ resumeWorkflowId: view.workflowRunId, resumeValue: { decision: action, comment } });
+        }
+        if (action === 'clarify') {
+          const answers = [...row.querySelectorAll('[data-workflow-answer]')].map(input => ({
+            question: input.dataset.question,
+            answer: input.value.trim(),
+          }));
+          if (answers.some(item => !item.answer)) throw new Error('请先填写全部待确认信息');
+          await runDispatch({ resumeWorkflowId: view.workflowRunId, resumeValue: { answers } });
+        }
+        if (action === 'retry') await retryWorkflowTasks(view, button.dataset.taskIds.split(',').filter(Boolean), button.dataset.retryScope || 'execute');
+      } catch (error) {
+        showToast(error.message || '工作流操作失败', 'error');
+      } finally {
+        if (row.isConnected) setBusy(false);
+      }
+    };
+  });
+  scrollChat();
+  return row;
+}
+
+async function refreshWorkflowCard(workflowRunId, { quiet = false } = {}) {
+  if (!workflowRunId) return null;
+  try {
+    const response = await fetch(`/api/workflows/${encodeURIComponent(workflowRunId)}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `Checkpoint 读取失败 (${response.status})`);
+    return renderWorkflowCard({ ...data, workflowRunId });
+  } catch (error) {
+    if (!quiet) showToast(error.message, 'error');
+    return null;
+  }
+}
+
+async function restoreWorkflowCard(sessionId = currentSessionId) {
+  const linkedWorkflowId = new URLSearchParams(location.search).get('workflow') || '';
+  const workflowRunId = linkedWorkflowId || rememberedSessionWorkflow(sessionId);
+  if (!workflowRunId || sessionId !== currentSessionId) return;
+  await refreshWorkflowCard(workflowRunId, { quiet: true });
+}
+
+async function retryWorkflowTasks(view, taskIds = [], retryScope = 'execute') {
+  const ids = [...new Set(taskIds.map(String).filter(Boolean))];
+  if (!ids.length) throw new Error('Checkpoint 中没有可重试的任务');
+  for (const taskId of ids) {
+    const action = retryScope === 'review' ? 'retry-review' : 'rerun';
+    const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/${action}`, { method: 'POST' });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `任务 ${taskId} 重置失败`);
+  }
+  await loadTasks();
+  const nextWorkflowId = `${view.workflowRunId}:retry:${Date.now()}`;
+  renderWorkflowCard({
+    workflowRunId: nextWorkflowId,
+    status: 'running',
+    task: view.currentTask,
+    activityText: retryScope === 'review' ? '正在复用 Agent 结果并重新启动 Reviewer' : '正在重新启动 Agent 执行节点',
+    next: [retryScope === 'review' ? 'review_task' : 'run_task'],
+    failed: 0,
+    failedTaskIds: [],
+    error: '',
+  });
+  showToast(retryScope === 'review' ? 'Agent 结果已保留，正在重试 Reviewer' : `已重置 ${ids.length} 个失败节点，正在重新派发`, 'success');
+  await runDispatch({
+    taskIds: ids,
+    workflowId: nextWorkflowId,
+    humanGate: true,
+  });
+}
+
 function createTaskReviewCard({ id = '', title = '', reviewer = '', verdict = '', strategy = '', score = null, findings = [], suggestion = '', reason = '' } = {}) {
   const passed = verdict === 'pass';
   const rework = verdict === 'rework';
-  const repairing = verdict === 'agent_repair_pending';
+  const repairing = verdict === 'agent_repair_pending'; // 兼容旧历史数据
   const card = document.createElement('div');
   card.className = `task-review-chat-card ${passed ? 'passed' : rework || repairing ? 'rework' : 'fallback'}`;
   const strategyLabel = strategy === 'self_review' ? 'Agent 自验收' : strategy === 'cross_agent' ? '跨 Agent 验收' : '验收兜底';
   card.innerHTML = `
     <div class="task-review-chat-icon">${passed ? '✓' : rework ? '↻' : '!'}</div>
     <div class="task-review-chat-main">
-      <div class="task-review-chat-title">${esc(title || id || '任务')} · ${passed ? '验收通过' : rework ? '要求返工' : repairing ? 'Agent 正在自动修复验收协议' : '自动验收未完成'}</div>
+      <div class="task-review-chat-title">${esc(title || id || '任务')} · ${passed ? '验收通过' : rework ? '要求返工' : repairing ? 'Reviewer 协议异常（执行结果已保留）' : '自动验收未完成'}</div>
       <div class="task-review-chat-meta">${esc([reviewer, strategyLabel, score !== null ? `${score} 分` : ''].filter(Boolean).join(' · '))}</div>
       ${suggestion || reason ? `<div class="task-review-chat-note">${esc(suggestion || reason)}</div>` : ''}
       ${findings?.length ? `<ul>${findings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}
@@ -1414,7 +1668,7 @@ const STATUS_DOT = {
 
 function taskLifecycleMeta(task) {
   if (task.status === 'waiting_input' || task.open_questions?.length) return { tone: 'review', label: '等待用户确认' };
-  if (task.review_status === 'agent_repair_pending') return { tone: 'running', label: 'Agent 修复验收中' };
+  if (task.review_status === 'agent_repair_pending') return { tone: 'blocked', label: 'Reviewer 异常待处理' };
   if (task.gate_status === 'passed') return { tone: 'accepted', label: task.reviewer === 'human' ? '人工已验收' : 'Agent 已验收' };
   if (task.gate_status === 'rework') return { tone: 'rework', label: task.reviewer === 'human' ? '人工要求返工' : 'Agent 要求返工' };
   if (task.status === 'failed') return { tone: 'blocked', label: '失败阻塞' };
@@ -1847,7 +2101,7 @@ function ssePost(url, body, handlers) {
           handlers.error?.({ message: '用户拒绝操作' });
           return resolve(null);
         }
-        handlers.error?.({ message: data.error || `请求失败 (${res.status})` });
+        handlers.error?.({ ...data, message: data.error || `请求失败 (${res.status})` });
         return resolve(null);
       }
       const reader = res.body.getReader();
@@ -2341,17 +2595,65 @@ document.getElementById('dispatchBtn').onclick = () => runDispatch();
 async function runDispatch(options = {}) {
   const dispatchBtn = document.getElementById('dispatchBtn');
   const dispatchSpinner = document.getElementById('dispatchSpinner');
+  const { resumeWorkflowId = '', resumeValue = null, ...dispatchOptions } = options;
+  let activeWorkflowId = resumeWorkflowId || rememberedSessionWorkflow(currentSessionId);
+  const showWorkflowLive = (statusText, phase = 'working', extra = {}) => {
+    if (!activeWorkflowId) return;
+    const previousTask = workflowViewState.get(activeWorkflowId)?.currentTask || null;
+    const currentTask = extra.currentTask ? { ...(previousTask || {}), ...extra.currentTask } : previousTask;
+    renderWorkflowCard({
+      workflowRunId: activeWorkflowId,
+      status: 'running',
+      interrupts: [],
+      ...extra,
+      currentTask,
+      live: {
+        active: true,
+        statusText,
+        phase,
+        agent: extra.agent || '',
+        currentActivity: extra.currentActivity || null,
+        lastActivityAt: new Date().toISOString(),
+      },
+    });
+  };
 
   dispatchBtn.disabled = true;
   dispatchSpinner.classList.remove('hidden');
 
   try {
-    const agentOnlyText = options.agentOnly ? `（仅 ${options.agentOnly}）` : '';
-    addSystemMsg(`开始执行 pending 任务${agentOnlyText}…`);
+    const agentOnlyText = dispatchOptions.agentOnly ? `（仅 ${dispatchOptions.agentOnly}）` : '';
+    addSystemMsg(resumeWorkflowId ? '正在从 checkpoint 恢复工作流…' : `开始执行 pending 任务${agentOnlyText}…`);
+    if (resumeWorkflowId) {
+      renderWorkflowCard({ workflowRunId: resumeWorkflowId, status: 'running', interrupts: [], error: '' });
+    }
 
-    await ssePost('/api/dispatch', { ...options, sessionId: currentSessionId, mode: 'dispatch' }, {
+    const url = resumeWorkflowId
+      ? `/api/workflows/${encodeURIComponent(resumeWorkflowId)}/resume`
+      : '/api/dispatch';
+    const body = resumeWorkflowId
+      ? { value: resumeValue, sessionId: currentSessionId, mode: 'dispatch' }
+      : { ...dispatchOptions, humanGate: dispatchOptions.humanGate ?? true, sessionId: currentSessionId, mode: 'dispatch' };
+    await ssePost(url, body, {
+      'workflow-start': ({ workflowRunId, ...state }) => {
+        activeWorkflowId = workflowRunId;
+        rememberSessionWorkflow(currentSessionId, workflowRunId);
+        renderWorkflowCard({ ...state, workflowRunId, status: 'running', interrupts: [] });
+      },
+      'workflow-interrupt': ({ workflowRunId, interrupts }) => {
+        activeWorkflowId = workflowRunId || activeWorkflowId;
+        renderWorkflowCard({ workflowRunId: activeWorkflowId, status: 'interrupted', interrupts });
+      },
       start:        ({ count }) => addSystemMsg(`共 ${count} 条任务待执行`),
       'task-start': ({ id, title, agent }) => {
+        if (activeWorkflowId) renderWorkflowCard({
+          workflowRunId: activeWorkflowId,
+          status: 'running',
+          interrupts: [],
+          next: ['run_task'],
+          currentTask: { id, title, agent },
+          live: { active: true, statusText: `${agent} 正在启动任务`, phase: 'starting', agent, taskId: id, taskTitle: title },
+        });
         setActiveAgent(agent);
         updateTaskDot(id, 'in_progress');
         const task = allTasks.find(item => item.id === id);
@@ -2365,8 +2667,17 @@ async function runDispatch(options = {}) {
       chunk:        ({ text }) => { appendTyping(text); bumpRunningChars('chunk', (text || '').length); bumpSessionRunningTaskMetric('output', (text || '').length); },
       thinking:     ({ text }) => { appendThinking(text); bumpRunningChars('thinking', (text || '').length); bumpSessionRunningTaskMetric('thinking', (text || '').length); },
       part:         appendTurnPart,
-      activity:     activity => { appendAgentActivity(activity); updateSessionRunningTaskCard({ phase: activity.phase || 'running', currentActivity: activity, lastActivityAt: new Date().toISOString() }); },
-      status:       ({ text, phase }) => { updateAgentStatus(text, phase); updateSessionRunningTaskCard({ statusText: text, phase, lastActivityAt: new Date().toISOString() }); },
+      activity:     activity => {
+        appendAgentActivity(activity);
+        updateSessionRunningTaskCard({ phase: activity.phase || 'running', currentActivity: activity, lastActivityAt: new Date().toISOString() });
+        const label = activity.phase === 'completed' ? `${activity.name || '工具'} 已完成` : `正在调用 ${activity.name || '工具'}`;
+        showWorkflowLive(activity.summary ? `${label}：${activity.summary}` : label, activity.phase || 'tool', { currentActivity: activity });
+      },
+      status:       ({ text, phase }) => {
+        updateAgentStatus(text, phase);
+        updateSessionRunningTaskCard({ statusText: text, phase, lastActivityAt: new Date().toISOString() });
+        showWorkflowLive(text, phase || 'working');
+      },
       'task-done':  ({ id, title, agent, summary }) => {
         const stats = collectFinishStats();
         const hadOutput = finishTyping(stats);
@@ -2375,47 +2686,98 @@ async function runDispatch(options = {}) {
         stopRunningTaskCardTimer();
         chatEl.querySelector('.session-running-task')?.remove();
         if (title && !hadOutput) addResultCard(title, agent, summary, true);
+        showWorkflowLive('Agent 执行结果已保存，正在启动 Reviewer', 'review', { currentTask: { id, title, agent } });
       },
-      'task-review-start': ({ title, reviewer, strategy }) => {
+      'task-review-resume': ({ id, title, reviewer, message }) => {
+        showWorkflowLive(message || '复用 Agent 结果，只重试 Reviewer', 'review', { currentTask: { id, title, reviewer } });
+      },
+      'task-review-start': ({ id, title, reviewer, strategy }) => {
         addSystemMsg(`${reviewer} 正在${strategy === 'self_review' ? '自验收' : '验收'}任务「${title || ''}」…`);
+        showWorkflowLive(`${reviewer || 'Reviewer'} 正在${strategy === 'self_review' ? '自验收' : '验收'}「${title || ''}」`, 'review', { currentTask: { id, title, reviewer } });
       },
       'task-review-done': review => {
         addTaskReviewCard(review);
+        if (review.verdict === 'rework') {
+          showWorkflowLive('Reviewer 要求返工：当前任务将重新执行，不会进入下一任务', 'rework', {
+            currentTask: { id: review.id, title: review.title, review_status: 'rework' },
+          });
+        } else if (review.verdict === 'pass') {
+          showWorkflowLive('Reviewer 已通过，等待你的人工确认', 'gate', {
+            currentTask: { id: review.id, title: review.title, review_status: 'pass' },
+          });
+        }
         loadTasks();
       },
       'task-review-skip': ({ id, reason }) => {
         addTaskReviewCard({ id, verdict: 'skipped', reason: reason === 'no-reviewer' ? '没有可用的 Reviewer Agent' : reason });
         loadTasks();
       },
-      'task-review-failed': ({ id, reviewer, reason, error }) => {
+      'task-review-failed': ({ id, title, reviewer, reason, error, retryable, code }) => {
         addTaskReviewCard({ id, reviewer, verdict: 'failed', reason: error || reason || '自动验收失败' });
+        showWorkflowLive(error || reason || 'Reviewer 失败，工作流正在停止', 'review_failed', {
+          currentTask: { id, title, reviewer, failure_stage: 'review', retryable, error: error || reason, review_status: 'failed' },
+          error: error || reason,
+          reviewErrorCode: code,
+        });
         loadTasks();
       },
-      'task-review-retrying': ({ reviewer, attempt, maxAttempts }) => addSystemMsg(`${reviewer} 正在自动修复验收格式（${attempt}/${maxAttempts}）…`),
-      'task-review-repair': review => { addTaskReviewCard({ ...review, verdict: 'agent_repair_pending' }); loadTasks(); },
+      'task-review-retrying': ({ reviewer, attempt, maxAttempts }) => {
+        showWorkflowLive(`${reviewer || 'Reviewer'} 输出格式异常，正在进行最后一次格式修复（${attempt + 1}/${maxAttempts}）`, 'review_repair');
+      },
+      'task-review-repair': review => { addTaskReviewCard({ ...review, verdict: 'failed' }); loadTasks(); },
       'task-failed':({ id, title, agent, error }) => {
         finishTyping();
         hideRunningPanel();
         updateTaskDot(id, 'failed');
         addResultCard(title || id, agent || '', error, false);
+        if (activeWorkflowId) renderWorkflowCard({
+          workflowRunId: activeWorkflowId,
+          status: 'running',
+          interrupts: [],
+          currentTask: { id, title, agent },
+          error,
+          live: { active: true, statusText: '节点失败，工作流正在安全停止', phase: 'halting', agent },
+        });
       },
       'worklist-chain': ({ from, to, parent_id, chain_task_id }) => {
         finishTyping();
         addSystemMsg(`→ ${from} 触发了 @${to} 继续执行`);
       },
-      done: ({ done, failed }) => {
+      paused: ({ workflowRunId, interrupts, ...state }) => {
+        activeWorkflowId = workflowRunId || activeWorkflowId;
+        finishTyping();
+        hideRunningPanel();
+        renderWorkflowCard({ ...state, workflowRunId: activeWorkflowId, status: 'interrupted', interrupts });
+        void refreshWorkflowCard(activeWorkflowId, { quiet: true });
+      },
+      done: ({ workflowRunId, done, failed, status }) => {
+        activeWorkflowId = workflowRunId || activeWorkflowId;
         hideRunningPanel();
         if (failed > 0) {
-          addResumePrompt(`✓ 执行完毕：${done} 成功 / ${failed} 失败`, true);
+          addSystemMsg(`执行结束：${done} 成功 / ${failed} 失败，可在工作流卡片中重试失败节点。`);
         } else {
           addSystemMsg(`✓ 全部执行完毕：${done} 成功`);
         }
+        if (activeWorkflowId) {
+          renderWorkflowCard({ workflowRunId: activeWorkflowId, status: status || (failed ? 'failed' : 'completed'), done, failed, interrupts: [], live: { active: false } });
+          void refreshWorkflowCard(activeWorkflowId, { quiet: true });
+        }
       },
-      error: ({ message }) => { hideRunningPanel(); addSystemMsg(`✗ ${message}`); },
+      error: ({ message, code }) => {
+        hideRunningPanel();
+        addSystemMsg(`✗ ${message}`);
+        if (activeWorkflowId) renderWorkflowCard({
+          workflowRunId: activeWorkflowId,
+          status: code === 'workflow_adapter_unavailable' ? 'adapter_unavailable' : 'error',
+          error: message,
+          interrupts: [],
+        });
+      },
       aborted: () => {
         finishTyping();
         hideRunningPanel();
-        addResumePrompt('⏹ 已中断执行，仍有未完成任务', false);
+        addSystemMsg('⏹ 已中断执行，可从工作流卡片查看 checkpoint。');
+        if (activeWorkflowId) void refreshWorkflowCard(activeWorkflowId, { quiet: true });
       },
     });
   } finally {
@@ -4852,7 +5214,10 @@ async function loadHistory({ older = false } = {}) {
     }
     historyPage.hasMore = Boolean(page?.hasMore);
     historyPage.nextBefore = page?.nextBefore ?? null;
-    if (!older) renderSessionRecovery();
+    if (!older) {
+      renderSessionRecovery();
+      await restoreWorkflowCard(currentSessionId);
+    }
   } catch {
     // Chat still works if history cannot be loaded.
   } finally {
@@ -4908,11 +5273,25 @@ async function reconnectSessionStream(sessionId, agentKey, taskTitle) {
         try { parsed = JSON.parse(data); } catch { continue; }
         if (event === 'nostream') { break; }
         if (event === 'start') { ensureBubble(parsed.agent || agentKey); continue; }
-        if (event === 'status') { ensureBubble(parsed.agent || agentKey); updateAgentStatus(parsed.text, parsed.phase); updateSessionRunningTaskCard({ statusText: parsed.text, phase: parsed.phase, lastActivityAt: new Date().toISOString() }); continue; }
+        if (event === 'status') {
+          ensureBubble(parsed.agent || agentKey);
+          updateAgentStatus(parsed.text, parsed.phase);
+          updateSessionRunningTaskCard({ statusText: parsed.text, phase: parsed.phase, lastActivityAt: new Date().toISOString() });
+          const workflowRunId = rememberedSessionWorkflow(sessionId);
+          if (workflowRunId) renderWorkflowCard({ workflowRunId, status: 'running', live: { active: true, statusText: parsed.text, phase: parsed.phase, agent: parsed.agent || agentKey, lastActivityAt: new Date().toISOString() } });
+          continue;
+        }
         if (event === 'part') { ensureBubble(parsed.agent || agentKey); appendTurnPart(parsed); continue; }
         if (event === 'chunk' && parsed.text) { ensureBubble(parsed.agent || agentKey); appendTyping(parsed.text); bumpRunningChars('chunk', (parsed.text||'').length); bumpSessionRunningTaskMetric('output', (parsed.text || '').length); continue; }
         if (event === 'thinking' && parsed.text) { appendThinking(parsed.text); bumpRunningChars('thinking', (parsed.text||'').length); bumpSessionRunningTaskMetric('thinking', (parsed.text || '').length); continue; }
-        if (event === 'activity') { appendAgentActivity(parsed); updateSessionRunningTaskCard({ phase: parsed.phase || 'running', currentActivity: parsed, lastActivityAt: new Date().toISOString() }); continue; }
+        if (event === 'activity') {
+          appendAgentActivity(parsed);
+          updateSessionRunningTaskCard({ phase: parsed.phase || 'running', currentActivity: parsed, lastActivityAt: new Date().toISOString() });
+          const workflowRunId = rememberedSessionWorkflow(sessionId);
+          const activityText = parsed.summary ? `${parsed.name || '工具'}：${parsed.summary}` : `${parsed.name || '工具'} ${parsed.phase === 'completed' ? '已完成' : '运行中'}`;
+          if (workflowRunId) renderWorkflowCard({ workflowRunId, status: 'running', live: { active: true, statusText: activityText, phase: parsed.phase || 'tool', agent: agentKey, currentActivity: parsed, lastActivityAt: new Date().toISOString() } });
+          continue;
+        }
         if (event === 'task-review-done') { addTaskReviewCard(parsed); loadTasks(); continue; }
         if (event === 'task-review-retrying') { updateSessionRunningTaskCard({ statusText: `Reviewer 正在修复输出格式（${parsed.attempt}/${parsed.maxAttempts}）`, phase: 'working', lastActivityAt: new Date().toISOString() }); continue; }
         if (event === 'task-review-repair') { addTaskReviewCard({ ...parsed, verdict: 'agent_repair_pending' }); loadTasks(); continue; }
@@ -4937,18 +5316,26 @@ async function restoreRunningState() {
     const { running = [], dispatches = [] } = await runningRes.json();
     const { tasks = [] } = await tasksRes.json();
     for (const dispatch of dispatches) {
+      if (dispatch.workflowRunId) {
+        rememberSessionWorkflow(dispatch.sessionId, dispatch.workflowRunId);
+        if (dispatch.sessionId === currentSessionId) {
+          await refreshWorkflowCard(dispatch.workflowRunId, { quiet: true });
+        }
+      }
       if (running.some(item => item.sessionId === dispatch.sessionId)) continue;
       const nextTask = tasks.find(task => task.session_id === dispatch.sessionId && task.status === 'pending');
       running.push({
         sessionId: dispatch.sessionId,
         clientRunId: dispatch.clientRunId,
-        agentKey: nextTask?.agent || '',
+        agentKey: dispatch.agentKey || nextTask?.agent || '',
         mode: 'dispatch',
-        taskId: nextTask?.id || '',
-        taskTitle: nextTask?.title || '正在切换到下一项任务',
-        phase: 'waiting',
-        statusText: '当前批次仍在执行，正在切换任务',
+        taskId: dispatch.taskId || nextTask?.id || '',
+        taskTitle: dispatch.taskTitle || nextTask?.title || '正在切换到下一项任务',
+        workflowRunId: dispatch.workflowRunId || '',
+        phase: dispatch.phase || 'waiting',
+        statusText: dispatch.statusText || '当前批次仍在执行，正在切换任务',
         startedAt: dispatch.startedAt,
+        lastActivityAt: dispatch.lastActivityAt || null,
       });
     }
     const inProgress = tasks.filter(t => t.status === 'in_progress');
@@ -4986,6 +5373,23 @@ async function restoreRunningState() {
       if (r.sessionId === currentSessionId) {
         const activeTask = tasks.find(task => task.id === r.taskId)
           || inProgress.find(task => task.session_id === currentSessionId);
+        const workflowRunId = r.workflowRunId || rememberedSessionWorkflow(currentSessionId);
+        if (workflowRunId) renderWorkflowCard({
+          workflowRunId,
+          status: 'running',
+          task: activeTask || null,
+          live: {
+            active: true,
+            statusText: r.statusText || `${r.agentKey || 'Agent'} 正在执行「${r.taskTitle || activeTask?.title || ''}」`,
+            phase: r.phase || 'working',
+            agent: r.agentKey || activeTask?.agent || '',
+            currentActivity: r.currentActivity || null,
+            startedAt: r.startedAt || null,
+            lastActivityAt: r.lastActivityAt || null,
+            outputChars: Number(r.outputChars || 0),
+            thinkingChars: Number(r.thinkingChars || 0),
+          },
+        });
         renderSessionRunningTask(activeTask, r);
         showRunningPanel({
           agent: r.agentKey,

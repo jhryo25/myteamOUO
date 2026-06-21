@@ -9,7 +9,7 @@ import { resolve, basename, dirname, extname, join, sep, relative } from 'path';
 import { randomUUID, createHash } from 'crypto';
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
-import { loadEnv, buildCliConfig, invokeAgent, extractJson, resolveAgentParser, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, buildReviewPrompt, AGENT_KEYS, buildSpawnCommand, checkAgentLaunchable, formatLaunchError, normalizeAgentFailure, readAgentRegistry, writeAgentRegistry, sanitizeAgentKey, buildRoleCard, validatePhaseTransition, getNextPhase, selectRunnableAgent } from './agent-utils.mjs';
+import { loadEnv, buildCliConfig, invokeAgent, parseReviewResult, resolveAgentParser, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, buildReviewPrompt, AGENT_KEYS, buildSpawnCommand, checkAgentLaunchable, formatLaunchError, normalizeAgentFailure, readAgentRegistry, writeAgentRegistry, sanitizeAgentKey, buildRoleCard, validatePhaseTransition, getNextPhase, selectRunnableAgent } from './agent-utils.mjs';
 import { normalizeReviewScorecard, publicProductTemplates, reviewScorecardPasses } from './product-guidance.mjs';
 import {
   createWorkflowRunId,
@@ -3320,6 +3320,39 @@ async function handle(req, res) {
     return res.end(JSON.stringify({ ok: true, task }));
   }
 
+  // POST /api/tasks/:id/retry-review — 保留 Agent 结果，只重新执行 Reviewer。
+  const retryReviewMatch = pathname.match(/^\/api\/tasks\/([^\/]+)\/retry-review$/);
+  if (req.method === 'POST' && retryReviewMatch) {
+    const taskId = decodeURIComponent(retryReviewMatch[1]);
+    const tasks = readTasks();
+    const task = tasks.find(t => t.id === taskId);
+    if (!task) return json(res, 404, { error: '任务不存在' });
+    const previousResult = task.previous_result || task.result || '';
+    if (!previousResult) return json(res, 409, { error: '没有可复用的 Agent 执行结果，需要重试 Agent 节点' });
+    Object.assign(task, transitionTaskLifecycle(task, 'queued', {
+      eventId: `review-retry:${taskId}:${Date.now()}`,
+      reason: 'manual_review_retry',
+      patch: {
+        status: 'pending',
+        phase: 'review',
+        result: null,
+        error: null,
+        failure_stage: null,
+        retryable: null,
+        review_status: null,
+        review_note: null,
+        review_raw: null,
+        reviewed_at: null,
+        review_only_pending: true,
+        previous_result: previousResult,
+        started_at: null,
+        finished_at: null,
+      },
+    }));
+    writeAllTasks(tasks);
+    return json(res, 200, { ok: true, retryScope: 'review', task });
+  }
+
   // POST /api/tasks/:id/gate — 人工 Reviewer Gate：通过或要求返工
   const gateMatch = pathname.match(/^\/api\/tasks\/([^\/]+)\/gate$/);
   if (req.method === 'POST' && gateMatch) {
@@ -3705,6 +3738,7 @@ async function handle(req, res) {
   if (req.method === 'GET' && workflowStateMatch) {
     const workflowRunId = decodeURIComponent(workflowStateMatch[1]);
     let record = workflowEngines.get(workflowRunId);
+    const adapterAttached = Boolean(record);
     if (!record) {
       const readonlyPorts = {
         async executeTask() { throw new Error('workflow runtime adapter is not attached'); },
@@ -3717,7 +3751,34 @@ async function handle(req, res) {
     if (!snapshot.values || !Object.keys(snapshot.values).length) {
       return json(res, 404, { error: 'workflow 不存在' });
     }
-    return json(res, 200, snapshot);
+    const taskId = snapshot.values.currentTask?.id || '';
+    const allBusinessTasks = readTasks();
+    const latestTask = taskId ? allBusinessTasks.find(task => task.id === taskId) || null : null;
+    const failedTasks = (snapshot.values.failedTaskIds || [])
+      .map(id => allBusinessTasks.find(task => task.id === id))
+      .filter(Boolean);
+    const dispatch = [...activeDispatches.values()].find(item => item.workflowRunId === workflowRunId) || null;
+    const child = [...activeChildren.values()].find(item => !item.aborted
+      && (item.taskId === taskId || (dispatch?.sessionId && item.sessionId === dispatch.sessionId))) || null;
+    return json(res, 200, {
+      ...snapshot,
+      task: latestTask,
+      failedTasks,
+      adapterAttached,
+      live: {
+        active: Boolean(dispatch || child),
+        phase: child?.phase || dispatch?.phase || (dispatch ? 'workflow' : ''),
+        statusText: child?.statusText || dispatch?.statusText || (dispatch ? '工作流正在切换节点' : ''),
+        agent: child?.agentKey || dispatch?.agentKey || '',
+        taskId: child?.taskId || dispatch?.taskId || taskId,
+        taskTitle: child?.taskTitle || dispatch?.taskTitle || latestTask?.title || snapshot.values.currentTask?.title || '',
+        currentActivity: child?.currentActivity || dispatch?.currentActivity || null,
+        startedAt: child?.startedAt || dispatch?.startedAt || null,
+        lastActivityAt: child?.lastActivityAt || null,
+        outputChars: Number(child?.outputChars || 0),
+        thinkingChars: Number(child?.thinkingChars || 0),
+      },
+    });
   }
 
   const workflowResumeMatch = pathname.match(/^\/api\/workflows\/([^/]+)\/resume$/);
@@ -3758,6 +3819,8 @@ async function handle(req, res) {
     const sessionId = String(body.sessionId || '');
     const filterRun = body.runId || '';
     const filterTask = body.taskId || '';
+    const filterTaskIds = new Set((Array.isArray(body.taskIds) ? body.taskIds : [])
+      .map((id) => String(id || '').trim()).filter(Boolean));
     const filterAgent = body.agentOnly || '';
     const agentOverride = body.agent || '';
     const dispatchSession = getSession(sessionId) || getActiveSession();
@@ -3766,6 +3829,7 @@ async function handle(req, res) {
     if (dispatchSession?.id) scopedTasks = scopedTasks.filter(task => task.session_id === dispatchSession.id);
     if (filterRun) scopedTasks = scopedTasks.filter(task => task.run_id === filterRun);
     if (filterTask) scopedTasks = scopedTasks.filter(task => task.id === filterTask);
+    if (filterTaskIds.size) scopedTasks = scopedTasks.filter(task => filterTaskIds.has(String(task.id)));
     const clarificationTasks = scopedTasks.filter(task => ['pending', 'waiting_input'].includes(task.status) && Array.isArray(task.open_questions) && task.open_questions.length);
     if (clarificationTasks.length) {
       res.writeHead(409, { 'Content-Type': 'application/json' });
@@ -3781,10 +3845,13 @@ async function handle(req, res) {
     if (dispatchSession?.id) pending = pending.filter(t => t.session_id === dispatchSession.id);
     if (filterRun) pending = pending.filter(t => t.run_id === filterRun);
     if (filterTask) pending = pending.filter(t => t.id === filterTask);
+    if (filterTaskIds.size) pending = pending.filter(t => filterTaskIds.has(String(t.id)));
     if (filterAgent) pending = pending.filter(t => t.agent === filterAgent);
 
     const selection = filterTask
       ? `task:${filterTask}`
+      : filterTaskIds.size
+        ? `tasks:${[...filterTaskIds].join(',')}`
       : filterRun
         ? `run:${filterRun}`
         : filterAgent
@@ -3854,6 +3921,11 @@ async function handle(req, res) {
       startedAt: new Date().toISOString(),
       clientRunId,
     });
+    const updateDispatchActivity = (patch = {}) => {
+      const record = activeDispatches.get(dispatchLockId);
+      if (!record) return;
+      Object.assign(record, patch, { lastActivityAt: new Date().toISOString() });
+    };
 
     // 自动 reviewer：对齐 clowder-ai cross-model review 铁律
     // 选一个 != executor 的可用 agent 做静默调用，解析 JSON 写回 task。
@@ -3895,24 +3967,41 @@ async function handle(req, res) {
           return outcome;
         }
         const reviewStrategy = reviewer.key === executorAgent ? 'self_review' : 'cross_agent';
+        updateDispatchActivity({
+          phase: 'review',
+          statusText: `${reviewer.key} 正在验收「${task.title}」`,
+          agentKey: reviewer.key,
+          taskId: task.id,
+          taskTitle: task.title,
+        });
         sseSend(workflowRes, 'task-review-start', { id: task.id, title: task.title, reviewer: reviewer.key, strategy: reviewStrategy });
         const reviewPrompt = buildReviewPrompt(task, executorAgent, executionResult)
           + (collaborationContext ? '\n\n【协作上下文】\n' + collaborationContext : '');
         // 静默调用：reviewer 不流式发到前端，避免和 executor 输出混在一起
         let raw = '';
         let data = null;
-        for (let attempt = 1; attempt <= 3; attempt++) {
+        for (let attempt = 1; attempt <= 2; attempt++) {
           const repairInstruction = attempt === 1 ? '' : `\n\n上一次输出不符合协议。第 ${attempt} 次尝试：只能输出一个 JSON 对象，禁止 Markdown、解释、代码围栏。verdict 只能是 pass 或 rework。`;
           raw = await invokeAgent(CLI_CONFIG, reviewer.key, reviewPrompt + repairInstruction, { silent: true, timeoutMs: 5 * 60 * 1000 });
-          data = extractJson(raw || '');
-          if (data && typeof data === 'object' && ['pass', 'rework'].includes(data.verdict)) break;
-          sseSend(workflowRes, 'task-review-retrying', { id: task.id, reviewer: reviewer.key, attempt, maxAttempts: 3 });
+          data = parseReviewResult(raw || '');
+          if (data) break;
+          if (attempt < 2) {
+            updateDispatchActivity({ phase: 'review_repair', statusText: `${reviewer.key} 输出格式异常，正在进行最后一次格式修复` });
+            sseSend(workflowRes, 'task-review-retrying', { id: task.id, reviewer: reviewer.key, attempt, maxAttempts: 2 });
+          }
         }
-        if (!data || typeof data !== 'object' || !['pass', 'rework'].includes(data.verdict)) {
-          const outcome = { verdict: 'agent_repair_pending', reviewer: reviewer.key, strategy: reviewStrategy, reason: 'Reviewer 协议输出连续失败，已加入内部验收修复队列' };
+        if (!data) {
+          const outcome = {
+            verdict: 'review_error',
+            reviewer: reviewer.key,
+            strategy: reviewStrategy,
+            code: 'review_protocol_failed',
+            retryable: true,
+            reason: 'Reviewer 输出无法解析；Agent 执行结果已保留，只需重试 Reviewer。',
+          };
           patchTask(task.id, {
-            status: 'pending',
-            review_status: 'agent_repair_pending',
+            phase: 'review',
+            review_status: 'failed',
             review_note: outcome.reason,
             reviewer: reviewer.key,
             review_strategy: reviewStrategy,
@@ -3920,11 +4009,11 @@ async function handle(req, res) {
             review_raw: String(raw || '').slice(0, 600),
             review_only_pending: true,
             previous_result: executionResult?.slice(0, 2000) || task.previous_result || null,
-            result: null,
-            started_at: null,
-            finished_at: null,
+            failure_stage: 'review',
+            retryable: true,
           });
-          sseSend(workflowRes, 'task-review-repair', { id: task.id, title: task.title, reviewer: reviewer.key, reason: outcome.reason });
+          updateDispatchActivity({ phase: 'review_failed', statusText: outcome.reason });
+          sseSend(workflowRes, 'task-review-failed', { id: task.id, title: task.title, reviewer: reviewer.key, code: outcome.code, retryable: true, reason: outcome.reason });
           recordReviewHistory(outcome);
           return outcome;
         }
@@ -3961,6 +4050,10 @@ async function handle(req, res) {
           finished_at: null,
         });
         patchTask(task.id, reviewPatch);
+        updateDispatchActivity({
+          phase: data.verdict === 'pass' ? 'gate' : 'rework',
+          statusText: data.verdict === 'pass' ? 'Reviewer 已通过，等待人工确认' : 'Reviewer 要求返工，正在回到当前任务',
+        });
         sseSend(workflowRes, 'task-review-done', {
           id: task.id,
           title: task.title,
@@ -3969,19 +4062,25 @@ async function handle(req, res) {
         recordReviewHistory(outcome);
         return outcome;
       } catch (err) {
-        const outcome = { verdict: 'agent_repair_pending', reviewer: null, reason: `Reviewer 调用失败，已加入内部重试队列：${err.message}` };
+        const outcome = {
+          verdict: 'review_error',
+          reviewer: null,
+          code: err.code || 'review_invocation_failed',
+          retryable: err.retryable !== false,
+          reason: `Reviewer 调用失败；Agent 执行结果已保留：${err.message}`,
+        };
         patchTask(task.id, {
-          status: 'pending',
-          review_status: 'agent_repair_pending',
+          phase: 'review',
+          review_status: 'failed',
           review_note: outcome.reason,
           reviewed_at: new Date().toISOString(),
           review_only_pending: true,
           previous_result: executionResult?.slice(0, 2000) || task.previous_result || null,
-          result: null,
-          started_at: null,
-          finished_at: null,
+          failure_stage: 'review',
+          retryable: outcome.retryable,
         });
-        sseSend(workflowRes, 'task-review-repair', { id: task.id, title: task.title, reason: outcome.reason });
+        updateDispatchActivity({ phase: 'review_failed', statusText: outcome.reason });
+        sseSend(workflowRes, 'task-review-failed', { id: task.id, title: task.title, code: outcome.code, retryable: outcome.retryable, reason: outcome.reason });
         recordReviewHistory(outcome);
         return outcome;
       }
@@ -4038,6 +4137,13 @@ async function handle(req, res) {
         status: 'in_progress',
         started_at: new Date().toISOString(),
         subagent_run_id: subagentRunId || null,
+      });
+      updateDispatchActivity({
+        phase: task.review_only_pending ? 'review' : 'starting',
+        statusText: task.review_only_pending ? `正在复用 Agent 结果并重试 Reviewer「${task.title}」` : `${agentKey} 正在启动「${task.title}」`,
+        agentKey,
+        taskId: task.id,
+        taskTitle: task.title,
       });
       sseSend(workflowRes, 'task-start', {
         id: task.id,
@@ -4351,6 +4457,16 @@ async function handle(req, res) {
       emit(event, data) {
         if (event === 'workflow-interrupt') sseSend(workflowRes, 'workflow-interrupt', { workflowRunId: graphWorkflowId, ...data });
         if (event === 'worklist-chain') sseSend(workflowRes, 'worklist-chain', data);
+        if (event === 'task-review-resume') {
+          updateDispatchActivity({
+            phase: 'review',
+            statusText: data.message || `正在复用 Agent 结果并重试 Reviewer「${data.title || ''}」`,
+            taskId: data.id,
+            taskTitle: data.title,
+            agentKey: data.reviewer || '',
+          });
+          sseSend(workflowRes, 'task-review-resume', data);
+        }
       },
       async transitionTask(task, nextState, meta) {
         const latest = readTasks().find((item) => item.id === task.id) || task;

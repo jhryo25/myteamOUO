@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { normalizeAgentFailure, PARSERS, resolveAgentParser } from '../agent-utils.mjs';
+import { normalizeAgentFailure, parseReviewResult, parsedAgentOutputText, PARSERS, resolveAgentParser } from '../agent-utils.mjs';
 
 test('Kimi parser exposes tool start and completion as live activities', () => {
   const started = PARSERS.kimi(JSON.stringify({
@@ -57,6 +57,15 @@ test('agent variants inherit the parser for their base CLI', () => {
   assert.equal(resolveAgentParser('reviewer', { path: 'C:/tools/claude.exe' }), PARSERS.claude);
 });
 
+test('silent Agent calls collect structured parser text instead of coercing objects', () => {
+  const parsed = PARSERS.kimi(JSON.stringify({ role: 'assistant', content: '{"verdict":"pass"}' }));
+  assert.equal(parsedAgentOutputText(parsed), '{"verdict":"pass"}');
+  assert.notEqual(parsedAgentOutputText(parsed), '[object Object]');
+  assert.equal(parseReviewResult('```json\n{"verdict":"PASS","findings":[]}\n```').verdict, 'pass');
+  assert.equal(parseReviewResult('verdict: rework\nsuggestion: fix it').verdict, 'rework');
+  assert.equal(parseReviewResult('{"verdict":"pass","score":95}').score, 9.5);
+});
+
 test('plan UI keeps structured JSON out of the assistant text bubble', () => {
   const source = readFileSync(new URL('../web/app.js', import.meta.url), 'utf8');
   const planFlow = source.match(/async function doPlan\([\s\S]*?\/\/ ── dispatch/);
@@ -75,4 +84,22 @@ test('file errors use toast UI and interrupted chat exposes resume action', () =
   assert.match(source, /resume: isResume/);
   assert.match(source, /function renderSessionRecovery\(/);
   assert.match(source, /function loadArtifacts\(/);
+});
+
+test('LangGraph workflow UI renders checkpoint, resume, and failed-node retry controls', () => {
+  const app = readFileSync(new URL('../web/app.js', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../web/app.css', import.meta.url), 'utf8');
+  const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+  assert.match(app, /function renderWorkflowCard\(/);
+  assert.match(app, /Checkpoint 状态/);
+  assert.match(app, /data-workflow-action="pass"/);
+  assert.match(app, /data-workflow-action="rework"/);
+  assert.match(app, /data-workflow-action="retry"/);
+  assert.match(app, /function restoreWorkflowCard\(/);
+  assert.match(app, /humanGate: dispatchOptions\.humanGate \?\? true/);
+  assert.match(app, /\/api\/workflows\/\$\{encodeURIComponent\(resumeWorkflowId\)\}\/resume/);
+  assert.match(server, /const filterTaskIds = new Set/);
+  assert.match(server, /pending = pending\.filter\(t => filterTaskIds\.has/);
+  assert.match(css, /\.workflow-card\.paused/);
+  assert.match(css, /\.workflow-checkpoint-grid/);
 });

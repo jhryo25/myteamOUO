@@ -1,5 +1,7 @@
 # myteam 交接文档（2026-06-17）
 
+> LangGraph P0–P4 重构已经完成。接手时优先阅读 [LangGraph 最终交接](docs/langgraph-final-handover.md)，详细节点与 API 说明见 [P1–P4 实现说明](docs/langgraph-p1-p4-implementation.md)。
+
 ## 2026-06-20：Agent 变体与新建对话交互
 
 - “新建 Agent / 变体”收敛为“新建 Agent 变体”，移除会生成不可启动空配置的“从零开始”。

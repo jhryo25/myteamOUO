@@ -199,6 +199,7 @@ npm test
 ## 更多资料
 
 - [产品与技术交接](HANDOVER.md)
+- [LangGraph 最终交接](docs/langgraph-final-handover.md)
 - [问题与限制](ISSUES.md)
 - [产品复盘课程](docs/problem-course.md)
 - [LangGraph P1–P4 实现说明](docs/langgraph-p1-p4-implementation.md)

@@ -1,10 +1,123 @@
 # myteamOUO
 
-myteamOUO 是一个本地优先的 A2A（Agent-to-Agent）协作控制台：不依赖云端数据库，不引入复杂框架，用一个 Node HTTP 服务把多个本机 agent CLI、任务拆解、执行、review gate、skills、shell、产物和 lessons 串起来。
+> 一个本地优先的多 Agent 协作控制台：把 Codex、Claude Code、Kimi 等本机 CLI 串成可拆解、可执行、可审查、可恢复的任务流水线。
 
-项目参考了 [clowder-ai](https://github.com/zts212653/clowder-ai) 的 A2A 协作架构，也吸收了 [LobsterAI](https://github.com/netease-youdao/LobsterAI) 的 Skills 管理、命令安全和子代理追踪思路。
+[![Node.js](https://img.shields.io/badge/Node.js-22.5%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Tests](https://img.shields.io/badge/tests-25%20passed-brightgreen)](#验证)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+## 30 秒理解这个项目
+
+同时使用多个 AI Agent 时，真正消耗人的往往不是提问，而是管理：手工复制上下文、判断该找谁、追踪谁做到了哪一步、检查结果，以及在中断后重新解释一遍。
+
+myteamOUO 在模型和用户之间增加了一层轻量协作控制面：
+
+- 用户只描述目标，系统把目标拆成带负责人和验收标准的任务；
+- 不同 Agent 按能力协作，执行结果自动进入 Reviewer Gate；
+- 会话、任务、审批和产物保存在本地 SQLite，刷新或中断后可以继续；
+- Shell、Skill 安装和任务执行经过风险分级、审批和脱敏审计；
+- 全程使用本机 Agent CLI，不要求把项目数据交给额外的云端数据库。
+
+它解决的不是“让模型回答得更多”，而是让多 Agent 工作过程更少依赖人工搬运，并且更可控。
+
+## 一条任务如何完成
+
+```mermaid
+flowchart LR
+    A[用户目标] --> B[结构化拆解]
+    B --> C[按能力分配 Agent]
+    C --> D[执行与流式进度]
+    D --> E[Reviewer Gate]
+    E -->|通过| F[产物与经验沉淀]
+    E -->|返工| C
+    D -->|中断| G[保存上下文与状态]
+    G --> C
+```
+
+例如，用户提出“分析一个仓库并修复问题”后，myteamOUO 可以：
+
+1. 生成 3–7 个带验收标准的子任务；
+2. 将调研、实现、审查分配给不同 Agent；
+3. 在执行前注入当前工作区状态和相关历史证据；
+4. 展示 reasoning、工具调用、结果和错误组成的时间线；
+5. 对高风险操作暂停并请求批准；
+6. 将未通过的任务连同返工意见重新放回待执行队列。
+
+## 用户痛点与产品价值
+
+| 常见痛点 | myteamOUO 的处理 | 用户价值 |
+|---|---|---|
+| 多个 AI 窗口之间反复复制上下文 | Mention 路由、结构化派生任务、Continuity Capsule | 减少人工充当“消息路由器” |
+| 复杂目标容易漏步骤、难验收 | 结构化 Plan、负责人、取舍与验收标准 | 从聊天答案升级为可管理任务 |
+| 单模型既执行又自审，容易有盲区 | 跨 Agent Reviewer Gate 和返工闭环 | 提高结果可信度 |
+| 刷新、停止或服务重启后进度丢失 | SQLite 状态、运行状态机、继续对话 | 降低长任务中断成本 |
+| 本地 Agent 能执行命令，但风险不透明 | 风险分级、操作指纹、单次/会话审批、脱敏审计 | 保留执行力，同时让权限可控 |
+| Agent 产物散落在对话和目录中 | 会话文件面板、预览、安全路径校验 | 更快找到和复用交付物 |
+
+## 核心能力
+
+### 1. 场景化首次使用与人工验收
+
+- 首页自动展示可启动 Agent 和当前工作区，未配置时直接进入 Agent 设置。
+- 内置仓库诊断、竞品研究、数据报告、需求审查四个场景模板；选择模板只填入目标，不会自动执行。
+- 任务面板用“待执行 / 执行中 / 待验收 / 返工 / 已验收 / 阻塞”表达用户可理解的生命周期。
+- Reviewer Gate 同时展示自动审查结果和人工评分卡；正确性、完整性、证据与安全全部确认后才能通过，返工必须给出说明。
+
+### 2. 多 Agent 编排
+
+- 接入 Codex、Claude Code、Kimi 等本机 CLI，并支持自定义 Agent 变体。
+- 支持 `@mention` 路由，以及结构化 `<spawn_subagent>` 派生协议。
+- 将目标拆成 3–7 个可验收任务，按 Agent 执行并进入 Reviewer Gate。
+- 不可用 Agent 会回退到可启动实例，避免计划只停留在纸面。
+
+### 3. 连续上下文
+
+- Continuity Capsule 保存目标、约束、决策、已完成事实、失败和下一步。
+- Top-K Evidence 只检索最相关的历史证据，避免把全部历史塞进上下文。
+- Workspace Bridge 在执行前读取 Git 状态、最新提交和工作区改动。
+- 执行 Agent 与 Reviewer 使用同一份任务上下文，减少交接失真。
+
+### 4. 安全与治理
+
+- Shell、Skill 安装/卸载、配置写入和任务执行共用风险策略层。
+- 敏感操作生成服务端审批对象；批准后的载荷必须与原始操作指纹一致。
+- 支持批准一次、会话批准、拒绝和超时，不提供永久授权。
+- 审计记录自动脱敏 Token、Secret、API Key、Cookie 和环境变量。
+
+> 安全边界：myteamOUO 只控制自己管理的 REST/SSE 与执行入口，不声称拦截外部 CLI 内部的每一次工具调用。
+
+### 5. 可观察、可恢复的执行
+
+- 将 Agent 输出统一为 `reasoning / tool_call / tool_result / final / error` 有序事件。
+- 实时 SSE 与 SQLite 历史回放使用同一套时间线语义。
+- 会话状态覆盖 `running / interrupting / interrupted / completed / error`。
+- 用户停止任务后等待旧子进程收口，再允许继续，避免新旧回复交叉写入。
+
+### 6. 扩展与自动化
+
+- Skills 支持按需加载、启停、卸载，以及从 registry、GitHub、ZIP 或本地目录导入。
+- Cron 任务支持时区、启停、互斥、运行历史，并默认暂停等待审批。
+- Agent 输出中的 Markdown、JSON、HTML 和本地文件引用可进入产物面板。
+- 项目附带美股日报工具链，作为“数据抓取 → 统计 → 报告 → 校验”的自动化案例。
+
+## 关键产品取舍
+
+myteamOUO 参考了 [Clowder AI](https://github.com/zts212653/clowder-ai) 的多 Agent 协作、身份与 Skills 思路，也吸收了 [LobsterAI](https://github.com/netease-youdao/LobsterAI) 的本地执行、权限、持久化和子代理追踪设计，但没有直接复制它们的技术体量。
+
+| 选择 | 原因 |
+|---|---|
+| 单 Node 服务 + 原生 Web UI | 降低安装和调试成本，先验证协作闭环 |
+| 本机 CLI Adapter | 复用用户已有的模型账号、工具链和执行能力 |
+| SQLite 本地持久化 | 不引入云数据库，同时获得事务、迁移和可恢复状态 |
+| 显式人工 Gate | 在自动化成熟前，让关键决策仍由人掌握 |
+| 按需 Skills 与 Top-K Evidence | 控制上下文噪声和调用成本 |
+| 暂不引入 Electron/OpenClaw/LangGraph | 保持轻量定位，避免 MVP 过早承担完整运行时复杂度 |
+
+更完整的取舍记录见 [LobsterAI 对比](docs/lobsterai-comparison.md)、[Clowder AI 差距](docs/clowder-html-gap.md) 和 [架构评估](docs/architecture-evaluation.md)。
 
 ## 快速启动
+
+要求：Node.js `22.5+`，并至少安装一个受支持的 Agent CLI。
 
 ```bash
 git clone https://github.com/jhryo25/myteamOUO.git
@@ -14,13 +127,7 @@ npm install
 node server.mjs --port 7878
 ```
 
-然后打开：
-
-```text
-http://localhost:7878
-```
-
-`.env` 里配置本机 agent CLI 路径，例如：
+打开 `http://localhost:7878`，并在 `.env` 中配置本机 CLI 路径：
 
 ```env
 CODEX_PATH=C:\path\to\codex.exe
@@ -30,280 +137,62 @@ KIMI_PATH=C:\path\to\kimi.exe
 
 Kimi Code CLI 0.14+ 使用 `--prompt ... --output-format stream-json`；旧配置中的 `--print` 会在加载时自动移除。
 
-运行环境要求 Node.js `22.5+`。项目使用 Node 内置 `node:sqlite`，无需额外安装 SQLite。
-
-## 当前能力
-
-### 多 Agent 协作
-
-- 支持 `@codex`、`@claude`、`@kimi` mention 路由。
-- 每个 agent 可配置角色卡、性格、擅长项和限制。
-- 新建 Agent 变体时必须选择一个可启动的基础 Agent；CLI 路径和启动参数自动继承，模型 ID、API 地址、API Key 和角色模板可在同一表单按需覆盖。
-- 对话模式支持流式输出、thinking 面板、图片附件和历史会话。
-- thinking 在生成期间实时展开；Kimi 的文件读取、命令等工具调用会显示开始、完成和简要结果，不再长时间只显示“正在思考”。
-- 每次 Agent 回复统一保存为有序 `turn.parts`：`reasoning`、`tool_call`、`tool_result`、`final`、`error`。实时 SSE 和 SQLite 历史回放使用同一套时间线语义，刷新后仍能恢复工具输入、输出、状态和最终回答。
-- Agent 变体会继承基础 CLI 的流式 parser，避免 `kimi-plan` 等变体把原始 stream-json/NDJSON 当正文显示。
-- 拆任务模式会把目标拆成可验收的 3-7 个子任务。
-- 计划生成期间只展示阶段进度，不显示机器 JSON；完成后以可展开任务时间线呈现负责人、原因、步骤、取舍、待确认项和验收标准。
-- 拆任务前后端都会选择真实可启动的 agent；所选 CLI 不可用时服务端自动回退到第一个可用 agent。
-- 执行任务后自动进入 reviewer gate，降低单模型自检盲区。
-- dispatch 已有完整流式正文时不重复追加结果卡；连接中断会提示刷新恢复，而不是直接判定 Agent 失败。
-- agent 输出中出现新的 `@mention` 时，可自动创建 A2A 链式子任务。
-
-### Skills 市场与导入
-
-- 顶部 `Skills` 入口提供已安装、市场、导入三个视图。
-- 官方市场优先读取当前 checkout 的本地 `skills-registry/index.json`，本地缺失时再回退远程。
-- 支持从官方市场、clowder-ai manifest、GitHub 仓库、远程 ZIP、本地目录或本地 ZIP 安装 skill。
-- 支持启用/禁用、卸载、挂载信息展示。
-- 当前官方 registry 包含：
-  - `task-planning`
-  - `cli-execution`
-  - `review-gate`
-  - `lesson-capture`
-  - `html-ui-alignment`
-  - `shell-exec`
-
-### Shell 执行
-
-- 顶部 `Shell` 入口可执行 PowerShell/cmd 命令。
-- `commandSafety.mjs` 会把命令分成 `safe`、`caution`、`destructive`。
-- 删除、强推、权限修改、进程终止、注册表修改等命令会创建服务端审批，批准后的操作指纹必须与原请求完全匹配。
-- stdout/stderr/exit code 通过 SSE 实时返回。
-- 前端断开或刷新时不主动杀掉后端命令。
-
-### 权限与审计
-
-- shell、skill 安装/卸载、配置写入和任务 dispatch 统一进入风险策略层。
-- 审批弹窗会说明触发原因、批准后的能力影响，以及本次任务数量、选择范围和 Agent；不再用内部操作码和原始 JSON 代替风险说明。
-- 审批支持批准一次、会话批准、拒绝和 15 分钟过期；不提供永久授权。
-- Hub 的「审批」Tab 展示待处理审批和脱敏审计记录。
-- 审计不会保存 Token、Secret、API Key、Cookie 或完整环境变量。
-- 权限层只覆盖 myteam 自己管理的入口，不声称逐项控制外部 CLI 内部工具调用。
-
-### SQLite 持久化
-
-- `.myteam/myteam.sqlite` 是 sessions/messages、tasks、lessons、invocations、subagents、approvals、audit 和 schedules 的权威存储。
-- 数据库启用 WAL、外键、事务和版本化 migration。
-- 首次启动会先把旧 JSON/JSONL 复制到 `.myteam/migrations/legacy-*`，再幂等导入数据库。
-- 迁移失败会停止写入并保留原始数据，不会静默创建空状态覆盖旧数据。
-
-### 定时任务
-
-- Hub 的「定时」Tab 支持五段 Cron、时区、启停、删除、手动运行和运行历史。
-- 每个计划可绑定 agent、执行模式和 session 策略。
-- 触发后默认进入 `waiting_approval`，批准后才启动 agent。
-- 同一计划禁止并发重入；服务停机期间错过的触发记录为 `skipped`，不会集中补跑。
-
-### 子代理会话
-
-- 主 agent 可通过结构化 `<spawn_subagent>{...}</spawn_subagent>` 协议动态派生后续 agent。
-- 没有结构化块时仍兼容旧的 `@mention` 链式任务。
-- 每个派生 run 持久化 `running / done / error` 状态和消息。
-- Hub 的「子代理」Tab 展示运行统计、列表和详情入口。
-- `worklist-chain` 事件会在聊天区插入可点击的子代理链接。
-- 子代理视图可查看 `task-start`、`task-done`、`task-failed` 事件。
-
-### LobsterAI 协作上下文对齐
-
-- Plan 使用 JSON Schema；Codex 优先启用 `--output-schema`，其他 CLI 和不兼容模型走统一 schema 规范化兜底。
-- Continuity Capsule 从 session 历史提取目标、约束、决策、完成事实、文件、验证、失败和下一步。
-- Top-K Evidence 按任务关键词检索最相关的 3 条历史证据，不再全量注入历史。
-- Workspace Bridge 在任务执行前读取 `git status`、最新 commit stat 和工作区 diff stat。
-- 三类上下文同时注入执行 agent 和 reviewer，支持跨 turn、跨 agent 接力。
-- 结构化 subagent run/message 已进入 SQLite；旧链式任务 Map 仍只作为当前进程的实时缓存。
-
-### 产物与输出
-
-- 自动提取 agent 输出中的代码块、HTML、JSON、Markdown 和 URL。
-- HTML 产物会保存到 `.myteam/outputs/`。
-- 产物文件名会做 `basename` 和字符清理，避免路径穿越。
-- `/api/outputs/file?name=` 只允许安全文件名，非法路径返回 400。
-- 产物面板支持预览、复制和浏览器打开。
-
-### 刷新恢复
-
-- 刷新后会通过 `/api/running` 和 `/api/tasks` 恢复运行态。
-- `in_progress` 任务可从 SQLite 恢复。
-- 同一个 run 里已有 done 且仍有 pending 的任务，会恢复为可继续的运行提示。
-- 恢复逻辑会补齐 `startedAt`，避免计时出现 NaN。
-- 左侧“新建对话”固定在历史列表顶部，长会话列表下无需滚动到底部。
-- 720px 以下切换为单栏聊天布局，隐藏桌面侧栏与任务窄轨；390px 视口下消息和工具详情不会被压成竖排或产生页面级横向溢出。
-
 ## 架构概览
 
 ```text
-Browser (localhost:7878)
-  ├─ Chat / Sessions / Tasks / Hub
-  ├─ Skills / Shell / Artifacts / Subagent View
-  └─ SSE streaming UI
-
-server.mjs
-  ├─ REST API + SSE
-  ├─ agent 调用、任务执行、review gate
-  ├─ skill registry / install / import
-  ├─ shell execution
-  └─ artifact / output serving
-
-storage.mjs / governance.mjs / scheduler.mjs
-  ├─ SQLite repository、migration、旧数据导入
-  ├─ 审批指纹、风险策略、脱敏审计
-  └─ Cron 调度、审批暂停、运行历史
-
-agent-utils.mjs
-  ├─ CLI 配置与启动检查
-  ├─ prompt 构造
-  ├─ parser / JSON 提取
-  └─ task repository 读写
-
-commandSafety.mjs
-  └─ shell 命令风险分类
-
-.myteam/
-  ├─ myteam.sqlite
-  ├─ migrations/
-  ├─ skills/
-  └─ outputs/
+Browser UI
+  ├─ Chat / Plan / Task Timeline / Hub
+  ├─ Skills / Approvals / Schedules / Artifacts
+  └─ SSE live events + history replay
+             │
+server.mjs ──┼─ Agent adapters / Plan / Dispatch / Reviewer Gate
+             ├─ Skill registry / Artifact service
+             └─ REST API / SSE buses
+             │
+  ┌──────────┼───────────────┐
+storage.mjs  governance.mjs  scheduler.mjs
+SQLite       policy/audit    Cron/run history
+             │
+Codex CLI / Claude Code / Kimi / custom variants
 ```
 
-## API 摘要
+主要模块：
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/api/status` | agent 连接状态 |
-| GET | `/api/tasks` | 任务列表 |
-| POST | `/api/plan` | 拆任务，SSE 返回 |
-| POST | `/api/dispatch` | 执行 pending 任务，SSE 返回 |
-| GET | `/api/running` | 当前运行中的子进程 |
-| POST | `/api/abort` | 停止指定 session/run 的子进程 |
-| GET | `/api/history` | 会话历史 |
-| GET/POST | `/api/sessions` | 会话列表、新建、切换 |
-| GET | `/api/skills` | 已安装 skills 和路由推荐 |
-| GET | `/api/skills/registry` | skill 市场清单 |
-| POST | `/api/skills/install` | 从市场安装 skill |
-| POST | `/api/skills/install-source` | 从 GitHub/URL/本地安装 skill |
-| POST | `/api/shell/exec` | 执行 safe shell 命令 |
-| POST | `/api/shell/exec-confirm` | 确认后执行 caution/destructive 命令 |
-| GET | `/api/shell/stream` | shell 输出 SSE |
-| GET | `/api/artifacts` | 对话中提取的产物 |
-| GET | `/api/outputs` | 已保存 HTML 输出 |
-| GET | `/api/outputs/file` | 安全读取 HTML 输出 |
-| GET | `/api/chain-task/messages` | 子代理任务消息 |
-| GET | `/api/chain-task/stream` | 子代理任务 SSE |
-| GET | `/api/subagents` | 按 session 查询持久化 subagent runs 和状态汇总 |
-| GET | `/api/subagents/:id/messages` | 查询指定 subagent run 的持久化消息 |
-| GET | `/api/approvals` | 查询审批，可按 status 过滤 |
-| POST | `/api/approvals/:id/decision` | 批准一次、会话批准或拒绝 |
-| GET | `/api/audit` | 查询脱敏审计事件 |
-| GET/POST | `/api/schedules` | 查询或创建 Cron 计划 |
-| PATCH/DELETE | `/api/schedules/:id` | 更新、启停或删除计划 |
-| POST | `/api/schedules/:id/run` | 手动触发并进入待审批状态 |
-| GET | `/api/schedule-runs` | 查询定时任务运行历史 |
-
-## 文件结构
-
-```text
-myteamOUO/
-├── server.mjs
-├── agent-utils.mjs
-├── commandSafety.mjs
-├── collaboration-context.mjs
-├── storage.mjs
-├── governance.mjs
-├── scheduler.mjs
-├── plan.mjs
-├── dispatch.mjs
-├── web/
-│   ├── app.html
-│   ├── app.js
-│   └── app.css
-├── skills-registry/
-│   ├── index.json
-│   ├── task-planning/SKILL.md
-│   ├── cli-execution/SKILL.md
-│   ├── review-gate/SKILL.md
-│   ├── lesson-capture/SKILL.md
-│   ├── html-ui-alignment/SKILL.md
-│   └── shell-exec/SKILL.md
-├── docs/
-├── tests/
-│   └── collaboration-context.test.mjs
-├── .myteam/
-│   ├── myteam.sqlite
-│   ├── migrations/
-│   ├── skills/
-│   └── outputs/
-└── .env
-```
-
-## LobsterAI 优先级路线完成（2026-06-18）
-
-- `P0`：Plan JSON Schema、Codex `--output-schema`、统一规范化与兼容解析。
-- `P1`：结构化 `spawn_subagent` 派生协议，`@mention` 仅作兼容回退。
-- `P2`：session 持久化 Continuity Capsule。
-- `P3`：Top-K 历史证据检索注入。
-- `P4`：执行前 Git workspace rehydration。
-- `P5`：subagent run/message JSONL、查询 API、Hub 状态列表和详情入口。
-
-核心实现集中在 `collaboration-context.mjs`，对应测试在 `tests/collaboration-context.test.mjs`。
-
-## LobsterAI 后续路线完成（2026-06-19）
-
-- `P6`：服务端审批对象、不可伪造的操作指纹、会话/单次授权和脱敏审计。
-- `P7`：Node 内置 SQLite、WAL、migration、旧 JSON/JSONL 备份与幂等导入。
-- `P8`：Cron + 时区、启停、手动运行、审批暂停、互斥和运行历史。
-
-详细取舍见 `docs/lobsterai-comparison.md`，实施 lessons 见 `docs/lessons-p6-p8.md`。
-
-## Skills 与 HTML 产物交互（2026-06-20）
-
-- Skills 市场使用页面级预取、请求去重和服务端 5 分钟缓存；`clowder-ai` 首次网络请求在后台完成，切换和重复打开不再反复下载 manifest。
-- 顶部不再提供手工 Shell 按钮。Agent 仍可通过 `shell-exec` Skill 和服务端 Shell API 执行命令，并继续经过审批与审计。
-- Agent 回复中的工作区 HTML 路径（Markdown 链接、行内代码、`file://`、Windows 绝对路径或常见输出目录相对路径）会渲染为可点击链接。
-- 点击 HTML 链接后，服务端先解析真实路径并校验其位于当前工作区、不是敏感目录且扩展名为 `.html/.htm`，再交给系统默认浏览器打开。
-
-## 前轮修复重点（2026-06-17）
-
-- 补齐 `skills-registry/shell-exec/SKILL.md`，修复官方市场中存在坏条目的问题。
-- 官方市场读取当前 checkout 的本地 registry，避免本地开发时依赖 GitHub main。
-- 本地 registry JSON 解析前去掉 BOM，避免 `JSON.parse` 失败。
-- 修复前端 Skills 市场按钮调用错接口的问题。
-- 修复 `server.mjs` 中未导入 `dirname` 和不存在的 `chr()`。
-- 远程 ZIP 下载改用 Buffer，避免二进制损坏。
-- skill name、artifact 文件名、outputs 文件名统一做安全清理。
-- `.myteam/outputs/` 和 `.myteam/.tmp-skill-*` 已加入 `.gitignore`。
-- 刷新恢复运行态时补齐 `startedAt`，避免计时异常。
+- `agent-utils.mjs`：CLI 配置、启动、Prompt 与输出解析；
+- `collaboration-context.mjs`：结构化计划、连续上下文、证据检索、子代理协议；
+- `storage.mjs`：SQLite、WAL、迁移和旧数据导入；
+- `governance.mjs`：风险策略、审批指纹和脱敏审计；
+- `scheduler.mjs`：Cron、时区、互斥和审批暂停；
+- `web/`：无框架前端与响应式交互。
 
 ## 验证
 
-本轮已验证：
-
 ```bash
-node --check server.mjs
-node --check web/app.js
+npm run check
 npm test
-git diff --check
 ```
 
-并用本地 `7879` 临时服务验证：
+当前自动化测试覆盖结构化计划、首次使用模板、人工验收评分卡、上下文恢复、Agent 回退、工具事件、路径安全、SQLite、审批指纹、审计脱敏、调度互斥和中断恢复等关键链路；本地测试结果为 `25/25` 通过。
 
-- `/api/skills/registry?source=myteam-official` 能读到 `shell-exec`
-- `/api/skills/install` 能安装 `shell-exec`
-- `/api/skills/install-source` 能从本地目录安装 `shell-exec`
-- `/api/shell/exec` + `/api/shell/stream` 能返回 `OK`
-- `/api/outputs/file?name=bad%5Cname` 返回 400
+## 当前边界与下一步
 
-## 运行时数据
+当前版本已经跑通本地多 Agent 协作闭环，但仍是个人项目阶段：
 
-以下目录和文件属于本地运行时数据，默认不提交：
+- 需要一键安装、CLI 健康检查和新手示例任务，缩短首次成功时间；
+- 需要真实的任务成功率、人工介入次数、恢复成功率和 Token/成本指标；
+- 需要带来源引用和生命周期管理的本地知识检索，而不只是轻量关键词证据；
+- 需要统一 Adapter/MCP 扩展协议，并逐步覆盖 Agent 内部工具权限；
+- 需要用 2–3 个高频场景验证用户价值，而不是继续横向堆功能。
 
-- `.myteam/tasks.jsonl`
-- `.myteam/lessons.jsonl`
-- `.myteam/invocations.jsonl`
-- `.myteam/memory.json`
-- `.myteam/skills/`
-- `.myteam/outputs/`
-- `.myteam/myteam.sqlite*`
-- `.myteam/migrations/`
+详细路线见 [竞品对比与迭代路线](docs/myteam-roadmap-vs-lobsterai-clowder.md)。
 
-旧 JSON/JSONL 只作为首次迁移来源和只读备份；迁移后 SQLite 是唯一写入源。
+## 更多资料
+
+- [产品与技术交接](HANDOVER.md)
+- [问题与限制](ISSUES.md)
+- [产品复盘课程](docs/problem-course.md)
+- [美股日报数据源说明](docs/data-source-us-stock.md)
+
+## License
+
+[MIT](LICENSE)

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 
 import {
   ensurePlanSchemaFile,
+  normalizeOpenQuestions,
   parseStructuredPlanOutput,
   buildContinuityCapsule,
   formatContinuityBridge,
@@ -74,6 +75,16 @@ test('structured plan rejects invalid task counts and normalizes agents', () => 
     tasks: [{ ...samplePlan.tasks[0], agent: 'unknown' }],
   }), { defaultAgent: 'kimi', allowedAgents: ['kimi'] });
   assert.equal(fallback.data.tasks[0].agent, 'kimi');
+});
+
+test('open questions preserve up to three suggested single-choice answers', () => {
+  assert.deepEqual(normalizeOpenQuestions([
+    { question: '是否允许中转？', options: ['仅直飞', '允许一次中转', '均可', '重复'] },
+    '兼容旧问题',
+  ]), [
+    { question: '是否允许中转？', options: ['仅直飞', '允许一次中转', '均可'] },
+    { question: '兼容旧问题', options: [] },
+  ]);
 });
 
 test('continuity capsule and top-k evidence preserve useful task state', () => {

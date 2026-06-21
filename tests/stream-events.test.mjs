@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { PARSERS, resolveAgentParser } from '../agent-utils.mjs';
+import { normalizeAgentFailure, PARSERS, resolveAgentParser } from '../agent-utils.mjs';
 
 test('Kimi parser exposes tool start and completion as live activities', () => {
   const started = PARSERS.kimi(JSON.stringify({
@@ -34,6 +34,22 @@ test('Kimi parser keeps normal assistant output unchanged', () => {
   assert.equal(output.text, '完成。');
   assert.equal(output.thinking, '');
   assert.deepEqual(output.activities, []);
+});
+
+test('Kimi 429 errors are normalized into a retryable user-facing failure', () => {
+  assert.throws(
+    () => PARSERS.kimi(JSON.stringify({ type: 'error', error: { message: 'HTTP 429 Too Many Requests' } })),
+    /429/,
+  );
+  const failure = normalizeAgentFailure('kimi', 'APIError: status 429, rate_limit_exceeded', 1);
+  assert.deepEqual(failure, {
+    code: 'rate_limited',
+    httpStatus: 429,
+    retryable: true,
+    message: 'Kimi 请求过于频繁（HTTP 429），本次执行已暂停。请稍后重试。',
+    detail: 'APIError: status 429, rate_limit_exceeded',
+    exitCode: 1,
+  });
 });
 
 test('agent variants inherit the parser for their base CLI', () => {

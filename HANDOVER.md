@@ -410,3 +410,68 @@ P0 → P2 → P4 → P1 → P3 → P5
 - 中断和服务重启残留会话显示「继续对话」恢复卡；续跑复用原 Agent、历史和 Continuity Capsule，并明确要求跳过已完成部分。
 - 参考 LobsterAI `stopSession → idle` 与 `continueSession(sessionId, prompt)` 的职责划分，但 myteam 保留更明确的 `interrupted` 状态，不引入 OpenClaw 原生 session runtime。
 - 验证：22 项单测通过；现有会话识别 17 个真实文件；临时 Kimi 会话完成 `running → interrupting → interrupted → running`，测试进程与会话已清理。
+
+---
+
+## LangGraph 重构 P0 交接（2026-06-21）
+
+### 本轮目标与结论
+
+本轮没有直接引入 LangGraph 依赖，而是先完成迁移前必须稳定的状态、ID、恢复和幂等契约。现有 HTTP/SSE、CLI adapter、SQLite 业务数据和前端交互保持兼容，P1 可以在这个边界内抽编排器，不需要再次设计状态枚举。
+
+### 权威状态契约
+
+- 新增 `workflow-state.mjs`，统一 Workflow Run 状态：`idle / running / waiting_input / waiting_approval / interrupting / interrupted / completed / error / cancelled`。
+- 统一 Task 状态：`queued / waiting_input / running / reviewing / waiting_approval / rework / interrupted / completed / failed / cancelled`。
+- 每条任务新增 `lifecycle`：包含 `version / state / revision / updatedAt / reason / lastEventId / source`。
+- `status / phase / review_status / gate_status / test_status` 暂时作为旧 API/UI 的兼容投影，不再承担新编排器的状态定义职责。
+- `collaboration-context.mjs` 原有 Session 状态机已改为调用同一份 Workflow Run transition，实现仍保留 `transitionSessionRunState()` 导出，避免破坏现有调用。
+
+### 关联 ID 契约
+
+每条任务新增 `correlation`，固定区分：
+
+- `sessionId`：对话/UI 上下文；
+- `workflowRunId`：一次计划与执行工作流，未来映射 LangGraph `thread_id`；
+- `taskId`：工作流内任务；
+- `parentTaskId`：派生任务父级；
+- `invocationId`：一次 Agent/Reviewer 调用；
+- `clientRunId`：浏览器 SSE 请求、取消和重连，仅属于传输层。
+
+新计划使用 `createWorkflowRunId()` 和 `createWorkflowTaskId()` 统一生成 run/task ID。不要把 `sessionId` 直接用作 LangGraph thread ID，否则同一会话内多轮计划会共享不该共享的 checkpoint。
+
+### 兼容层与恢复行为
+
+- `agent-utils.mjs` 的 `readTasks / writeAllTasks / appendTask / patchTask` 已接入统一 normalization/synchronization；旧调用继续写原字段时会同步更新 `lifecycle`。
+- canonical transition 支持 `eventId` 去重；相同状态事件重复提交不会再次增加 revision。
+- 服务启动时会把遗留 `running` 任务转成 canonical `interrupted`，旧字段投影为可重新派发的 `pending`，避免任务永久卡在 `in_progress`。
+- 只自动恢复明确处于运行中的任务。已有执行结果、可能处于 Review 中的旧任务暂不自动改写，留到 P1/P2 用幂等 Reviewer task 和 checkpoint 处理。
+
+### 同步修复
+
+- 修复自动 Review 返工分支引用未定义变量 `t`；现在按当前 `task.open_questions` 决定进入 `waiting_input` 或 `pending`。
+- 手工重跑会同时重置 `phase=pending` 和 Review/Gate 字段，避免旧 `phase=done` 把任务错误推断成 completed。
+- 人工 Gate、返工、手动 phase、澄清回答都通过统一同步入口写状态。
+
+### 文件
+
+- `workflow-state.mjs`：canonical 状态、转换、ID、旧字段推断、重启恢复。
+- `docs/langgraph-p0-state-contract.md`：状态与 ID 的稳定契约。
+- `agent-utils.mjs`：Task repository 兼容边界。
+- `collaboration-context.mjs`：Session/Workflow Run 状态复用。
+- `server.mjs`：计划 ID、启动恢复、Gate/返工/澄清接入。
+- `tests/workflow-state.test.mjs`：状态映射、禁止跳步、事件幂等、重启恢复和 ID 测试。
+
+### 验证
+
+- `npm run check` 通过。
+- `npm test`：90/90 通过。
+- 新增 6 项 workflow-state 行为测试；现有 Session、SQLite、审批、调度、Review、SSE、产物和数据工具测试全部回归通过。
+
+### P1 接手顺序
+
+1. 从 `server.mjs` 抽出 `AgentExecutor / TaskRepository / ApprovalGateway / EventSink / ArtifactService`，先保持行为不变。
+2. 合并服务端 `/api/dispatch` 与根目录 `dispatch.mjs` 的重复执行入口，二者调用同一 workflow engine。
+3. 所有 CLI、Reviewer、文件写入和审批写入必须成为带幂等键的副作用 task；不能放在未来 `interrupt()` 之前。
+4. 先迁一条单任务纵向链：`prepare → execute → review → rework/complete → human gate`，再迁多任务和 subagent。
+5. LangGraph SQLite checkpointer 使用独立文件（建议 `.myteam/langgraph.sqlite`）；业务 Task/Session/Approval/Artifact 继续由 `.myteam/myteam.sqlite` 管理。

@@ -5,6 +5,10 @@ import { spawn } from 'child_process';
 import { createInterface } from 'readline';
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'fs';
 import { repository } from './storage.mjs';
+import {
+  normalizeTaskRecord,
+  synchronizeTaskRecord,
+} from './workflow-state.mjs';
 
 export const AGENT_KEYS = ['codex', 'claude', 'kimi'];
 export const AGENTS_FILE = '.myteam/agents.json';
@@ -331,6 +335,10 @@ function parseKimi(line) {
   // kimi --output-format stream-json：正文、工具调用和工具结果是独立 NDJSON 行。
   try {
     const e = JSON.parse(line);
+    if (e.type === 'error' || e.status === 'error' || e.error) {
+      const raw = e.error?.message || e.message || e.error || JSON.stringify(e);
+      throw Object.assign(new Error(String(raw)), { __agentError: true });
+    }
     if (e.role === 'assistant') {
       const content = e.content;
       let text = '';
@@ -375,7 +383,9 @@ function parseKimi(line) {
         }],
       };
     }
-  } catch {}
+  } catch (err) {
+    if (err?.__agentError) throw err;
+  }
   return null;
 }
 
@@ -404,6 +414,34 @@ function parseText(line) {
   return `${line}\n`;
 }
 
+export function normalizeAgentFailure(agentKey, rawError, exitCode = null) {
+  const agentName = String(agentKey || 'Agent');
+  const detail = String(rawError?.message || rawError || '')
+    .replace(/\x1b\[[0-9;]*m/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 1200);
+  const rateLimited = /(?:\b429\b|too many requests|rate[\s_-]*limit(?:ed|ing)?|resource[_\s-]*exhausted)/i.test(detail);
+  if (rateLimited) {
+    return {
+      code: 'rate_limited',
+      httpStatus: 429,
+      retryable: true,
+      message: `${agentName === 'kimi' || agentName.startsWith('kimi-') ? 'Kimi' : agentName} 请求过于频繁（HTTP 429），本次执行已暂停。请稍后重试。`,
+      detail,
+      exitCode,
+    };
+  }
+  return {
+    code: 'agent_failed',
+    httpStatus: null,
+    retryable: false,
+    message: detail || `${agentName} 执行失败${exitCode === null ? '' : `（退出码 ${exitCode}）`}`,
+    detail,
+    exitCode,
+  };
+}
+
 export const PARSERS = { codex: parseCodex, claude: parseClaude, kimi: parseKimi };
 
 export function resolveAgentParser(agentKey, cfg = {}) {
@@ -414,6 +452,14 @@ export function resolveAgentParser(agentKey, cfg = {}) {
     if (key.startsWith(`${base}-`) || key.startsWith(`${base}_`) || path.includes(base)) return parser;
   }
   return parseText;
+}
+
+// Parser 既支持旧版字符串，也支持结构化 { text, thinking, activities }。
+// 静默调用（Plan/Reviewer）只应收集正文；直接拼接对象会得到 "[object Object]"。
+export function parsedAgentOutputText(parsed) {
+  if (typeof parsed === 'string') return parsed;
+  if (!parsed || typeof parsed !== 'object') return '';
+  return typeof parsed.text === 'string' ? parsed.text : '';
 }
 
 export function buildSpawnCommand(cfg, args) {
@@ -575,7 +621,7 @@ export function invokeAgent(CLI_CONFIG, agentKey, prompt, {
     rl.on('line', (line) => {
       touch(); // 教训1: readline 接管后在这里刷新 watchdog
       if (!line.trim()) return;
-      const text = parser(line);
+      const text = parsedAgentOutputText(parser(line));
       if (text) {
         if (!silent) process.stdout.write(text);
         fullText += text;
@@ -655,6 +701,29 @@ export function extractJson(text) {
   return null;
 }
 
+export function parseReviewResult(raw) {
+  const text = typeof raw === 'string' ? raw : '';
+  const parsed = extractJson(text);
+  const candidate = parsed?.review && typeof parsed.review === 'object'
+    ? parsed.review
+    : parsed?.result && typeof parsed.result === 'object'
+      ? parsed.result
+      : parsed;
+  const explicit = String(candidate?.verdict || '').trim().toLowerCase();
+  const fallback = text.match(/\bverdict\s*["']?\s*[:=：]\s*["']?\s*(pass|rework)\b/i)?.[1]?.toLowerCase() || '';
+  const verdict = ['pass', 'rework'].includes(explicit) ? explicit : fallback;
+  if (!verdict) return null;
+  const rawScore = Number(candidate?.score);
+  const score = Number.isFinite(rawScore)
+    ? Math.max(0, Math.min(10, rawScore > 10 && rawScore <= 100 ? rawScore / 10 : rawScore))
+    : candidate?.score;
+  return {
+    ...(candidate && typeof candidate === 'object' ? candidate : {}),
+    verdict,
+    score,
+  };
+}
+
 // Best-effort repair of truncated/malformed JSON: trim trailing commas,
 // close unterminated strings, and balance braces/brackets.
 function repairJson(s) {
@@ -698,20 +767,29 @@ export function validatePlanResult(data) {
 }
 
 export function readTasks() {
-  return repository.list('tasks');
+  return repository.list('tasks').map((task) => normalizeTaskRecord(task));
 }
 
 export function writeAllTasks(tasks) {
-  repository.replace('tasks', tasks);
+  repository.replace('tasks', tasks.map((task) => normalizeTaskRecord(task, {
+    preferLegacy: task?.lifecycle?.source !== 'canonical',
+  })));
 }
 
 export function appendTask(record) {
-  repository.append('tasks', record);
+  return repository.append('tasks', normalizeTaskRecord(record, { preferLegacy: true }));
 }
 
 export function patchTask(id, patch) {
   const task = repository.get('tasks', id);
-  if (task) repository.upsert('tasks', { ...task, ...patch });
+  if (!task) return null;
+  const { lifecycle_event_id: eventId = '', lifecycle_reason: reason = '', ...taskPatch } = patch;
+  const updated = synchronizeTaskRecord(task, taskPatch, {
+    eventId,
+    reason,
+  });
+  repository.upsert('tasks', updated);
+  return updated;
 }
 
 // ── 共享 Prompt（IMP-004: 从 server.mjs / plan.mjs / dispatch.mjs 抽取） ──
@@ -732,7 +810,9 @@ export const PLAN_PROMPT = `你是 myteam 的任务规划 agent。
 - title 是 What（做什么）；steps 是怎么做；accept 是怎么算完
 - why 必填：为什么这个任务存在、不做会怎样
 - tradeoff 可选：放弃了哪个备选方案，一句话即可，没有就写空串
-- open_questions 可选：还不确定的点，数组；没有就写 []
+- 默认自主采用合理假设和行业常见默认值，不要因为一般偏好、可逆选择或能从上下文推断的信息反问用户
+- 只有缺失信息会让任务无法继续、造成明显错误或触发不可逆风险时，才填写 open_questions；最多 3 项，否则写 []
+- 每个 open_questions 项必须给出 question 和 1-3 个互斥、可直接选择的 options；界面会额外提供“其他”文本选项
 
 严格按以下 JSON 格式返回：
 {
@@ -742,7 +822,7 @@ export const PLAN_PROMPT = `你是 myteam 的任务规划 agent。
       "title": "<任务标题：What>",
       "why": "<为什么要做这个任务>",
       "tradeoff": "<放弃的备选方案，可空>",
-      "open_questions": ["<还不确定的点>"],
+      "open_questions": [{"question": "<确实无法合理推断的问题>", "options": ["<推荐选项>", "<备选项>"]}],
       "steps": ["<步骤1>", "<步骤2>"],
       "accept": "<验收标准>",
       "agent": "<推荐执行者: claude|codex|kimi>"
@@ -765,13 +845,21 @@ export function buildExecPrompt(task, skillContext = '') {
   if (task.why)       handoffParts.push(`Why（为什么做）：${task.why}`);
   if (task.tradeoff)  handoffParts.push(`Tradeoff（放弃的方案）：${task.tradeoff}`);
   const openList = Array.isArray(task.open_questions) ? task.open_questions.filter(Boolean) : [];
-  if (openList.length) handoffParts.push(`Open Questions（待澄清点）：\n${openList.map(q => `  - ${q}`).join('\n')}`);
+  if (openList.length) handoffParts.push(`Open Questions（待澄清点）：\n${openList.map(q => `  - ${typeof q === 'string' ? q : q.question}`).join('\n')}`);
+  const clarificationAnswers = Array.isArray(task.clarification_answers) ? task.clarification_answers : [];
+  if (clarificationAnswers.length) handoffParts.push(`用户确认结果：\n${clarificationAnswers.map(item => `  - ${item.question} → ${item.answer}`).join('\n')}`);
+  if (task.clarification_other) handoffParts.push(`用户其他补充：${task.clarification_other}`);
   const handoff = handoffParts.length ? `\n【上游交接】\n${handoffParts.join('\n')}` : '';
 
   // 上游任务结果（A2A 链式时由调用方注入，结构化展示）
   const upstreamCtx = task.upstream_context ? `\n【上游任务输出】\n${String(task.upstream_context).slice(0, 800)}` : '';
 
   return `你是 myteam 的执行 agent，请完成以下任务。
+
+【自主执行原则】
+- 优先根据任务上下文、行业常见默认值和可逆方案自主完成，不要把能够自行判断的问题反问用户
+- 计划阶段的必要确认已经在 open_questions 中处理；执行时如仍有轻微歧义，采用风险最低的合理假设并在结果中说明
+- 只有缺失信息会导致任务完全无法继续或产生明显不可逆风险时，才停止并说明阻塞原因
 
 任务标题：${task.title}
 所属目标：${task.goal}
@@ -821,7 +909,7 @@ export const REVIEW_PROMPT_RULES = `你是 myteam 的 Reviewer agent。
 }`;
 
 export function buildReviewPrompt(task, executorAgent, executionResult) {
-  const openList = Array.isArray(task.open_questions) ? task.open_questions.filter(Boolean) : [];
+  const openList = Array.isArray(task.open_questions) ? task.open_questions.filter(Boolean).map(q => typeof q === 'string' ? q : q.question) : [];
   const handoffParts = [];
   if (task.why)      handoffParts.push(`Why：${task.why}`);
   if (task.tradeoff) handoffParts.push(`Tradeoff：${task.tradeoff}`);

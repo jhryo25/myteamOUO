@@ -9,7 +9,18 @@ import { resolve, basename, dirname, extname, join, sep, relative } from 'path';
 import { randomUUID, createHash } from 'crypto';
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
-import { loadEnv, buildCliConfig, invokeAgent, extractJson, resolveAgentParser, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, buildReviewPrompt, AGENT_KEYS, buildSpawnCommand, checkAgentLaunchable, formatLaunchError, readAgentRegistry, writeAgentRegistry, sanitizeAgentKey, buildRoleCard, validatePhaseTransition, getNextPhase, selectRunnableAgent } from './agent-utils.mjs';
+import { loadEnv, buildCliConfig, invokeAgent, parseReviewResult, resolveAgentParser, readTasks, writeAllTasks, appendTask, patchTask, PLAN_PROMPT, buildExecPrompt, buildReviewPrompt, AGENT_KEYS, buildSpawnCommand, checkAgentLaunchable, formatLaunchError, normalizeAgentFailure, readAgentRegistry, writeAgentRegistry, sanitizeAgentKey, buildRoleCard, validatePhaseTransition, getNextPhase, selectRunnableAgent } from './agent-utils.mjs';
+import { normalizeReviewScorecard, publicProductTemplates, reviewScorecardPasses } from './product-guidance.mjs';
+import {
+  createWorkflowRunId,
+  createWorkflowTaskId,
+  recoverInterruptedTaskRecords,
+  synchronizeTaskRecord,
+  transitionTaskLifecycle,
+} from './workflow-state.mjs';
+import { LangGraphDispatchEngine } from './workflow/dispatch-graph.mjs';
+import { getSharedCheckpointer } from './workflow/checkpointer.mjs';
+import { LangGraphTurnEngine } from './workflow/turn-graph.mjs';
 import { getDangerLevel, openPathWithDefaultApp, resolveWorkspaceHtmlPath } from './commandSafety.mjs';
 import { repository } from './storage.mjs';
 import {
@@ -406,11 +417,68 @@ function appendLesson(task, error) {
     task_title: task.title,
     goal: task.goal,
     agent: task.agent,
+    session_id: task.session_id || '',
+    run_id: task.run_id || '',
     error: errMsg.slice(0, 500),
     pattern,
     timestamp: new Date().toISOString(),
+    // 保留不可变快照。源任务即使被删除，Lesson 仍能解释“当时发生了什么”。
+    source_task_snapshot: {
+      id: task.id,
+      title: task.title,
+      goal: task.goal,
+      accept: task.accept,
+      steps: task.steps || [],
+      agent: task.agent,
+      session_id: task.session_id || '',
+      run_id: task.run_id || '',
+      status: task.status,
+      result: task.result || null,
+    },
   };
   return repository.append('lessons', lesson);
+}
+
+function relevantLessons(text = '', agent = '', limit = 3) {
+  const query = String(text || '').toLowerCase();
+  return repository.list('lessons')
+    .map((lesson) => {
+      const searchable = [lesson.pattern, lesson.error, lesson.task_title, lesson.goal].filter(Boolean).join(' ').toLowerCase();
+      let score = lesson.agent === agent ? 2 : 0;
+      for (const token of query.split(/[\s,，。；;、|]+/).filter((item) => item.length >= 2)) {
+        if (searchable.includes(token)) score += 1;
+      }
+      return { ...lesson, relevance_score: score };
+    })
+    .filter((lesson) => lesson.relevance_score > 0)
+    .sort((a, b) => b.relevance_score - a.relevance_score || String(b.timestamp).localeCompare(String(a.timestamp)))
+    .slice(0, limit);
+}
+
+function buildLessonContext(lessons = []) {
+  if (!lessons.length) return '';
+  return `【历史踩坑（仅作风险提示，不覆盖当前任务要求）】\n${lessons.map((lesson, index) =>
+    `${index + 1}. [${lesson.pattern || 'unknown'}] ${lesson.task_title || lesson.task_id || '历史任务'}：${String(lesson.error || '').slice(0, 240)}`
+  ).join('\n')}`;
+}
+
+function clarificationQuestionText(value) {
+  return String(typeof value === 'string' ? value : value?.question || '').trim();
+}
+
+function clarificationQuestionOptions(value) {
+  return Array.isArray(value?.options)
+    ? [...new Set(value.options.map(option => String(option || '').trim()).filter(Boolean))].slice(0, 3)
+    : [];
+}
+
+function publicClarificationQuestion(task, value) {
+  return {
+    taskId: task.id,
+    taskTitle: task.title,
+    question: clarificationQuestionText(value),
+    options: clarificationQuestionOptions(value),
+  };
 }
 
 // 检测重复 pattern（对齐 clowder-ai self-evolution：同类错误 ≥2 次触发改进提案）
@@ -620,6 +688,7 @@ function readSkills() {
       ...skill,
       enabled: st.enabled !== false, // 默认 enabled
       source: st.source || 'myteam-official',
+      loading: ['always', 'manual', 'on_demand'].includes(st.loading) ? st.loading : 'on_demand',
       mounts: { ...skill.mounts, ...(st.mounts || {}) },
     };
   });
@@ -696,7 +765,12 @@ function selectSkills({ text = '', agent = '', phase = 'run' } = {}) {
     for (const token of skillText.split(/[\s,，。；;、/|]+/).filter(t => t.length >= 2)) {
       if (haystack.includes(token)) score += 1;
     }
-    return { ...skill, score };
+    const explicit = haystack.includes(`@skill:${String(skill.name).toLowerCase()}`)
+      || haystack.includes(`#skill:${String(skill.name).toLowerCase()}`);
+    if (explicit) score += 100;
+    if (skill.loading === 'always' && (skill.mounts?.[role] || (agent && skill.mounts?.[agent]))) score += 50;
+    if (skill.loading === 'manual' && !explicit) score = 0;
+    return { ...skill, score, selection_reason: explicit ? 'manual' : skill.loading === 'always' ? 'always' : 'matched' };
   });
 
   return scored
@@ -1083,6 +1157,52 @@ function summarizeInvocations(invocations) {
   return { total, success, failed, interrupted, avgDurationMs, byAgent };
 }
 
+function estimateTokens(chars) {
+  return Math.ceil(Number(chars || 0) / 4);
+}
+
+function summarizeCostLedger(invocations, tasks = []) {
+  const taskMap = new Map(tasks.map((task) => [task.id, task]));
+  const groups = new Map();
+  for (const invocation of invocations) {
+    const key = invocation.task_id || invocation.run_id || invocation.session_id || 'unlinked';
+    if (!groups.has(key)) {
+      const task = taskMap.get(invocation.task_id);
+      groups.set(key, {
+        key,
+        task_id: invocation.task_id || '',
+        task_title: task?.title || invocation.task_title || '',
+        run_id: invocation.run_id || task?.run_id || '',
+        session_id: invocation.session_id || task?.session_id || '',
+        calls: 0, failures: 0, duration_ms: 0, input_tokens_est: 0, output_tokens_est: 0,
+        status: task?.status || 'conversation',
+        accepted: task?.gate_status === 'passed',
+        last_at: invocation.finished_at || invocation.started_at,
+      });
+    }
+    const row = groups.get(key);
+    row.calls += 1;
+    row.failures += invocation.status === 'failed' ? 1 : 0;
+    row.duration_ms += Number(invocation.duration_ms || 0);
+    row.input_tokens_est += Number(invocation.input_tokens_est || estimateTokens(invocation.prompt_chars));
+    row.output_tokens_est += Number(invocation.output_tokens_est || estimateTokens(invocation.output_chars));
+    if (String(invocation.finished_at || '').localeCompare(String(row.last_at || '')) > 0) row.last_at = invocation.finished_at;
+  }
+  const rows = [...groups.values()].sort((a, b) => String(b.last_at).localeCompare(String(a.last_at)));
+  return {
+    rows,
+    summary: rows.reduce((sum, row) => ({
+      calls: sum.calls + row.calls,
+      failures: sum.failures + row.failures,
+      duration_ms: sum.duration_ms + row.duration_ms,
+      input_tokens_est: sum.input_tokens_est + row.input_tokens_est,
+      output_tokens_est: sum.output_tokens_est + row.output_tokens_est,
+      accepted_tasks: sum.accepted_tasks + (row.accepted ? 1 : 0),
+    }), { calls: 0, failures: 0, duration_ms: 0, input_tokens_est: 0, output_tokens_est: 0, accepted_tasks: 0 }),
+    estimation: 'Token 为字符数/4的粗略估算；实际金额需接入模型 usage 与价格表。',
+  };
+}
+
 // ── 对话历史 + Session 隔离（持久化到 .myteam/memory.json） ───
 // 数据结构: { sessions: [{ id, name, created_at, history: [...] }], activeId }
 const MEMORY_FILE = '.myteam/memory.json';
@@ -1095,7 +1215,7 @@ let activeSessionId = null;
 let trashedSessions = []; // 回收站：{ session, deletedAt }
 const TRASH_RETENTION_MS = 5 * 60 * 1000; // 5 分钟
 
-function newSession(name) {
+function newSession(name, { ephemeral = false } = {}) {
   return {
     id: randomUUID().slice(0, 8),
     name: name || DEFAULT_DRAFT_SESSION_NAME,
@@ -1104,6 +1224,7 @@ function newSession(name) {
     continuity: null,
     mode: null, // 'chat' | 'plan' | 'mixed'，由首次/最近一次操作决定
     run_state: { status: 'idle', updatedAt: Date.now() },
+    ephemeral,
   };
 }
 
@@ -1301,6 +1422,17 @@ for (const session of sessions) {
 }
 if (recoveredInterruptedSessions) saveSessions();
 
+// 服务重启时子进程已经消失，不能让对应任务永久停在 in_progress。
+// 只恢复明确处于 running 的任务；已有执行结果、正在 Review 的任务留给后续图迁移处理。
+const taskRecovery = recoverInterruptedTaskRecords(readTasks());
+if (taskRecovery.recovered > 0) {
+  writeAllTasks(taskRecovery.tasks);
+  console.warn(`[myteam] recovered ${taskRecovery.recovered} interrupted task(s) after service restart`);
+}
+
+const langGraphCheckpointer = getSharedCheckpointer();
+const langGraphTurnEngine = new LangGraphTurnEngine({ checkpointer: langGraphCheckpointer });
+
 const scheduleService = new ScheduleService({
   execute: async (schedule, run) => {
     const { agentKey } = await resolveRunnableAgent(schedule.agent);
@@ -1321,7 +1453,14 @@ const scheduleService = new ScheduleService({
           })
         : `这是经用户批准的定时任务。请完成目标并给出简洁结果。\n\n目标：${schedule.goal}`;
     targetSession.history.push({ role: 'user', text: schedule.goal, agent: null, kind: 'schedule-goal', scheduleId: schedule.id, runId: run.id });
-    const result = await invokeAgent(CLI_CONFIG, agentKey, prompt, { silent: true });
+    const turn = await langGraphTurnEngine.run({
+      workflowRunId: `schedule:${run.id}`,
+      sessionId: targetSession.id,
+      mode: `schedule-${schedule.mode}`,
+      input: { prompt, agentKey },
+      metadata: { scheduleId: schedule.id, scheduleRunId: run.id },
+    }, () => invokeAgent(CLI_CONFIG, agentKey, prompt, { silent: true }));
+    const result = String(turn.output || '');
     targetSession.history.push({ role: 'assistant', text: result, agent: agentKey, kind: 'schedule-result', scheduleId: schedule.id, runId: run.id });
     if (targetSession.history.length > 40) targetSession.history.splice(0, targetSession.history.length - 40);
     refreshSessionContinuity(targetSession, 'scheduled_run');
@@ -1410,9 +1549,9 @@ const RICH_BLOCKS_HINT = `
 `;
 
 const CHAT_SYSTEM = {
-  codex:  `You are Codex, a helpful AI assistant in the myteam workspace. You help with code, analysis, and task planning. Reply in Chinese.${RICH_BLOCKS_HINT}`,
-  claude: `You are Claude, a helpful AI assistant in the myteam workspace. You excel at deep thinking, writing, and architecture. Reply in Chinese.${RICH_BLOCKS_HINT}`,
-  kimi:   `You are Kimi, a helpful AI assistant in the myteam workspace. You handle lightweight execution, drafting, and quick analysis. Reply in Chinese.${RICH_BLOCKS_HINT}`,
+  codex:  `You are Codex, a helpful AI assistant in the myteam workspace. You help with code, analysis, and task planning. Reply in Chinese. Prefer reasonable assumptions over asking follow-up questions. Ask only when missing information makes useful progress impossible or creates irreversible risk; when asking, provide 1-3 mutually exclusive suggested answers plus an Other option.${RICH_BLOCKS_HINT}`,
+  claude: `You are Claude, a helpful AI assistant in the myteam workspace. You excel at deep thinking, writing, and architecture. Reply in Chinese. Prefer reasonable assumptions over asking follow-up questions. Ask only when missing information makes useful progress impossible or creates irreversible risk; when asking, provide 1-3 mutually exclusive suggested answers plus an Other option.${RICH_BLOCKS_HINT}`,
+  kimi:   `You are Kimi, a helpful AI assistant in the myteam workspace. You handle lightweight execution, drafting, and quick analysis. Reply in Chinese. Prefer reasonable assumptions over asking follow-up questions. Ask only when missing information makes useful progress impossible or creates irreversible risk; when asking, provide 1-3 mutually exclusive suggested answers plus an Other option.${RICH_BLOCKS_HINT}`,
 };
 
 function buildChatPrompt(userMessage, agentKey, history) {
@@ -1480,6 +1619,18 @@ function sseSend(res, event, data) {
 
 // ── 活跃子进程追踪（用于 abort + 刷新恢复） ──────────────────────────────
 const activeChildren = new Map(); // id → { child, sessionId, clientRunId, aborted, agentKey, mode, taskTitle, startedAt }
+// dispatch 生命周期锁：覆盖同一批任务从第一项到最后一项之间的空档，不能只看 activeChildren。
+const activeDispatches = new Map(); // lockId → { sessionId, runIds, startedAt, clientRunId }
+const workflowEngines = new Map(); // workflowRunId → { engine, setResponse, updatedAt }
+const WORKFLOW_ENGINE_LIMIT = 100;
+
+function rememberWorkflowEngine(workflowRunId, value) {
+  workflowEngines.delete(workflowRunId);
+  workflowEngines.set(workflowRunId, { ...value, updatedAt: Date.now() });
+  while (workflowEngines.size > WORKFLOW_ENGINE_LIMIT) {
+    workflowEngines.delete(workflowEngines.keys().next().value);
+  }
+}
 let childIdSeq = 0;
 
 // -- per-session SSE broadcast bus (for refresh reconnect) --
@@ -1517,12 +1668,13 @@ function busBroadcast(sessionId, event, data) {
   }
 }
 
-function busAttach(sessionId, res) {
+function busAttach(sessionId, res, { replay = true } = {}) {
   const bus = sessionBuses.get(sessionId);
   if (!bus) return false;
-  // replay buffered events
-  for (const p of bus.buffer) {
-    try { res.write(p); } catch { return false; }
+  if (replay) {
+    for (const p of bus.buffer) {
+      try { res.write(p); } catch { return false; }
+    }
   }
   bus.listeners.add(res);
   return true;
@@ -1582,6 +1734,13 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
   clientRunId = '',
   outputSchemaPath = '',
   turnCollector = null,
+  onTurnPart = null,
+  taskId = '',
+  taskTitle = '',
+  runId = '',
+  mode = '',
+  skills = [],
+  lessonIds = [],
 } = {}) {
   const invocationId = randomUUID().slice(0, 8);
   const startedAt = Date.now();
@@ -1598,11 +1757,25 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
       id: invocationId,
       agent: agentKey,
       label,
+      session_id: sessionId,
+      client_run_id: clientRunId,
+      task_id: taskId,
+      task_title: taskTitle,
+      run_id: runId,
+      mode: mode || (label.startsWith('task-chunk:') ? 'dispatch' : label === 'chunk' ? 'chat' : label),
+      skills: skills.map((skill) => typeof skill === 'string' ? { name: skill } : {
+        name: skill.name,
+        loading: skill.loading || 'on_demand',
+        reason: skill.selection_reason || 'matched',
+      }),
+      lesson_ids: lessonIds,
       status,
       started_at: startedIso,
       finished_at: new Date().toISOString(),
       duration_ms: Date.now() - startedAt,
       prompt_chars: prompt.length,
+      input_tokens_est: estimateTokens(prompt.length),
+      prompt_preview: String(safeTurnValue(prompt) || '').slice(0, 500),
       ...extra,
     });
   };
@@ -1624,6 +1797,16 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
   if (outputSchemaPath && agentKey === 'codex' && !args.includes('--output-schema')) {
     args.push('--output-schema', resolve(outputSchemaPath));
   }
+
+  const emitTurnPart = (part) => {
+    if (!part) return;
+    sseSend(res, 'part', part);
+    if (typeof onTurnPart === 'function') {
+      try { onTurnPart(part); } catch (err) {
+        console.warn('[myteam] failed to persist live turn part:', err.message);
+      }
+    }
+  };
   const { spawnPath, spawnArgs } = buildSpawnCommand(cfg, args);
 
   return new Promise((resolve, reject) => {
@@ -1636,8 +1819,14 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
       settled = true;
       if (watchdog) clearInterval(watchdog);
       if (cid) activeChildren.delete(cid);
-      finishInvocation('failed', { error: err.message });
-      reject(err);
+      const failure = normalizeAgentFailure(agentKey, err);
+      finishInvocation('failed', {
+        error: failure.message,
+        error_code: failure.code,
+        retryable: failure.retryable,
+        stderr: failure.detail,
+      });
+      reject(Object.assign(new Error(failure.message), failure));
     };
 
     try {
@@ -1656,8 +1845,15 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
       aborted: false,
       agentKey,
       mode: label.startsWith('task-chunk:') ? 'dispatch' : (label === 'chunk' ? 'chat' : label),
-      taskTitle: label.startsWith('task-chunk:') ? label.slice('task-chunk:'.length) : null,
+      taskId: taskId || (label.startsWith('task-chunk:') ? label.slice('task-chunk:'.length) : ''),
+      taskTitle: taskTitle || null,
       startedAt: new Date().toISOString(),
+      phase: 'starting',
+      statusText: `${agentKey} 正在启动`,
+      lastActivityAt: new Date().toISOString(),
+      outputChars: 0,
+      thinkingChars: 0,
+      currentActivity: null,
     };
     activeChildren.set(cid, childRecord);
 
@@ -1677,10 +1873,16 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
 
     let fullText = '';
     let stderrText = '';
+    let stdoutTail = '';
     let lastActivity = Date.now();
-    const touch = () => { lastActivity = Date.now(); };
+    const touch = () => {
+      lastActivity = Date.now();
+      childRecord.lastActivityAt = new Date(lastActivity).toISOString();
+    };
     const thinkingTimer = setTimeout(() => {
       if (!fullText && !settled) {
+        childRecord.phase = 'waiting';
+        childRecord.statusText = `${agentKey} 运行中，等待输出`;
         sseSend(res, 'status', { agent: agentKey, phase: 'waiting', text: `${agentKey} 运行中` });
       }
     }, 1500);
@@ -1697,6 +1899,7 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
     rl.on('line', (line) => {
       touch(); // 教训1: readline 接管后在这里刷新
       if (!line.trim()) return;
+      stdoutTail = `${stdoutTail}\n${line}`.slice(-4000);
       let out;
       try {
         out = parser(line);
@@ -1713,26 +1916,39 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
       const activities = typeof out === 'string' ? [] : (out.activities || []);
       if (text) {
         fullText += text;
+        childRecord.phase = 'streaming';
+        childRecord.statusText = `${agentKey} 正在生成结果`;
+        childRecord.outputChars = fullText.length;
         if (fullText.length === text.length) {
           sseSend(res, 'status', { agent: agentKey, phase: 'streaming', text: `${agentKey} 开始输出` });
         }
         if (turnCollector) {
           const part = turnCollector.append({ type: 'final', delta: text });
-          if (part) sseSend(res, 'part', part);
+          emitTurnPart(part);
         } else {
           sseSend(res, label, { text });
           if (label !== 'chunk') sseSend(res, 'chunk', { text });
         }
       }
       if (thinking) {
+        childRecord.phase = 'thinking';
+        childRecord.statusText = `${agentKey} 正在分析`;
+        childRecord.thinkingChars += thinking.length;
         if (turnCollector) {
           const part = turnCollector.append({ type: 'reasoning', delta: thinking });
-          if (part) sseSend(res, 'part', part);
+          emitTurnPart(part);
         } else {
           sseSend(res, 'thinking', { text: thinking });
         }
       }
       for (const activity of activities) {
+        childRecord.phase = activity.phase === 'completed' ? 'working' : (activity.phase || 'working');
+        childRecord.statusText = activity.summary || `${activity.name || '工具'} ${activity.phase || '运行中'}`;
+        childRecord.currentActivity = {
+          name: activity.name || '',
+          phase: activity.phase || 'running',
+          summary: String(activity.summary || '').slice(0, 240),
+        };
         if (turnCollector) {
           const isResult = activity.phase === 'completed' || activity.phase === 'failed';
           const part = turnCollector.append(isResult ? {
@@ -1743,7 +1959,7 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
             type: 'tool_call', callId: activity.id, name: activity.name,
             status: 'running', summary: activity.summary, input: safeTurnValue(activity.input),
           });
-          if (part) sseSend(res, 'part', part);
+          emitTurnPart(part);
         } else {
           sseSend(res, 'activity', activity);
         }
@@ -1765,15 +1981,23 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
       const common = {
         exit_code: code,
         output_chars: fullText.length,
+        output_tokens_est: estimateTokens(fullText.length),
+        output_preview: String(safeTurnValue(fullText) || '').slice(0, 800),
       };
       if (childRecord.aborted) {
         finishInvocation('interrupted', { ...common, error: 'aborted' });
         resolve(fullText);
       } else if (code !== 0) {
-        const detail = stderrText.trim();
-        const err = new Error(detail ? `exit code ${code}: ${detail}` : `exit code ${code}`);
-        finishInvocation('failed', { ...common, error: err.message, stderr: detail });
-        reject(err);
+        const detail = stderrText.trim() || stdoutTail.trim();
+        const failure = normalizeAgentFailure(agentKey, detail || `exit code ${code}`, code);
+        finishInvocation('failed', {
+          ...common,
+          error: failure.message,
+          error_code: failure.code,
+          retryable: failure.retryable,
+          stderr: failure.detail,
+        });
+        reject(Object.assign(new Error(failure.message), failure));
       } else {
         finishInvocation('success', stderrText.trim() ? { ...common, stderr: stderrText.trim() } : common);
         resolve(fullText);
@@ -2036,7 +2260,7 @@ async function handle(req, res) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({
       activeId: activeSessionId,
-      sessions: sessions.map(s => ({
+      sessions: sessions.filter(s => !s.ephemeral).map(s => ({
         id: s.id,
         name: s.name,
         created_at: s.created_at,
@@ -2062,6 +2286,7 @@ async function handle(req, res) {
       return res.end(JSON.stringify({ ok: true, activeId: activeSessionId }));
     }
     // 新建
+    sessions = sessions.filter(existing => !existing.ephemeral);
     const s = newSession((body.name || '').trim());
     sessions.push(s);
     activeSessionId = s.id;
@@ -2100,11 +2325,16 @@ async function handle(req, res) {
     }
     const deleted = sessions.splice(idx, 1)[0];
     trashedSessions.push({ session: deleted, deletedAt: Date.now() });
-    if (!sessions.length) sessions.push(newSession());
+    let replacementId = '';
+    if (!sessions.length) {
+      const replacement = newSession('', { ephemeral: true });
+      sessions.push(replacement);
+      replacementId = replacement.id;
+    }
     if (activeSessionId === id) activeSessionId = sessions[0].id;
     saveSessions();
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, activeId: activeSessionId, trashed: deleted.id }));
+    return res.end(JSON.stringify({ ok: true, activeId: activeSessionId, trashed: deleted.id, replacementId }));
   }
 
   // GET /api/sessions/trash — 列出回收站中的 session
@@ -2132,6 +2362,7 @@ async function handle(req, res) {
       return res.end(JSON.stringify({ error: '回收站中不存在该 session' }));
     }
     const restored = trashedSessions.splice(idx, 1)[0].session;
+    sessions = sessions.filter(existing => !existing.ephemeral);
     sessions.push(restored);
     activeSessionId = restored.id;
     saveSessions();
@@ -2178,6 +2409,7 @@ async function handle(req, res) {
     }
 
     const session = (body.sessionId && getSession(body.sessionId)) || getActiveSession();
+    session.ephemeral = false;
     if (resumeRequested && !['interrupted', 'error'].includes(session?.run_state?.status)) {
       res.writeHead(409, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: '当前会话没有可继续的中断任务' }));
@@ -2220,10 +2452,14 @@ async function handle(req, res) {
     refreshSessionContinuity(session, 'user_message');
     saveSessions();
 
-    const prompt = buildChatPrompt(cleanMessage, agentKey, session.history);
+    const chatSkills = selectSkills({ text: cleanMessage, agent: agentKey, phase: 'run' });
+    const chatSkillContext = buildSkillContext(chatSkills);
+    const prompt = buildChatPrompt(cleanMessage, agentKey, session.history)
+      + (chatSkillContext ? `\n\n【本次 Skills】\n${chatSkillContext}` : '');
+    const chatWorkflowId = `chat:${session.id}:${clientRunId || randomUUID().slice(0, 8)}`;
 
     sseInit(res);
-    sseSend(res, 'start', { agent: agentKey, sessionId: session.id });
+    sseSend(res, 'start', { agent: agentKey, sessionId: session.id, workflowRunId: chatWorkflowId, engine: 'langgraph' });
 
     let fullReply = '';
     const turnCollector = createTurnPartsCollector();
@@ -2232,11 +2468,20 @@ async function handle(req, res) {
       if (!agentStatus?.available) {
         throw new Error(`${agentKey} 不可用：${agentStatus?.error || '没有可启动的 agent'}`);
       }
-      fullReply = await streamAgent(agentKey, prompt, res, 'chunk', {
+      const turn = await langGraphTurnEngine.run({
+        workflowRunId: chatWorkflowId,
         sessionId: session.id,
-        clientRunId,
-        turnCollector,
-      });
+        mode: 'chat',
+        input: { prompt, agentKey },
+        metadata: { clientRunId, skills: chatSkills.map((skill) => skill.name) },
+      }, () => streamAgent(agentKey, prompt, res, 'chunk', {
+          sessionId: session.id,
+          clientRunId,
+          turnCollector,
+          mode: 'chat',
+          skills: chatSkills,
+        }));
+      fullReply = String(turn.output || '');
       const interrupted = ['interrupting', 'interrupted'].includes(session.run_state?.status) || session.run_state?.clientRunId !== clientRunId;
       if (interrupted) turnCollector.append({ type: 'interrupted', message: '回复已中断，可从当前上下文继续。' });
       const msgIndex = session.history.length;
@@ -2263,7 +2508,14 @@ async function handle(req, res) {
       sseSend(res, interrupted ? 'aborted' : 'done', { agent: agentKey, sessionId: session.id, resumable: interrupted });
     } catch (err) {
       // 不再 pop 用户消息，保留失败现场让用户刷新后能看到
-      turnCollector.append({ type: 'error', message: err.message, status: 'error' });
+      turnCollector.append({
+        type: 'error',
+        message: err.message,
+        code: err.code || 'agent_failed',
+        retryable: Boolean(err.retryable),
+        detail: err.detail || '',
+        status: 'error',
+      });
       session.history.push({
         role: 'assistant',
         text: turnCollector.finalText(),
@@ -2276,7 +2528,11 @@ async function handle(req, res) {
       refreshSessionContinuity(session, 'tool_result');
       if (session.run_state?.status === 'running') setSessionRunState(session, 'error', { error: err.message, finishedAt: Date.now() });
       else saveSessions();
-      sseSend(res, 'error', { message: err.message });
+      sseSend(res, 'error', {
+        message: err.message,
+        code: err.code || 'agent_failed',
+        retryable: Boolean(err.retryable),
+      });
     }
     return res.end();
   }
@@ -2288,6 +2544,12 @@ async function handle(req, res) {
     return res.end(JSON.stringify({ agents, workspace: currentWorkspace() }));
   }
 
+  // GET /api/product-templates — 首次使用场景模板，只填充目标，不自动执行。
+  if (req.method === 'GET' && pathname === '/api/product-templates') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ templates: publicProductTemplates() }));
+  }
+
   // GET /api/running — 返回当前活跃的子进程信息（用于刷新后恢复状态）
   // GET /api/sessions/:id/stream - reconnect to a running session live SSE stream
   // (replays buffered events + subscribes to future output after a page refresh)
@@ -2296,7 +2558,7 @@ async function handle(req, res) {
     if (req.method === 'GET' && m) {
       const sid = m[1];
       sseInit(res);
-      const attached = busAttach(sid, res);
+      const attached = busAttach(sid, res, { replay: url.searchParams.get('replay') !== '0' });
       if (!attached) {
         sseSend(res, 'nostream', { sessionId: sid });
         return res.end();
@@ -2318,13 +2580,21 @@ async function handle(req, res) {
           clientRunId: record.clientRunId,
           agentKey: record.agentKey,
           mode: record.mode,
+          taskId: record.taskId,
           taskTitle: record.taskTitle,
           startedAt: record.startedAt,
+          phase: record.phase,
+          statusText: record.statusText,
+          lastActivityAt: record.lastActivityAt,
+          outputChars: record.outputChars,
+          thinkingChars: record.thinkingChars,
+          currentActivity: record.currentActivity,
         });
       }
     }
+    const dispatches = [...activeDispatches.values()];
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ running }));
+    return res.end(JSON.stringify({ running, dispatches }));
   }
 
   // GET /api/agents — 返回当前 agent 路径配置（脱敏显示）
@@ -2547,6 +2817,32 @@ async function handle(req, res) {
     }));
   }
 
+  // GET /api/skills/usage?sessionId= — 从真实调用记录反查 Skill 命中来源。
+  if (req.method === 'GET' && pathname === '/api/skills/usage') {
+    const sessionId = url.searchParams.get('sessionId') || '';
+    const usage = readInvocations()
+      .filter((invocation) => !sessionId || invocation.session_id === sessionId)
+      .flatMap((invocation) => (invocation.skills || []).map((skill) => ({
+        id: `${invocation.id}:${skill.name}`,
+        skill: skill.name,
+        loading: skill.loading || 'on_demand',
+        reason: skill.reason || 'matched',
+        invocation_id: invocation.id,
+        session_id: invocation.session_id || '',
+        task_id: invocation.task_id || '',
+        task_title: invocation.task_title || '',
+        run_id: invocation.run_id || '',
+        agent: invocation.agent,
+        mode: invocation.mode || invocation.label,
+        status: invocation.status,
+        timestamp: invocation.started_at,
+      })))
+      .reverse()
+      .slice(0, 100);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ usage, total: usage.length, sessionId }));
+  }
+
   // POST /api/skills/import — 导入 skill（追加 yaml 或单条 JSON）
   if (req.method === 'POST' && pathname === '/api/skills/import') {
     const body = await readBody(req);
@@ -2742,6 +3038,22 @@ async function handle(req, res) {
     return res.end(JSON.stringify({ ok: true, name: skillName, mounts: state[skillName].mounts }));
   }
 
+  // PATCH /api/skills/:name/loading { loading: on_demand|always|manual }
+  const skillLoadingMatch = pathname.match(/^\/api\/skills\/([^\/]+)\/loading$/);
+  if (req.method === 'PATCH' && skillLoadingMatch) {
+    const skillName = decodeURIComponent(skillLoadingMatch[1]);
+    const body = await readBody(req);
+    if (!['on_demand', 'always', 'manual'].includes(body.loading)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'loading 仅支持 on_demand / always / manual' }));
+    }
+    const state = readSkillsState();
+    state[skillName] = { ...(state[skillName] || {}), loading: body.loading };
+    writeSkillsState(state);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, name: skillName, loading: body.loading }));
+  }
+
   // DELETE /api/skills/:name — 卸载 skill
   const skillDeleteMatch = pathname.match(/^\/api\/skills\/([^\/]+)$/);
   if (req.method === 'DELETE' && skillDeleteMatch) {
@@ -2781,6 +3093,20 @@ async function handle(req, res) {
           }));
         }
       }
+      // 任务执行产物此前只挂在 task 上，导致会话文件面板不可见；在这里统一并入当前会话。
+      for (const task of readTasks().filter((item) => item.session_id === target.id)) {
+        for (const artifact of task.artifacts || []) {
+          artifacts.push({
+            ...artifact,
+            sessionId: target.id,
+            taskId: task.id,
+            taskTitle: task.title,
+            runId: task.run_id,
+            source: 'task',
+            createdAt: artifact.createdAt || Date.parse(task.finished_at || task.created_at) || Date.now(),
+          });
+        }
+      }
     }
     // 按 createdAt 倒序，同 path 去重（保留最新）
     const seen = new Map();
@@ -2790,7 +3116,7 @@ async function handle(req, res) {
     }
     const result = [...seen.values()].slice(0, limit);
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ artifacts: result, total: result.length }));
+    return res.end(JSON.stringify({ artifacts: result, total: result.length, session: target ? { id: target.id, name: target.name } : null }));
   }
 
   // ── Workspace 文件 API（对齐 clowder-ai F063 安全模型）────────────────────
@@ -2924,7 +3250,11 @@ async function handle(req, res) {
 
   // GET /api/invocations — 返回 agent 调用记录，用于轻量成本/稳定性看板
   if (req.method === 'GET' && pathname === '/api/invocations') {
-    const invocations = readInvocations();
+    const sessionId = url.searchParams.get('sessionId') || '';
+    const taskId = url.searchParams.get('taskId') || '';
+    const invocations = readInvocations().filter((invocation) =>
+      (!sessionId || invocation.session_id === sessionId) && (!taskId || invocation.task_id === taskId)
+    );
     const recent = invocations.slice(-200).reverse();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({
@@ -2966,23 +3296,64 @@ async function handle(req, res) {
       return res.end(JSON.stringify({ error: '任务不存在' }));
     }
     
-    // 重置任务状态为 pending
-    task.status = 'pending';
-    task.result = null;
-    task.error = null;
-    task.started_at = null;
-    task.finished_at = null;
-    task.gate_status = null;
-    task.review_status = null;
-    task.review_note = null;
-    task.reviewed_at = null;
-    task.reviewer = null;
-    task.test_status = null;
-    task.previous_result = null;
+    // 重置任务状态为 pending，并同步唯一 lifecycle 契约。
+    Object.assign(task, synchronizeTaskRecord(task, {
+      status: 'pending',
+      phase: 'pending',
+      result: null,
+      error: null,
+      started_at: null,
+      finished_at: null,
+      gate_status: null,
+      review_status: null,
+      review_note: null,
+      reviewed_at: null,
+      reviewer: null,
+      test_status: null,
+      review_scorecard: null,
+      previous_result: null,
+      review_only_pending: false,
+    }, {
+      eventId: `manual-rerun:${taskId}:${Date.now()}`,
+      reason: 'manual_rerun',
+    }));
     writeAllTasks(tasks);
     
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, task }));
+  }
+
+  // POST /api/tasks/:id/retry-review — 保留 Agent 结果，只重新执行 Reviewer。
+  const retryReviewMatch = pathname.match(/^\/api\/tasks\/([^\/]+)\/retry-review$/);
+  if (req.method === 'POST' && retryReviewMatch) {
+    const taskId = decodeURIComponent(retryReviewMatch[1]);
+    const tasks = readTasks();
+    const task = tasks.find(t => t.id === taskId);
+    if (!task) return json(res, 404, { error: '任务不存在' });
+    const previousResult = task.previous_result || task.result || '';
+    if (!previousResult) return json(res, 409, { error: '没有可复用的 Agent 执行结果，需要重试 Agent 节点' });
+    Object.assign(task, transitionTaskLifecycle(task, 'queued', {
+      eventId: `review-retry:${taskId}:${Date.now()}`,
+      reason: 'manual_review_retry',
+      patch: {
+        status: 'pending',
+        phase: 'review',
+        result: null,
+        error: null,
+        failure_stage: null,
+        retryable: null,
+        review_status: null,
+        review_note: null,
+        review_raw: null,
+        reviewed_at: null,
+        review_only_pending: true,
+        previous_result: previousResult,
+        started_at: null,
+        finished_at: null,
+      },
+    }));
+    writeAllTasks(tasks);
+    return json(res, 200, { ok: true, retryScope: 'review', task });
   }
 
   // POST /api/tasks/:id/gate — 人工 Reviewer Gate：通过或要求返工
@@ -2992,6 +3363,7 @@ async function handle(req, res) {
     const body = await readBody(req);
     const decision = body.decision;
     const note = (body.note || '').trim();
+    const reviewScorecard = normalizeReviewScorecard(body.scorecard);
     const tasks = readTasks();
     const task = tasks.find(t => t.id === taskId);
     if (!task) {
@@ -3009,19 +3381,25 @@ async function handle(req, res) {
       return res.end(JSON.stringify({ error: '只有已完成任务才能通过 Gate' }));
     }
 
+    if (decision === 'pass' && !reviewScorecardPasses(reviewScorecard)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: '通过 Gate 前必须确认评分卡的全部项目' }));
+    }
+
     const now = new Date().toISOString();
     if (decision === 'pass') {
-      Object.assign(task, {
+      Object.assign(task, synchronizeTaskRecord(task, {
         gate_status: 'passed',
         review_status: 'passed',
         review_note: note || '人工确认通过',
         reviewed_at: now,
         reviewer: 'human',
         test_status: 'manual_passed',
+        review_scorecard: reviewScorecard,
         phase: 'done', // SOP: gate → done (最终完成)
-      });
+      }, { eventId: `human-gate:pass:${taskId}:${now}`, reason: 'human_gate_passed', at: now }));
     } else {
-      Object.assign(task, {
+      Object.assign(task, synchronizeTaskRecord(task, {
         status: 'pending',
         gate_status: 'rework',
         review_status: 'rework',
@@ -3029,13 +3407,14 @@ async function handle(req, res) {
         reviewed_at: now,
         reviewer: 'human',
         test_status: 'manual_rework',
+        review_scorecard: reviewScorecard,
         previous_result: task.result || task.previous_result || null,
         result: null,
         error: null,
         started_at: null,
         finished_at: null,
         phase: 'impl', // SOP: rework 回退到 impl
-      });
+      }, { eventId: `human-gate:rework:${taskId}:${now}`, reason: 'human_gate_rework', at: now }));
     }
 
     writeAllTasks(tasks);
@@ -3062,8 +3441,15 @@ async function handle(req, res) {
       return res.end(JSON.stringify({ error: validation.reason }));
     }
 
-    task.phase = targetPhase;
-    task.phase_updated_at = new Date().toISOString();
+    const phaseUpdatedAt = new Date().toISOString();
+    Object.assign(task, synchronizeTaskRecord(task, {
+      phase: targetPhase,
+      phase_updated_at: phaseUpdatedAt,
+    }, {
+      eventId: `manual-phase:${taskId}:${targetPhase}:${phaseUpdatedAt}`,
+      reason: 'manual_phase_transition',
+      at: phaseUpdatedAt,
+    }));
     writeAllTasks(tasks);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, task }));
@@ -3074,10 +3460,23 @@ async function handle(req, res) {
   if (req.method === 'DELETE' && deleteMatch) {
     const taskId = decodeURIComponent(deleteMatch[1]);
     const tasks = readTasks();
+    const deleting = tasks.find(t => t.id === taskId);
     const filtered = tasks.filter(t => t.id !== taskId);
     if (filtered.length === tasks.length) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: '任务不存在' }));
+    }
+    // 删除前补齐关联 Lesson 的快照，避免历史记录变成无来源的孤儿。
+    for (const lesson of repository.list('lessons').filter((item) => item.task_id === taskId)) {
+      repository.upsert('lessons', {
+        ...lesson,
+        source_task_deleted: true,
+        source_task_snapshot: lesson.source_task_snapshot || {
+          id: deleting.id, title: deleting.title, goal: deleting.goal, accept: deleting.accept,
+          steps: deleting.steps || [], agent: deleting.agent, session_id: deleting.session_id || '',
+          run_id: deleting.run_id || '', status: deleting.status, result: deleting.result || null,
+        },
+      });
     }
     writeAllTasks(filtered);
     
@@ -3085,9 +3484,61 @@ async function handle(req, res) {
     return res.end(JSON.stringify({ ok: true, deleted: taskId }));
   }
 
+  // POST /api/tasks/clarify — 回答计划中的待确认项，解除 run 级执行阻塞。
+  if (req.method === 'POST' && pathname === '/api/tasks/clarify') {
+    const body = await readBody(req);
+    const sessionId = String(body.sessionId || activeSessionId || '');
+    const runId = String(body.runId || '');
+    const answers = Array.isArray(body.answers) ? body.answers : [];
+    const normalized = answers
+      .map(item => ({ taskId: String(item.taskId || ''), question: String(item.question || ''), answer: String(item.answer || '').trim() }))
+      .filter(item => item.taskId && item.question && item.answer);
+    if (!normalized.length) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: '请至少回答一个待确认项' }));
+    }
+    const tasks = readTasks();
+    const answeredKeys = new Set(normalized.map(item => `${item.taskId}\n${item.question}`));
+    let updated = 0;
+    for (const task of tasks) {
+      if (task.session_id !== sessionId || (runId && task.run_id !== runId)) continue;
+      const questions = Array.isArray(task.open_questions) ? task.open_questions : [];
+      const matched = normalized.filter(item => item.taskId === task.id);
+      if (!matched.length) continue;
+      const answeredAt = new Date().toISOString();
+      const openQuestions = questions.filter(question => !answeredKeys.has(`${task.id}\n${clarificationQuestionText(question)}`));
+      Object.assign(task, synchronizeTaskRecord(task, {
+        clarification_answers: [...(task.clarification_answers || []), ...matched.map(item => ({ question: item.question, answer: item.answer, answered_at: answeredAt }))],
+        clarification_other: String(body.other || '').trim() || task.clarification_other || '',
+        open_questions: openQuestions,
+        status: openQuestions.length ? 'waiting_input' : 'pending',
+      }, {
+        eventId: `clarification:${task.id}:${answeredAt}`,
+        reason: openQuestions.length ? 'clarification_partially_answered' : 'clarification_completed',
+        at: answeredAt,
+      }));
+      updated += 1;
+    }
+    writeAllTasks(tasks);
+    const session = getSession(sessionId);
+    if (session) {
+      const answerText = normalized.map((item, index) => `${index + 1}. ${item.question}\n答：${item.answer}`).join('\n');
+      session.history.push({ role: 'user', kind: 'clarification-answer', text: `任务确认：\n${answerText}${body.other ? `\n其他补充：${String(body.other).trim()}` : ''}` });
+      saveSessions();
+    }
+    const remaining = tasks.filter(task => task.session_id === sessionId && (!runId || task.run_id === runId) && ['pending', 'waiting_input'].includes(task.status) && task.open_questions?.length)
+      .flatMap(task => task.open_questions.map(question => publicClarificationQuestion(task, question)));
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, updated, remaining }));
+  }
+
   // GET /api/lessons — 返回踩坑记录
   if (req.method === 'GET' && pathname === '/api/lessons') {
-    const lessons = repository.list('lessons');
+    const taskIds = new Set(readTasks().map((task) => task.id));
+    const lessons = repository.list('lessons').map((lesson) => ({
+      ...lesson,
+      source_task_exists: taskIds.has(lesson.task_id),
+    }));
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ lessons }));
   }
@@ -3149,6 +3600,9 @@ async function handle(req, res) {
     }
 
     const session = (body.sessionId && getSession(body.sessionId)) || getActiveSession();
+    const runId = createWorkflowRunId();
+    const planWorkflowId = `plan:${runId}`;
+    session.ephemeral = false;
     if (body.sessionId && getSession(body.sessionId)) activeSessionId = body.sessionId;
     recordSessionMode(session, 'plan');
     maybeAutoRenameSession(session, goal || '图片拆任务');
@@ -3157,7 +3611,7 @@ async function handle(req, res) {
     saveSessions();
 
     sseInit(res);
-    sseSend(res, 'start', { goal, agent: agentKey, sessionId: session.id });
+    sseSend(res, 'start', { goal, agent: agentKey, sessionId: session.id, workflowRunId: planWorkflowId, engine: 'langgraph' });
 
     try {
       if (!agentStatus?.available) {
@@ -3167,17 +3621,28 @@ async function handle(req, res) {
         sseSend(res, 'status', { agent: agentKey, phase: 'fallback', text: `${requestedAgent} 不可用，已自动改用 ${agentKey} 拆任务` });
       }
       const effectiveGoal = goal || '请根据上传的图片内容制定合理的执行计划';
-      const skillContext = buildSkillContext(selectSkills({ text: effectiveGoal, agent: agentKey, phase: 'plan' }));
+      const selectedPlanSkills = selectSkills({ text: effectiveGoal, agent: agentKey, phase: 'plan' });
+      const skillContext = buildSkillContext(selectedPlanSkills);
       // 拆任务阶段不让 agent 直接看图（避免 view_image 工具调用导致 exit 1）；
       // 只告知"有图"，由后续执行 agent 阶段处理读图。
       const imgPrompt = attachmentPromptForPlan(attachments);
       const prompt = `${PLAN_PROMPT}${skillContext ? `\n\n本次按需加载的 Skills：\n${skillContext}` : ''}\n\n用户目标：${effectiveGoal}${imgPrompt}`;
-      const raw = await streamAgent(agentKey, prompt, res, 'chunk', {
-        skipRoleCard: true,
+      const turn = await langGraphTurnEngine.run({
+        workflowRunId: planWorkflowId,
         sessionId: session.id,
-        clientRunId,
-        outputSchemaPath: agentKey === 'codex' ? PLAN_SCHEMA_FILE : '',
-      });
+        mode: 'plan',
+        input: { prompt, agentKey, runId },
+        metadata: { clientRunId, skills: selectedPlanSkills.map((skill) => skill.name) },
+      }, () => streamAgent(agentKey, prompt, res, 'chunk', {
+          skipRoleCard: true,
+          sessionId: session.id,
+          clientRunId,
+          runId,
+          mode: 'plan',
+          skills: selectedPlanSkills,
+          outputSchemaPath: agentKey === 'codex' ? PLAN_SCHEMA_FILE : '',
+        }));
+      const raw = String(turn.output || '');
       const parsedPlan = parseStructuredPlanOutput(raw, {
         goal: effectiveGoal,
         defaultAgent: agentKey,
@@ -3198,11 +3663,11 @@ async function handle(req, res) {
         return res.end();
       }
       const data = parsedPlan.data;
-      const runId = randomUUID().slice(0, 8);
       const now = new Date().toISOString();
       data.tasks.forEach((t, i) => {
+        const taskId = createWorkflowTaskId(runId, i + 1);
         appendTask({
-          id: `${runId}-${i + 1}`,
+          id: taskId,
           run_id: runId,
           created_at: now,
           session_id: session.id, // 关联 session
@@ -3211,7 +3676,7 @@ async function handle(req, res) {
           // 五件套（对齐 clowder-ai cross-cat-handoff）
           why: t.why ?? '',
           tradeoff: t.tradeoff ?? '',
-          open_questions: Array.isArray(t.open_questions) ? t.open_questions : [],
+          open_questions: Array.isArray(t.open_questions) ? t.open_questions.filter(Boolean) : [],
           steps: t.steps ?? [],
           accept: t.accept ?? '',
           agent: t.agent ?? agentKey,
@@ -3220,7 +3685,7 @@ async function handle(req, res) {
         });
       });
       const taskSummaries = data.tasks.map((t, i) => ({
-        id: `${runId}-${i + 1}`,
+        id: createWorkflowTaskId(runId, i + 1),
         title: t.title ?? `任务 ${i + 1}`,
         agent: t.agent ?? agentKey,
         accept: t.accept ?? '',
@@ -3239,6 +3704,17 @@ async function handle(req, res) {
         tasks: taskSummaries,
         text: `已拆分为 ${taskSummaries.length} 个任务（run ${runId}）`,
       });
+      const clarificationQuestions = taskSummaries.flatMap(task =>
+        (task.open_questions || []).map(question => publicClarificationQuestion(task, question))
+      );
+      if (clarificationQuestions.length) {
+        session.history.push({
+          role: 'assistant',
+          agent: agentKey,
+          kind: 'clarification-request',
+          text: `继续执行前需要确认 ${clarificationQuestions.length} 项信息。请在输入框上方回答，确认后任务会自动继续。`,
+        });
+      }
       saveSessions();
       sseSend(res, 'done', {
         runId,
@@ -3252,10 +3728,87 @@ async function handle(req, res) {
         text: `拆任务失败：${err.message}`,
         agent: agentKey,
         kind: 'plan-error',
+        error: { code: err.code || 'agent_failed', retryable: Boolean(err.retryable), detail: err.detail || '' },
       });
       saveSessions();
       // 把完整错误信息（含 stderr）暴露给前端，方便用户排查
-      sseSend(res, 'error', { message: err.message, raw: '' });
+      sseSend(res, 'error', { message: err.message, code: err.code || 'agent_failed', retryable: Boolean(err.retryable), raw: '' });
+    }
+    return res.end();
+  }
+
+  const workflowStateMatch = pathname.match(/^\/api\/workflows\/([^/]+)$/);
+  if (req.method === 'GET' && workflowStateMatch) {
+    const workflowRunId = decodeURIComponent(workflowStateMatch[1]);
+    let record = workflowEngines.get(workflowRunId);
+    const adapterAttached = Boolean(record);
+    if (!record) {
+      const readonlyPorts = {
+        async executeTask() { throw new Error('workflow runtime adapter is not attached'); },
+        async reviewTask() { throw new Error('workflow runtime adapter is not attached'); },
+        async transitionTask(task) { return task; },
+      };
+      record = { engine: new LangGraphDispatchEngine(readonlyPorts, { checkpointer: langGraphCheckpointer }) };
+    }
+    const snapshot = await record.engine.getState(workflowRunId);
+    if (!snapshot.values || !Object.keys(snapshot.values).length) {
+      return json(res, 404, { error: 'workflow 不存在' });
+    }
+    const taskId = snapshot.values.currentTask?.id || '';
+    const allBusinessTasks = readTasks();
+    const latestTask = taskId ? allBusinessTasks.find(task => task.id === taskId) || null : null;
+    const failedTasks = (snapshot.values.failedTaskIds || [])
+      .map(id => allBusinessTasks.find(task => task.id === id))
+      .filter(Boolean);
+    const dispatch = [...activeDispatches.values()].find(item => item.workflowRunId === workflowRunId) || null;
+    const child = [...activeChildren.values()].find(item => !item.aborted
+      && (item.taskId === taskId || (dispatch?.sessionId && item.sessionId === dispatch.sessionId))) || null;
+    return json(res, 200, {
+      ...snapshot,
+      task: latestTask,
+      failedTasks,
+      adapterAttached,
+      live: {
+        active: Boolean(dispatch || child),
+        phase: child?.phase || dispatch?.phase || (dispatch ? 'workflow' : ''),
+        statusText: child?.statusText || dispatch?.statusText || (dispatch ? '工作流正在切换节点' : ''),
+        agent: child?.agentKey || dispatch?.agentKey || '',
+        taskId: child?.taskId || dispatch?.taskId || taskId,
+        taskTitle: child?.taskTitle || dispatch?.taskTitle || latestTask?.title || snapshot.values.currentTask?.title || '',
+        currentActivity: child?.currentActivity || dispatch?.currentActivity || null,
+        startedAt: child?.startedAt || dispatch?.startedAt || null,
+        lastActivityAt: child?.lastActivityAt || null,
+        outputChars: Number(child?.outputChars || 0),
+        thinkingChars: Number(child?.thinkingChars || 0),
+      },
+    });
+  }
+
+  const workflowResumeMatch = pathname.match(/^\/api\/workflows\/([^/]+)\/resume$/);
+  if (req.method === 'POST' && workflowResumeMatch) {
+    const workflowRunId = decodeURIComponent(workflowResumeMatch[1]);
+    const record = workflowEngines.get(workflowRunId);
+    if (!record) {
+      return json(res, 409, {
+        error: 'workflow checkpoint 存在，但当前进程没有可恢复的 Agent adapter；请从任务面板重新派发。',
+        code: 'workflow_adapter_unavailable',
+      });
+    }
+    const body = await readBody(req);
+    sseInit(res);
+    record.setResponse?.(res);
+    try {
+      const snapshot = await record.engine.resume(workflowRunId, body.value ?? body);
+      const paused = snapshot.interrupts.length > 0;
+      sseSend(res, paused ? 'paused' : 'done', {
+        workflowRunId,
+        status: paused ? 'interrupted' : snapshot.values.status,
+        done: snapshot.values.completedTaskIds?.length || 0,
+        failed: snapshot.values.failedTaskIds?.length || 0,
+        interrupts: snapshot.interrupts,
+      });
+    } catch (error) {
+      sseSend(res, 'error', { message: error.message, code: 'workflow_resume_failed' });
     }
     return res.end();
   }
@@ -3264,26 +3817,44 @@ async function handle(req, res) {
   // 支持 A2A Worklist：agent 回复中的 @mention 自动触发链式任务
   if (req.method === 'POST' && pathname === '/api/dispatch') {
     const body = await readBody(req);
+    let workflowRes = res;
     const clientRunId = String(body.clientRunId || '');
     const sessionId = String(body.sessionId || '');
     const filterRun = body.runId || '';
     const filterTask = body.taskId || '';
+    const filterTaskIds = new Set((Array.isArray(body.taskIds) ? body.taskIds : [])
+      .map((id) => String(id || '').trim()).filter(Boolean));
     const filterAgent = body.agentOnly || '';
     const agentOverride = body.agent || '';
     const dispatchSession = getSession(sessionId) || getActiveSession();
 
-    let allTasks = readTasks();
-    // ????? session ??????
-    if (dispatchSession) {
-      allTasks = allTasks.filter(t => t.session_id === dispatchSession.id);
+    let scopedTasks = readTasks();
+    if (dispatchSession?.id) scopedTasks = scopedTasks.filter(task => task.session_id === dispatchSession.id);
+    if (filterRun) scopedTasks = scopedTasks.filter(task => task.run_id === filterRun);
+    if (filterTask) scopedTasks = scopedTasks.filter(task => task.id === filterTask);
+    if (filterTaskIds.size) scopedTasks = scopedTasks.filter(task => filterTaskIds.has(String(task.id)));
+    const clarificationTasks = scopedTasks.filter(task => ['pending', 'waiting_input'].includes(task.status) && Array.isArray(task.open_questions) && task.open_questions.length);
+    if (clarificationTasks.length) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({
+        error: '任务仍有待确认信息，请先在输入框上方完成确认。',
+        code: 'clarification_required',
+        questions: clarificationTasks.flatMap(task => task.open_questions.map(question => publicClarificationQuestion(task, question))).slice(0, 3),
+      }));
     }
-    let pending = allTasks.filter(t => t.status === 'pending');
+
+    let pending = readTasks().filter(t => t.status === 'pending');
+    // 默认只执行当前会话产生的任务，避免“执行 pending”扫到其他对话。
+    if (dispatchSession?.id) pending = pending.filter(t => t.session_id === dispatchSession.id);
     if (filterRun) pending = pending.filter(t => t.run_id === filterRun);
     if (filterTask) pending = pending.filter(t => t.id === filterTask);
+    if (filterTaskIds.size) pending = pending.filter(t => filterTaskIds.has(String(t.id)));
     if (filterAgent) pending = pending.filter(t => t.agent === filterAgent);
 
     const selection = filterTask
       ? `task:${filterTask}`
+      : filterTaskIds.size
+        ? `tasks:${[...filterTaskIds].join(',')}`
       : filterRun
         ? `run:${filterRun}`
         : filterAgent
@@ -3300,6 +3871,20 @@ async function handle(req, res) {
       sessionId: dispatchSession?.id || sessionId,
       approvalId: body.approvalId,
     })) return;
+
+    const selectedRunIds = [...new Set(pending.map(task => task.run_id).filter(Boolean))];
+    const conflictingDispatch = [...activeDispatches.values()].find(lock =>
+      lock.sessionId === (dispatchSession?.id || sessionId)
+      || lock.runIds.some(runId => selectedRunIds.includes(runId))
+    );
+    if (conflictingDispatch) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({
+        error: '当前会话已有任务批次在执行，请等待完成或先停止当前任务。',
+        code: 'dispatch_conflict',
+        running: conflictingDispatch,
+      }));
+    }
 
     sseInit(res);
     sseSend(res, 'start', { count: pending.length, agentOnly: filterAgent || null });
@@ -3325,76 +3910,187 @@ async function handle(req, res) {
         k: 3,
       });
       const workspace = buildWorkspaceBridge({ workspace: currentWorkspace() });
+      const lessons = relevantLessons([task.goal, task.title, task.accept, ...(task.steps || [])].join('\n'), task.agent, 3);
+      const lessonContext = buildLessonContext(lessons);
       saveSessions();
-      return [continuity, evidence, workspace].filter(Boolean).join('\n\n');
+      return [continuity, evidence, workspace, lessonContext].filter(Boolean).join('\n\n');
     }
+
+    const dispatchLockId = randomUUID().slice(0, 8);
+    activeDispatches.set(dispatchLockId, {
+      id: dispatchLockId,
+      sessionId: dispatchSession?.id || sessionId,
+      runIds: selectedRunIds,
+      startedAt: new Date().toISOString(),
+      clientRunId,
+    });
+    const updateDispatchActivity = (patch = {}) => {
+      const record = activeDispatches.get(dispatchLockId);
+      if (!record) return;
+      Object.assign(record, patch, { lastActivityAt: new Date().toISOString() });
+    };
 
     // 自动 reviewer：对齐 clowder-ai cross-model review 铁律
     // 选一个 != executor 的可用 agent 做静默调用，解析 JSON 写回 task。
     // 失败/无可用 reviewer 时降级为 review_status=skipped，不影响主流程。
-    async function runAutoReview(task, executorAgent, executionResult, collaborationContext = '') {
+    async function runAutoReview(task, executorAgent, executionResult, collaborationContext = '', { deferGate = false } = {}) {
+      const recordReviewHistory = (outcome) => {
+        if (!dispatchSession) return;
+        const verdictText = outcome.verdict === 'pass' ? '验收通过'
+          : outcome.verdict === 'rework' ? '要求返工' : '自动验收未完成';
+        dispatchSession.history.push({
+          role: 'assistant',
+          agent: outcome.reviewer || executorAgent,
+          kind: 'task-review',
+          taskId: task.id,
+          taskTitle: task.title,
+          review: outcome,
+          text: `${verdictText}：${outcome.suggestion || outcome.reason || '无补充说明'}`,
+          startedAt: Date.now(),
+          finishedAt: Date.now(),
+        });
+        if (dispatchSession.history.length > 40) dispatchSession.history.splice(0, dispatchSession.history.length - 40);
+        saveSessions();
+      };
       try {
         const statuses = await getAgentStatuses();
-        const reviewer = statuses.find(a => a.available && a.key !== executorAgent);
+        // 优先交叉 Agent 验收；仅有一个 Agent 可用时退化为独立的自验收调用。
+        const reviewer = statuses.find(a => a.available && a.key !== executorAgent)
+          || statuses.find(a => a.available && a.key === executorAgent);
         if (!reviewer) {
+          const outcome = { verdict: 'skipped', reviewer: null, reason: '没有可用的 reviewer agent' };
           patchTask(task.id, {
             review_status: 'skipped',
-            review_note: '没有可用的 != executor 的 reviewer agent',
+            review_note: outcome.reason,
             reviewer: null,
             reviewed_at: new Date().toISOString(),
           });
-          sseSend(res, 'task-review-skip', { id: task.id, reason: 'no-reviewer' });
-          return;
+          sseSend(workflowRes, 'task-review-skip', { id: task.id, reason: 'no-reviewer' });
+          recordReviewHistory(outcome);
+          return outcome;
         }
-        sseSend(res, 'task-review-start', { id: task.id, reviewer: reviewer.key });
+        const reviewStrategy = reviewer.key === executorAgent ? 'self_review' : 'cross_agent';
+        updateDispatchActivity({
+          phase: 'review',
+          statusText: `${reviewer.key} 正在验收「${task.title}」`,
+          agentKey: reviewer.key,
+          taskId: task.id,
+          taskTitle: task.title,
+        });
+        sseSend(workflowRes, 'task-review-start', { id: task.id, title: task.title, reviewer: reviewer.key, strategy: reviewStrategy });
         const reviewPrompt = buildReviewPrompt(task, executorAgent, executionResult)
           + (collaborationContext ? '\n\n【协作上下文】\n' + collaborationContext : '');
         // 静默调用：reviewer 不流式发到前端，避免和 executor 输出混在一起
-        const raw = await invokeAgent(CLI_CONFIG, reviewer.key, reviewPrompt, { silent: true, timeoutMs: 5 * 60 * 1000 });
-        const data = extractJson(raw || '');
-        if (!data || typeof data !== 'object' || !['pass', 'rework'].includes(data.verdict)) {
-          patchTask(task.id, {
-            review_status: 'parse_failed',
-            review_note: 'reviewer 输出无法解析为有效 JSON',
+        let raw = '';
+        let data = null;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          const repairInstruction = attempt === 1 ? '' : `\n\n上一次输出不符合协议。第 ${attempt} 次尝试：只能输出一个 JSON 对象，禁止 Markdown、解释、代码围栏。verdict 只能是 pass 或 rework。`;
+          raw = await invokeAgent(CLI_CONFIG, reviewer.key, reviewPrompt + repairInstruction, { silent: true, timeoutMs: 5 * 60 * 1000 });
+          data = parseReviewResult(raw || '');
+          if (data) break;
+          if (attempt < 2) {
+            updateDispatchActivity({ phase: 'review_repair', statusText: `${reviewer.key} 输出格式异常，正在进行最后一次格式修复` });
+            sseSend(workflowRes, 'task-review-retrying', { id: task.id, reviewer: reviewer.key, attempt, maxAttempts: 2 });
+          }
+        }
+        if (!data) {
+          const outcome = {
+            verdict: 'review_error',
             reviewer: reviewer.key,
+            strategy: reviewStrategy,
+            code: 'review_protocol_failed',
+            retryable: true,
+            reason: 'Reviewer 输出无法解析；Agent 执行结果已保留，只需重试 Reviewer。',
+          };
+          patchTask(task.id, {
+            phase: 'review',
+            review_status: 'failed',
+            review_note: outcome.reason,
+            reviewer: reviewer.key,
+            review_strategy: reviewStrategy,
             reviewed_at: new Date().toISOString(),
             review_raw: String(raw || '').slice(0, 600),
+            review_only_pending: true,
+            previous_result: executionResult?.slice(0, 2000) || task.previous_result || null,
+            failure_stage: 'review',
+            retryable: true,
           });
-          sseSend(res, 'task-review-failed', { id: task.id, reviewer: reviewer.key, reason: 'parse_failed' });
-          return;
+          updateDispatchActivity({ phase: 'review_failed', statusText: outcome.reason });
+          sseSend(workflowRes, 'task-review-failed', { id: task.id, title: task.title, reviewer: reviewer.key, code: outcome.code, retryable: true, reason: outcome.reason });
+          recordReviewHistory(outcome);
+          return outcome;
         }
         const findings = Array.isArray(data.findings) ? data.findings.map(String).filter(Boolean) : [];
-        patchTask(task.id, {
-          review_status: data.verdict,        // 'pass' | 'rework'
-          review_severity: data.severity || 'none',
-          review_score: Number.isFinite(Number(data.score)) ? Number(data.score) : null,
-          review_findings: findings,
-          review_note: String(data.suggestion || '').slice(0, 500),
-          reviewer: reviewer.key,
-          reviewed_at: new Date().toISOString(),
-          phase: data.verdict === 'pass' ? 'review' : 'impl', // SOP: impl → review (pass) or back to impl (rework)
-        });
-        sseSend(res, 'task-review-done', {
-          id: task.id,
-          reviewer: reviewer.key,
+        const outcome = {
           verdict: data.verdict,
+          reviewer: reviewer.key,
+          strategy: reviewStrategy,
           severity: data.severity || 'none',
-          score: data.score ?? null,
+          score: Number.isFinite(Number(data.score)) ? Number(data.score) : null,
           findings,
-          suggestion: data.suggestion || '',
-        });
-      } catch (err) {
-        patchTask(task.id, {
-          review_status: 'failed',
-          review_note: `reviewer 调用失败：${err.message}`,
+          suggestion: String(data.suggestion || '').slice(0, 500),
+        };
+        const reviewPatch = {
+          review_status: data.verdict,        // 'pass' | 'rework'
+          review_severity: outcome.severity,
+          review_score: outcome.score,
+          review_findings: findings,
+          review_note: outcome.suggestion,
+          reviewer: reviewer.key,
+          review_strategy: reviewStrategy,
           reviewed_at: new Date().toISOString(),
+          gate_status: data.verdict === 'pass' ? (deferGate ? 'waiting' : 'passed') : 'rework',
+          test_status: data.verdict === 'pass' ? 'agent_passed' : 'agent_rework',
+          phase: data.verdict === 'pass' ? (deferGate ? 'gate' : 'done') : 'impl',
+          review_only_pending: false,
+        };
+        if (data.verdict === 'rework') Object.assign(reviewPatch, {
+          status: Array.isArray(task.open_questions) && task.open_questions.filter(Boolean).length ? 'waiting_input' : 'pending',
+          previous_result: executionResult?.slice(0, 2000) || null,
+          result: null,
+          error: null,
+          started_at: null,
+          finished_at: null,
         });
-        sseSend(res, 'task-review-failed', { id: task.id, error: err.message });
+        patchTask(task.id, reviewPatch);
+        updateDispatchActivity({
+          phase: data.verdict === 'pass' ? 'gate' : 'rework',
+          statusText: data.verdict === 'pass' ? 'Reviewer 已通过，等待人工确认' : 'Reviewer 要求返工，正在回到当前任务',
+        });
+        sseSend(workflowRes, 'task-review-done', {
+          id: task.id,
+          title: task.title,
+          ...outcome,
+        });
+        recordReviewHistory(outcome);
+        return outcome;
+      } catch (err) {
+        const outcome = {
+          verdict: 'review_error',
+          reviewer: null,
+          code: err.code || 'review_invocation_failed',
+          retryable: err.retryable !== false,
+          reason: `Reviewer 调用失败；Agent 执行结果已保留：${err.message}`,
+        };
+        patchTask(task.id, {
+          phase: 'review',
+          review_status: 'failed',
+          review_note: outcome.reason,
+          reviewed_at: new Date().toISOString(),
+          review_only_pending: true,
+          previous_result: executionResult?.slice(0, 2000) || task.previous_result || null,
+          failure_stage: 'review',
+          retryable: outcome.retryable,
+        });
+        updateDispatchActivity({ phase: 'review_failed', statusText: outcome.reason });
+        sseSend(workflowRes, 'task-review-failed', { id: task.id, title: task.title, code: outcome.code, retryable: outcome.retryable, reason: outcome.reason });
+        recordReviewHistory(outcome);
+        return outcome;
       }
     }
 
     // 执行单个任务并返回结果文本（用于 worklist 链检测）
-    async function executeTask(task, depth = 0, chainHistory = []) {
+    async function executeTask(task, depth = 0, chainHistory = [], { graphManaged = false } = {}) {
       // 优先用 agentOverride（全局覆盖），其次用任务分配的 agent（需可用），最后 fallback 到第一个可用 agent
       let agentKey = agentOverride;
       if (!agentKey) {
@@ -3406,8 +4102,27 @@ async function handle(req, res) {
           // 任务指定的 agent 不可用，找第一个可用的
           const fallback = statuses.find(a => a.available);
           agentKey = fallback?.key || agentKeys()[0] || 'codex';
-          sseSend(res, 'system', { text: `⚠️ ${task.agent} 不可用，改用 ${agentKey} 执行任务「${task.title}」` });
+          sseSend(workflowRes, 'system', { text: `⚠️ ${task.agent} 不可用，改用 ${agentKey} 执行任务「${task.title}」` });
         }
+      }
+      if (task.review_only_pending && task.previous_result) {
+        if (graphManaged) {
+          return {
+            result: task.previous_result,
+            agent: task.executed_by || agentKey,
+            artifacts: task.artifacts || [],
+            spawnRequests: [],
+            collaborationContext: buildTaskCollaborationContext(task),
+          };
+        }
+        patchTask(task.id, { status: 'in_progress', started_at: new Date().toISOString() });
+        sseSend(workflowRes, 'task-review-start', { id: task.id, title: task.title, reviewer: agentKey, strategy: 'protocol_repair' });
+        const outcome = await runAutoReview(task, task.executed_by || agentKey, task.previous_result, buildTaskCollaborationContext(task));
+        if (outcome?.verdict === 'pass') {
+          patchTask(task.id, { status: 'done', result: task.previous_result, finished_at: new Date().toISOString(), review_only_pending: false });
+          done++;
+        }
+        return task.previous_result;
       }
       let subagentRunId = task.subagent_run_id || '';
       if (depth > 0 && !subagentRunId) {
@@ -3426,7 +4141,14 @@ async function handle(req, res) {
         started_at: new Date().toISOString(),
         subagent_run_id: subagentRunId || null,
       });
-      sseSend(res, 'task-start', {
+      updateDispatchActivity({
+        phase: task.review_only_pending ? 'review' : 'starting',
+        statusText: task.review_only_pending ? `正在复用 Agent 结果并重试 Reviewer「${task.title}」` : `${agentKey} 正在启动「${task.title}」`,
+        agentKey,
+        taskId: task.id,
+        taskTitle: task.title,
+      });
+      sseSend(workflowRes, 'task-start', {
         id: task.id,
         title: task.title,
         agent: agentKey,
@@ -3437,15 +4159,75 @@ async function handle(req, res) {
         updateSubagentRun(subagentRunId, { status: 'running', agent: agentKey });
         appendSubagentMessage(subagentRunId, { type: 'system', content: 'Subagent started: ' + task.title });
       }
+      let taskTurnRecord = null;
+      let taskTurnCollector = null;
+      let taskTurnPersistTimer = null;
+      let taskTurnLastSavedAt = 0;
+      const flushTaskTurnRecord = () => {
+        if (!taskTurnRecord || !dispatchSession) return;
+        if (taskTurnPersistTimer) {
+          clearTimeout(taskTurnPersistTimer);
+          taskTurnPersistTimer = null;
+        }
+        taskTurnRecord.updatedAt = Date.now();
+        taskTurnLastSavedAt = taskTurnRecord.updatedAt;
+        saveSessions();
+      };
+      const persistTaskTurnPart = (part) => {
+        if (!taskTurnRecord || !dispatchSession) return;
+        taskTurnRecord.updatedAt = Date.now();
+        const immediate = ['tool_call', 'tool_result', 'error', 'interrupted'].includes(part?.type);
+        if (immediate || Date.now() - taskTurnLastSavedAt >= 300) {
+          flushTaskTurnRecord();
+        } else if (!taskTurnPersistTimer) {
+          taskTurnPersistTimer = setTimeout(flushTaskTurnRecord, 300);
+        }
+      };
       try {
         const skillText = [task.goal, task.title, task.accept, ...(task.steps || [])].join('\n');
-        const skillContext = buildSkillContext(selectSkills({ text: skillText, agent: agentKey, phase: 'run' }));
+        const selectedTaskSkills = selectSkills({ text: skillText, agent: agentKey, phase: 'run' });
+        const skillContext = buildSkillContext(selectedTaskSkills);
+        const matchedLessons = relevantLessons(skillText, agentKey, 3);
         const collaborationContext = buildTaskCollaborationContext(task);
         const execPrompt = buildExecPrompt(task, skillContext)
           + '\n\n【协作上下文】\n' + collaborationContext
           + '\n\n【子代理派生协议】\n' + SPAWN_SUBAGENT_PROTOCOL;
-        const result = await streamAgent(agentKey, execPrompt, res, `task-chunk:${task.id}`, { sessionId, clientRunId });
-        const taskArtifacts = extractArtifacts(result, { sessionId, agent: agentKey, messageIndex: null });
+        taskTurnCollector = createTurnPartsCollector();
+        const taskTurnStartedAt = Date.now();
+        if (depth === 0 && dispatchSession) {
+          taskTurnRecord = {
+            role: 'assistant',
+            agent: agentKey,
+            kind: 'task-running',
+            taskId: task.id,
+            taskTitle: task.title,
+            text: '',
+            parts: taskTurnCollector.parts,
+            startedAt: taskTurnStartedAt,
+            updatedAt: taskTurnStartedAt,
+          };
+          dispatchSession.history.push(taskTurnRecord);
+          if (dispatchSession.history.length > 40) {
+            dispatchSession.history.splice(0, dispatchSession.history.length - 40);
+          }
+          flushTaskTurnRecord();
+        }
+        const result = await streamAgent(agentKey, execPrompt, workflowRes, `task-chunk:${task.id}`, {
+          sessionId,
+          clientRunId,
+          taskId: task.id,
+          taskTitle: task.title,
+          runId: task.run_id,
+          mode: 'dispatch',
+          skills: selectedTaskSkills,
+          lessonIds: matchedLessons.map((lesson) => lesson.id),
+          turnCollector: taskTurnCollector,
+          onTurnPart: persistTaskTurnPart,
+        });
+        const taskArtifacts = [
+          ...extractArtifacts(result, { sessionId, agent: agentKey, messageIndex: null }),
+          ...extractWorkspaceFileArtifacts(result, { sessionId, agent: agentKey, messageIndex: null }),
+        ];
         patchTask(task.id, {
           status: 'done',
           finished_at: new Date().toISOString(),
@@ -3455,14 +4237,14 @@ async function handle(req, res) {
           phase: 'impl', // SOP: pending → impl
         });
         const summary = result ? result.slice(0, 200) : '';
-        sseSend(res, 'task-done', {
+        sseSend(workflowRes, 'task-done', {
           id: task.id,
           title: task.title,
           agent: agentKey,
           summary,
           subagentRunId: subagentRunId || null,
         });
-        done++;
+        if (!graphManaged) done++;
         if (depth > 0) {
           pushChainMessage(task.id, { type: 'task-done', agent: agentKey, title: task.title, summary, subagentRunId });
           appendSubagentMessage(subagentRunId, { type: 'assistant', content: result || '' });
@@ -3471,17 +4253,11 @@ async function handle(req, res) {
             finishedAt: Date.now(),
             resultSummary: summary,
           });
-        } else if (dispatchSession) {
-          dispatchSession.history.push({
-            role: 'assistant',
-            agent: agentKey,
-            kind: 'task-result',
-            taskId: task.id,
-            text: result?.slice(0, 1600) || '',
-          });
-          if (dispatchSession.history.length > 40) {
-            dispatchSession.history.splice(0, dispatchSession.history.length - 40);
-          }
+        } else if (dispatchSession && taskTurnRecord) {
+          taskTurnRecord.kind = 'task-result';
+          taskTurnRecord.text = result?.slice(0, 1600) || '';
+          taskTurnRecord.finishedAt = Date.now();
+          flushTaskTurnRecord();
           refreshSessionContinuity(dispatchSession, 'post_run');
           saveSessions();
         }
@@ -3491,7 +4267,7 @@ async function handle(req, res) {
         if (currentSkills.length > 0) {
           const nextSkills = getNextSkills(currentSkills[0].name);
           if (nextSkills.length > 0) {
-            sseSend(res, 'skill-next-recommend', {
+            sseSend(workflowRes, 'skill-next-recommend', {
               id: task.id,
               currentSkill: currentSkills[0].name,
               nextSkills: nextSkills.map(s => ({ name: s.name, category: s.category, prompt: s.prompt })),
@@ -3501,7 +4277,7 @@ async function handle(req, res) {
 
         // 跨 agent 自动 review（对齐 clowder-ai cross-model review 铁律）
         // 链式 worklist 任务（chain_depth > 0）跳过 review，避免审查链爆炸
-        if (depth === 0) {
+        if (!graphManaged && depth === 0) {
           await runAutoReview(
             { ...task, ...readTasks().find(t => t.id === task.id) },
             agentKey,
@@ -3511,9 +4287,10 @@ async function handle(req, res) {
         }
 
         // A2A Worklist：扫描回复中的 @mention，自动创建并执行链式任务
+        let spawnRequests = [];
         if (result && depth < WORKLIST_MAX_DEPTH) {
           const structuredSpawns = parseSpawnSubagentDirectives(result, agentKeys());
-          const spawnRequests = structuredSpawns.length
+          spawnRequests = structuredSpawns.length
             ? structuredSpawns
             : parseA2AMentions(result).map((agent) => ({
                 agent,
@@ -3521,7 +4298,7 @@ async function handle(req, res) {
                 label: task.title,
                 accept: '',
               }));
-          for (const spawnRequest of spawnRequests) {
+          if (!graphManaged) for (const spawnRequest of spawnRequests) {
             const nextAgent = spawnRequest.agent;
             if (nextAgent === agentKey) continue; // 跳过自己，防止死循环
             
@@ -3532,7 +4309,7 @@ async function handle(req, res) {
               && tail[0] === tail[2] && tail[1] === tail[3]
               && tail[0] !== tail[1];
             if (isPingPong) {
-              sseSend(res, 'worklist-circuit-break', {
+              sseSend(workflowRes, 'worklist-circuit-break', {
                 reason: `乒乓球熔断：${tail.join(' → ')} 交替循环，终止链式执行`,
                 chain_history: newHistory,
               });
@@ -3562,7 +4339,7 @@ async function handle(req, res) {
               spawn_protocol: structuredSpawns.length ? 'spawn_subagent' : 'mention-fallback',
             };
             appendTask(chainTask);
-            sseSend(res, 'worklist-chain', {
+            sseSend(workflowRes, 'worklist-chain', {
               from: agentKey,
               to: nextAgent,
               parent_id: task.id,
@@ -3571,8 +4348,35 @@ async function handle(req, res) {
             await executeTask(chainTask, depth + 1, newHistory);
           }
         }
-        return result;
+        return graphManaged ? {
+          result,
+          agent: agentKey,
+          artifacts: taskArtifacts,
+          spawnRequests,
+          collaborationContext,
+        } : result;
       } catch (err) {
+        if (taskTurnRecord && dispatchSession) {
+          const errorPart = taskTurnCollector?.append({
+            type: 'error',
+            message: err.message,
+            code: err.code || 'agent_failed',
+            retryable: Boolean(err.retryable),
+            detail: err.detail || '',
+            status: 'error',
+          });
+          if (errorPart) {
+            sseSend(workflowRes, 'part', errorPart);
+            persistTaskTurnPart(errorPart);
+          }
+          taskTurnRecord.kind = 'task-error';
+          taskTurnRecord.text = err.message;
+          taskTurnRecord.finishedAt = Date.now();
+          flushTaskTurnRecord();
+        } else if (taskTurnPersistTimer) {
+          clearTimeout(taskTurnPersistTimer);
+          taskTurnPersistTimer = null;
+        }
         patchTask(task.id, {
           status: 'failed',
           finished_at: new Date().toISOString(),
@@ -3580,8 +4384,15 @@ async function handle(req, res) {
           error: err.message,
         });
         appendLesson(task, err);
-        sseSend(res, 'task-failed', { id: task.id, title: task.title, agent: agentKey, error: err.message });
-        failed++;
+        sseSend(workflowRes, 'task-failed', {
+          id: task.id,
+          title: task.title,
+          agent: agentKey,
+          error: err.message,
+          code: err.code || 'agent_failed',
+          retryable: Boolean(err.retryable),
+        });
+        if (!graphManaged) failed++;
         if (depth > 0) {
           pushChainMessage(task.id, { type: 'task-failed', agent: agentKey, title: task.title, error: err.message, subagentRunId });
           appendSubagentMessage(subagentRunId, { type: 'system', content: 'Subagent failed: ' + err.message, isError: true });
@@ -3591,16 +4402,145 @@ async function handle(req, res) {
             error: err.message,
           });
         }
+        if (graphManaged) throw err;
         return null;
       }
     }
 
-    for (const task of pending) {
-      await executeTask(task, 0);
+    async function materializeGraphSpawns(parentTask, requests) {
+      const created = [];
+      const parentAgent = parentTask.executed_by || parentTask.agent;
+      const chainHistory = [...(parentTask.chain_history || []), parentAgent].filter(Boolean);
+      for (const spawnRequest of requests || []) {
+        const nextAgent = spawnRequest.agent;
+        if (!nextAgent || nextAgent === parentAgent || !agentKeys().includes(nextAgent)) continue;
+        const tail = [...chainHistory, nextAgent].slice(-4);
+        const isPingPong = tail.length >= 4
+          && tail[0] === tail[2] && tail[1] === tail[3]
+          && tail[0] !== tail[1];
+        if (isPingPong) {
+          sseSend(workflowRes, 'worklist-circuit-break', {
+            reason: `乒乓球熔断：${tail.join(' → ')} 交替循环，终止链式执行`,
+            chain_history: tail,
+          });
+          continue;
+        }
+        const chainId = randomUUID().slice(0, 8);
+        const upstreamSummary = String(parentTask.result || parentTask.previous_result || '')
+          .slice(0, 300).replace(/\n+/g, ' ').trim();
+        const chainTask = {
+          id: `${parentTask.run_id}-w${chainId}`,
+          run_id: parentTask.run_id,
+          created_at: new Date().toISOString(),
+          session_id: dispatchSession?.id || sessionId,
+          goal: parentTask.goal,
+          title: `[A2A] ${parentAgent} → @${nextAgent}: ${spawnRequest.label || parentTask.title}`,
+          why: '由 LangGraph task subgraph 消费 spawn_subagent 协议派生',
+          steps: [
+            ...(upstreamSummary ? [`上游 ${parentAgent} 的分析：${upstreamSummary}`] : []),
+            spawnRequest.task,
+          ],
+          accept: spawnRequest.accept || '',
+          agent: nextAgent,
+          status: 'pending',
+          phase: 'pending',
+          parent_task_id: parentTask.id,
+          chain_depth: Number(parentTask.chain_depth || 0) + 1,
+          chain_history: chainHistory,
+          spawn_protocol: 'spawn_subagent',
+        };
+        created.push(appendTask(chainTask));
+      }
+      return created;
     }
 
-    sseSend(res, 'done', { done, failed });
-    return res.end();
+    const graphWorkflowId = String(body.workflowId
+      || `dispatch:${selectedRunIds.join('+') || filterTask || 'pending'}:${clientRunId || randomUUID().slice(0, 8)}`);
+    const graphPorts = {
+      emit(event, data) {
+        if (event === 'workflow-interrupt') sseSend(workflowRes, 'workflow-interrupt', { workflowRunId: graphWorkflowId, ...data });
+        if (event === 'worklist-chain') sseSend(workflowRes, 'worklist-chain', data);
+        if (event === 'task-review-resume') {
+          updateDispatchActivity({
+            phase: 'review',
+            statusText: data.message || `正在复用 Agent 结果并重试 Reviewer「${data.title || ''}」`,
+            taskId: data.id,
+            taskTitle: data.title,
+            agentKey: data.reviewer || '',
+          });
+          sseSend(workflowRes, 'task-review-resume', data);
+        }
+      },
+      async transitionTask(task, nextState, meta) {
+        const latest = readTasks().find((item) => item.id === task.id) || task;
+        const updated = transitionTaskLifecycle(latest, nextState, meta);
+        repository.upsert('tasks', updated);
+        return updated;
+      },
+      async executeTask(task) {
+        return executeTask(task, Number(task.chain_depth || 0), task.chain_history || [], { graphManaged: true });
+      },
+      async reviewTask(task, execution) {
+        return runAutoReview(
+          task,
+          execution?.agent || task.executed_by || task.agent,
+          execution?.result || task.previous_result || '',
+          execution?.collaborationContext || buildTaskCollaborationContext(task),
+          { deferGate: Boolean(body.humanGate) },
+        );
+      },
+      materializeSpawns: materializeGraphSpawns,
+      async applyClarification(task, answer) {
+        const answers = Array.isArray(answer?.answers) ? answer.answers : [];
+        const updated = synchronizeTaskRecord(task, {
+          open_questions: [],
+          clarification_answers: [...(task.clarification_answers || []), ...answers],
+          status: 'pending',
+        }, {
+          eventId: `langgraph:clarification:${graphWorkflowId}:${task.id}`,
+          reason: 'clarification_completed',
+        });
+        repository.upsert('tasks', updated);
+        return updated;
+      },
+    };
+    const engine = new LangGraphDispatchEngine(graphPorts, { checkpointer: langGraphCheckpointer });
+    rememberWorkflowEngine(graphWorkflowId, {
+      engine,
+      setResponse(nextResponse) { workflowRes = nextResponse; },
+    });
+    activeDispatches.get(dispatchLockId).workflowRunId = graphWorkflowId;
+    sseSend(res, 'workflow-start', { workflowRunId: graphWorkflowId, engine: 'langgraph' });
+
+    try {
+      const snapshot = await engine.run({
+        workflowRunId: graphWorkflowId,
+        sessionId: dispatchSession?.id || sessionId,
+        clientRunId,
+        tasks: pending,
+        options: {
+          maxReworkAttempts: Math.max(0, Math.min(3, Number(body.maxReworkAttempts ?? 1))),
+          maxSpawnDepth: WORKLIST_MAX_DEPTH,
+          requireHumanGate: Boolean(body.humanGate),
+          reviewSpawned: false,
+        },
+      });
+      const paused = snapshot.interrupts.length > 0;
+      const graphDone = snapshot.values.completedTaskIds?.length || 0;
+      const graphFailed = snapshot.values.failedTaskIds?.length || 0;
+      sseSend(workflowRes, paused ? 'paused' : 'done', {
+        workflowRunId: graphWorkflowId,
+        status: paused ? 'interrupted' : snapshot.values.status,
+        done: graphDone,
+        failed: graphFailed,
+        interrupts: snapshot.interrupts,
+      });
+    } catch (error) {
+      sseSend(workflowRes, 'error', { message: error.message, code: 'langgraph_dispatch_failed' });
+    } finally {
+      activeDispatches.delete(dispatchLockId);
+    }
+    return workflowRes.end();
   }
 
   if (req.method === 'POST' && pathname === '/api/skills/install-source') {
@@ -3749,6 +4689,25 @@ async function handle(req, res) {
         error: runs.filter((run) => run.status === 'error').length,
       },
     }));
+  }
+
+  const invocationDetailMatch = pathname.match(/^\/api\/invocations\/([^\/]+)$/);
+  if (req.method === 'GET' && invocationDetailMatch) {
+    const invocation = readInvocations().find((item) => item.id === decodeURIComponent(invocationDetailMatch[1]));
+    if (!invocation) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: '调用记录不存在' }));
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ invocation }));
+  }
+
+  if (req.method === 'GET' && pathname === '/api/cost-ledger') {
+    const sessionId = url.searchParams.get('sessionId') || '';
+    const invocations = readInvocations().filter((item) => !sessionId || item.session_id === sessionId);
+    const tasks = readTasks().filter((item) => !sessionId || item.session_id === sessionId);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(summarizeCostLedger(invocations, tasks)));
   }
 
   const subagentMessagesMatch = pathname.match(/^\/api\/subagents\/([^/]+)\/messages$/);

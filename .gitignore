@@ -28,6 +28,7 @@ reports/
 .myteam/skills-state.json
 .myteam/avatars/
 .myteam/myteam.sqlite*
+.myteam/langgraph.sqlite*
 .myteam/migrations/
 
 # 系统文件

@@ -3,6 +3,7 @@ import { dirname, resolve } from 'path';
 import { spawnSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import { repository } from './storage.mjs';
+import { transitionWorkflowRunState } from './workflow-state.mjs';
 
 const MAX_TEXT = 240;
 const DEFAULT_AGENTS = ['codex', 'claude', 'kimi'];
@@ -26,6 +27,22 @@ const dedupe = (values, limit) => {
   return result;
 };
 
+export function normalizeOpenQuestions(values, limit = 3) {
+  if (!Array.isArray(values)) return [];
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    const question = truncate(typeof value === 'string' ? value : value?.question, 300);
+    const key = question.toLowerCase();
+    if (!question || seen.has(key)) continue;
+    seen.add(key);
+    const options = dedupe(Array.isArray(value?.options) ? value.options : [], 3);
+    result.push({ question, options });
+    if (result.length >= limit) break;
+  }
+  return result;
+}
+
 export const PLAN_OUTPUT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -44,7 +61,19 @@ export const PLAN_OUTPUT_SCHEMA = {
           title: { type: 'string', minLength: 1 },
           why: { type: 'string' },
           tradeoff: { type: 'string' },
-          open_questions: { type: 'array', items: { type: 'string' } },
+          open_questions: {
+            type: 'array',
+            maxItems: 3,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['question', 'options'],
+              properties: {
+                question: { type: 'string', minLength: 1 },
+                options: { type: 'array', minItems: 1, maxItems: 3, items: { type: 'string', minLength: 1 } },
+              },
+            },
+          },
           steps: { type: 'array', items: { type: 'string' } },
           accept: { type: 'string' },
           agent: { type: 'string', minLength: 1 },
@@ -116,7 +145,7 @@ export function normalizeStructuredPlan(value, options = {}) {
       title,
       why: truncate(task.why, 400),
       tradeoff: truncate(task.tradeoff, 300),
-      open_questions: Array.isArray(task.open_questions) ? dedupe(task.open_questions, 8) : [],
+      open_questions: normalizeOpenQuestions(task.open_questions, 3),
       steps: Array.isArray(task.steps) ? dedupe(task.steps, 12) : [],
       accept: truncate(task.accept, 500),
       agent: allowed.has(requestedAgent) ? requestedAgent : defaultAgent,
@@ -484,24 +513,10 @@ export function createTurnPartsCollector({ now = () => Date.now() } = {}) {
   };
 }
 
-const SESSION_RUN_TRANSITIONS = Object.freeze({
-  idle: new Set(['running']),
-  running: new Set(['completed', 'interrupting', 'interrupted', 'error']),
-  interrupting: new Set(['interrupted', 'error']),
-  completed: new Set(['running']),
-  interrupted: new Set(['running']),
-  error: new Set(['running']),
-});
-
 export function transitionSessionRunState(current, nextStatus, patch = {}) {
-  const previous = current?.status || 'idle';
-  if (!SESSION_RUN_TRANSITIONS[previous]?.has(nextStatus)) {
-    throw new Error(`invalid session run transition: ${previous} -> ${nextStatus}`);
+  try {
+    return transitionWorkflowRunState(current, nextStatus, patch);
+  } catch (error) {
+    throw new Error(String(error.message || error).replace('workflow run', 'session run'));
   }
-  return {
-    ...(current || {}),
-    ...patch,
-    status: nextStatus,
-    updatedAt: Date.now(),
-  };
 }

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { PARSERS, resolveAgentParser } from '../agent-utils.mjs';
+import { normalizeAgentFailure, parseReviewResult, parsedAgentOutputText, PARSERS, resolveAgentParser } from '../agent-utils.mjs';
 
 test('Kimi parser exposes tool start and completion as live activities', () => {
   const started = PARSERS.kimi(JSON.stringify({
@@ -36,9 +36,34 @@ test('Kimi parser keeps normal assistant output unchanged', () => {
   assert.deepEqual(output.activities, []);
 });
 
+test('Kimi 429 errors are normalized into a retryable user-facing failure', () => {
+  assert.throws(
+    () => PARSERS.kimi(JSON.stringify({ type: 'error', error: { message: 'HTTP 429 Too Many Requests' } })),
+    /429/,
+  );
+  const failure = normalizeAgentFailure('kimi', 'APIError: status 429, rate_limit_exceeded', 1);
+  assert.deepEqual(failure, {
+    code: 'rate_limited',
+    httpStatus: 429,
+    retryable: true,
+    message: 'Kimi 请求过于频繁（HTTP 429），本次执行已暂停。请稍后重试。',
+    detail: 'APIError: status 429, rate_limit_exceeded',
+    exitCode: 1,
+  });
+});
+
 test('agent variants inherit the parser for their base CLI', () => {
   assert.equal(resolveAgentParser('kimi-plan', { path: 'C:/tools/kimi.exe' }), PARSERS.kimi);
   assert.equal(resolveAgentParser('reviewer', { path: 'C:/tools/claude.exe' }), PARSERS.claude);
+});
+
+test('silent Agent calls collect structured parser text instead of coercing objects', () => {
+  const parsed = PARSERS.kimi(JSON.stringify({ role: 'assistant', content: '{"verdict":"pass"}' }));
+  assert.equal(parsedAgentOutputText(parsed), '{"verdict":"pass"}');
+  assert.notEqual(parsedAgentOutputText(parsed), '[object Object]');
+  assert.equal(parseReviewResult('```json\n{"verdict":"PASS","findings":[]}\n```').verdict, 'pass');
+  assert.equal(parseReviewResult('verdict: rework\nsuggestion: fix it').verdict, 'rework');
+  assert.equal(parseReviewResult('{"verdict":"pass","score":95}').score, 9.5);
 });
 
 test('plan UI keeps structured JSON out of the assistant text bubble', () => {
@@ -52,11 +77,29 @@ test('plan UI keeps structured JSON out of the assistant text bubble', () => {
 
 test('file errors use toast UI and interrupted chat exposes resume action', () => {
   const source = readFileSync(new URL('../web/app.js', import.meta.url), 'utf8');
-  const openHtml = source.match(/async function openLocalHtml\([\s\S]*?\n}\n\nchatEl/);
+  const openHtml = source.match(/async function openLocalHtml\([\s\S]*?\r?\n}\r?\n\r?\nchatEl/);
   assert.ok(openHtml, 'openLocalHtml flow should exist');
   assert.match(openHtml[0], /showToast\(/);
   assert.doesNotMatch(openHtml[0], /addSystemMsg\(/);
   assert.match(source, /resume: isResume/);
   assert.match(source, /function renderSessionRecovery\(/);
   assert.match(source, /function loadArtifacts\(/);
+});
+
+test('LangGraph workflow UI renders checkpoint, resume, and failed-node retry controls', () => {
+  const app = readFileSync(new URL('../web/app.js', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../web/app.css', import.meta.url), 'utf8');
+  const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+  assert.match(app, /function renderWorkflowCard\(/);
+  assert.match(app, /Checkpoint 状态/);
+  assert.match(app, /data-workflow-action="pass"/);
+  assert.match(app, /data-workflow-action="rework"/);
+  assert.match(app, /data-workflow-action="retry"/);
+  assert.match(app, /function restoreWorkflowCard\(/);
+  assert.match(app, /humanGate: dispatchOptions\.humanGate \?\? true/);
+  assert.match(app, /\/api\/workflows\/\$\{encodeURIComponent\(resumeWorkflowId\)\}\/resume/);
+  assert.match(server, /const filterTaskIds = new Set/);
+  assert.match(server, /pending = pending\.filter\(t => filterTaskIds\.has/);
+  assert.match(css, /\.workflow-card\.paused/);
+  assert.match(css, /\.workflow-checkpoint-grid/);
 });

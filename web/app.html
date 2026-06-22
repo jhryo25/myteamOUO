@@ -16,7 +16,7 @@
   <div class="agent-pills" id="agentPills">
     <span class="agent-pill"><span class="dot"></span>连接中…</span>
   </div>
-  <button class="artifacts-btn" id="artifactsBtn" title="会话文件与预览" aria-label="会话文件与预览"><span aria-hidden="true">📁</span><span class="artifacts-btn-count hidden" id="artifactsBtnCount">0</span></button>
+  <button class="artifacts-btn" id="artifactsBtn" title="查看当前会话生成的文件" aria-label="查看当前会话生成的文件"><span aria-hidden="true">📁</span><span class="artifacts-btn-label">会话文件</span><span class="artifacts-btn-count hidden" id="artifactsBtnCount">0</span></button>
   <button class="hub-btn" id="hubBtn" title="打开 Hub">Hub</button>
   <button class="skills-page-btn" id="skillsPageBtn" title="Skills 管理">Skills</button>
   <button class="settings-btn" id="settingsBtn" title="Agent 配置">⚙</button>
@@ -77,6 +77,7 @@
     <button class="hub-tab" data-tab="skills" title="按需加载的 Skill 列表，支持导入和路由">🧩 Skills</button>
     <button class="hub-tab" data-tab="lessons" title="agent 失败时记录的踩坑记录">📚 Lessons</button>
     <button class="hub-tab" data-tab="invocations" title="所有 agent 调用历史（耗时 / 状态）">⏱ 调用</button>
+    <button class="hub-tab" data-tab="costs" title="按任务与会话核算调用成本">💰 成本</button>
     <button class="hub-tab" data-tab="gate" title="Reviewer Gate：等待人工通过的 PR/任务">🚦 Gate</button>
     <button class="hub-tab" data-tab="subagents" title="子代理运行状态与结果">⑂ 子代理</button>
     <button class="hub-tab" data-tab="approvals" title="敏感操作审批与审计记录">✓ 审批</button>
@@ -107,13 +108,12 @@
   <div class="chat-area">
     <div class="chat-messages" id="chatMessages">
       <div class="chat-welcome" id="chatWelcome">
-        <div class="emoji">🤝</div>
-        <h2>欢迎来到 myteam</h2>
-        <p>直接发消息和 agent 对话，用 <code style="background:var(--surface2);padding:1px 5px;border-radius:4px;font-size:12px;">@claude</code>、<code style="background:var(--surface2);padding:1px 5px;border-radius:4px;font-size:12px;">@codex</code> 或 <code style="background:var(--surface2);padding:1px 5px;border-radius:4px;font-size:12px;">@kimi</code> 指定 agent。<br>切换到「拆任务」模式可以把目标分解成可执行清单。</p>
+        <div class="welcome-loading">正在检查本机 Agent 与场景模板…</div>
       </div>
     </div>
 
     <div class="chat-input-area">
+      <div class="clarification-tray hidden" id="clarificationTray"></div>
       <!-- 模式切换 -->
       <div class="options-row">
         <span class="options-label">模式：</span>
@@ -278,11 +278,12 @@
 
 <!-- ── 产物面板（右侧滑入式，与聊天区同屏并存）── -->
 <div class="artifacts-panel hidden" id="artifactsPanel">
+  <div class="artifacts-resize-handle" id="artifactsResizeHandle" role="separator" aria-label="拖动调整会话文件面板宽度" aria-orientation="vertical" title="拖动调整宽度，双击恢复默认"></div>
   <div class="artifacts-panel-header">
-    <span class="artifacts-panel-title">会话文件</span>
+    <div><span class="artifacts-panel-title">会话文件</span><span class="artifacts-session-name" id="artifactsSessionName">当前对话</span></div>
     <div class="artifacts-panel-tabs">
       <button class="ap-tab active" data-aptab="chat">本次对话</button>
-      <button class="ap-tab" data-aptab="workspace">最近文件</button>
+      <button class="ap-tab" data-aptab="workspace">工作区（未归属）</button>
     </div>
     <button class="artifacts-panel-refresh" id="artifactsRefreshBtn" title="刷新文件列表" aria-label="刷新文件列表">↻</button>
     <button class="artifacts-panel-close" id="artifactsPanelClose">✕</button>

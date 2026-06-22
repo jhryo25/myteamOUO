@@ -188,6 +188,94 @@ function copyCode(btn) {
 // ── chat helpers ─────────────────────────────────────────────
 const chatEl = document.getElementById('chatMessages');
 const welcome = document.getElementById('chatWelcome');
+let productTemplates = [];
+let productTemplatesPromise = null;
+let productTemplatesFailed = false;
+let appWorkspace = '';
+
+function welcomeHealthMarkup() {
+  const available = (agentConfigList || []).filter(agent => agent.available);
+  if (available.length) {
+    return `<div class="welcome-health ready">
+      <span class="welcome-health-dot"></span>
+      <strong>${available.length} 个 Agent 可启动</strong>
+      <span>${esc(available.map(agent => agent.label || agent.key).join('、'))}</span>
+      ${appWorkspace ? `<code title="当前工作区">${esc(appWorkspace)}</code>` : ''}
+    </div>`;
+  }
+  return `<button class="welcome-health needs-setup" type="button" data-welcome-action="settings">
+    <span class="welcome-health-dot"></span>
+    <strong>还没有可启动的 Agent</strong>
+    <span>先完成一次本机 CLI 检查</span>
+  </button>`;
+}
+
+function renderWelcome(target = document.getElementById('chatWelcome')) {
+  if (!target) return;
+  target.innerHTML = `
+    <div class="welcome-eyebrow">LOCAL MULTI-AGENT WORKSPACE</div>
+    <h2>从一个真实任务开始</h2>
+    <p class="welcome-lead">选择场景后，myteam 只会填入目标；由你确认后再拆解和执行。</p>
+    ${welcomeHealthMarkup()}
+    <div class="welcome-flow" aria-label="任务闭环">
+      <span><b>1</b> 选择场景</span><i>→</i>
+      <span><b>2</b> Agent 协作</span><i>→</i>
+      <span><b>3</b> 人工验收</span>
+    </div>
+    <div class="welcome-template-grid">
+      ${productTemplates.length ? productTemplates.map(template => `
+        <button class="welcome-template" type="button" data-template-id="${esc(template.id)}">
+          <span class="welcome-template-icon">${template.icon || '·'}</span>
+          <span class="welcome-template-copy">
+            <strong>${esc(template.title)}</strong>
+            <small>${esc(template.summary)}</small>
+            <em>${esc(template.deliverable)}</em>
+          </span>
+        </button>`).join('') : `<div class="welcome-template-loading">${productTemplatesFailed ? '场景模板暂时不可用，你仍可直接输入目标。' : '正在加载场景模板…'}</div>`}
+    </div>
+    <p class="welcome-footnote">数据保存在本机；高风险操作仍会在执行前请求审批。</p>`;
+
+  target.querySelector('[data-welcome-action="settings"]')?.addEventListener('click', () => openDrawer());
+  target.querySelectorAll('[data-template-id]').forEach(button => {
+    button.addEventListener('click', () => applyProductTemplate(button.dataset.templateId));
+  });
+  if (!productTemplates.length && !productTemplatesFailed) void loadProductTemplates(target);
+}
+
+async function loadProductTemplates(target = document.getElementById('chatWelcome')) {
+  if (!productTemplatesPromise) {
+    productTemplatesPromise = fetch('/api/product-templates')
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        productTemplates = Array.isArray(data.templates) ? data.templates : [];
+        productTemplatesFailed = false;
+        return productTemplates;
+      })
+      .catch(() => {
+        productTemplatesPromise = null;
+        productTemplatesFailed = true;
+        return [];
+      });
+  }
+  await productTemplatesPromise;
+  if (target?.isConnected && target.id === 'chatWelcome') renderWelcome(target);
+}
+
+function applyProductTemplate(templateId) {
+  const template = productTemplates.find(item => item.id === templateId);
+  if (!template) return;
+  const planButton = document.querySelector('#modeGroup .radio-btn[data-value="plan"]');
+  if (template.mode === 'plan') planButton?.click();
+  const input = document.getElementById('goalInput');
+  input.value = template.prompt;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+  showToast(`已填入「${template.title}」，补充主题后再发送。`, 'success');
+}
 
 function showToast(message, tone = 'info', duration = 3200) {
   let stack = document.getElementById('toastStack');
@@ -721,18 +809,15 @@ function scrollChat() {
 // ── 结构化气泡：plan 任务列表 ─────────────────────────────────
 function renderPlanTaskDetail(task) {
   const steps = Array.isArray(task.steps) ? task.steps : [];
-  const questions = Array.isArray(task.open_questions) ? task.open_questions : [];
   const sections = [];
   if (steps.length) sections.push(`<div class="plan-detail-section"><span>实施步骤</span><ol>${steps.map(step => `<li>${esc(step)}</li>`).join('')}</ol></div>`);
   if (task.tradeoff) sections.push(`<div class="plan-detail-section"><span>取舍</span><p>${esc(task.tradeoff)}</p></div>`);
-  if (questions.length) sections.push(`<div class="plan-detail-section"><span>待确认</span><ul>${questions.map(question => `<li>${esc(question)}</li>`).join('')}</ul></div>`);
   if (task.accept) sections.push(`<div class="plan-detail-section plan-detail-accept"><span>验收标准</span><p>${esc(task.accept)}</p></div>`);
   return sections.join('');
 }
 
 function renderPlanTaskRow(task, index, agentControl, { open = false } = {}) {
   const steps = Array.isArray(task.steps) ? task.steps : [];
-  const questions = Array.isArray(task.open_questions) ? task.open_questions : [];
   return `<details class="plan-task-row" data-task-id="${esc(task.id || '')}" data-agent="${esc(task.agent || '')}" ${open ? 'open' : ''}>
     <summary class="plan-task-summary">
       <span class="plan-task-num">${index + 1}</span>
@@ -741,7 +826,6 @@ function renderPlanTaskRow(task, index, agentControl, { open = false } = {}) {
         <div class="plan-task-meta">
           ${agentControl}
           ${steps.length ? `<span>${steps.length} 步</span>` : ''}
-          ${questions.length ? `<span>${questions.length} 项待确认</span>` : ''}
         </div>
         ${task.why ? `<div class="plan-task-why">${esc(task.why)}</div>` : ''}
       </div>
@@ -813,14 +897,30 @@ function addPlanCard(goal, tasks) {
     sel.onchange = async () => {
       const taskId = sel.dataset.taskId;
       const newAgent = sel.value;
+      const taskRow = sel.closest('.plan-task-row');
+      const previousAgent = taskRow?.dataset.agent || tasks.find(task => task.id === taskId)?.agent || '';
+      sel.disabled = true;
       try {
-        await fetch(`/api/tasks/${encodeURIComponent(taskId)}/agent`, {
+        const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/agent`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ agent: newAgent }),
         });
+        const data = await response.json();
+        if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+
+        // 计划卡、任务抽屉共享同一份最新数据，避免 PATCH 成功后任务列表仍显示旧 agent。
+        const planTask = tasks.find(task => task.id === taskId);
+        if (planTask) planTask.agent = data.task.agent;
+        const cachedTask = allTasks.find(task => task.id === taskId);
+        if (cachedTask) cachedTask.agent = data.task.agent;
+        if (taskRow) taskRow.dataset.agent = data.task.agent;
+        filterAndRenderTasks();
       } catch (e) {
+        sel.value = previousAgent;
         addSystemMsg(`修改 agent 失败：${e.message}`);
+      } finally {
+        sel.disabled = false;
       }
     };
   });
@@ -858,6 +958,291 @@ function addResultCard(title, agent, summary, ok) {
   scrollChat();
 }
 
+const WORKFLOW_SESSION_KEY = 'myteam.workflowBySession';
+const workflowViewState = new Map();
+
+function readWorkflowSessionMap() {
+  try { return JSON.parse(localStorage.getItem(WORKFLOW_SESSION_KEY) || '{}') || {}; }
+  catch { return {}; }
+}
+
+function rememberSessionWorkflow(sessionId, workflowRunId) {
+  if (!sessionId || !workflowRunId) return;
+  const entries = readWorkflowSessionMap();
+  entries[sessionId] = workflowRunId;
+  localStorage.setItem(WORKFLOW_SESSION_KEY, JSON.stringify(entries));
+}
+
+function rememberedSessionWorkflow(sessionId = currentSessionId) {
+  return sessionId ? String(readWorkflowSessionMap()[sessionId] || '') : '';
+}
+
+function workflowInterruptValue(interrupts = []) {
+  const interrupt = Array.isArray(interrupts) ? interrupts[0] : null;
+  return interrupt?.value || interrupt || null;
+}
+
+function normalizeWorkflowView(input = {}) {
+  const previous = workflowViewState.get(input.workflowRunId || input.checkpoint?.threadId || '') || {};
+  const values = input.values || previous.values || {};
+  const interrupts = input.interrupts ?? previous.interrupts ?? [];
+  const interrupt = workflowInterruptValue(interrupts);
+  const workflowRunId = String(input.workflowRunId || values.workflowRunId || input.checkpoint?.threadId || previous.workflowRunId || '');
+  const failedTaskIds = input.failedTaskIds || values.failedTaskIds || previous.failedTaskIds || [];
+  const completedTaskIds = input.completedTaskIds || values.completedTaskIds || previous.completedTaskIds || [];
+  const failedTasks = input.failedTasks || previous.failedTasks
+    || (values.tasks || []).filter(task => failedTaskIds.map(String).includes(String(task.id)));
+  const failedTask = failedTasks.find(task => task.status === 'failed' || ['failed', 'agent_repair_pending'].includes(task.review_status))
+    || failedTasks[0]
+    || null;
+  const currentTask = input.task || input.currentTask || interrupt?.task || values.currentTask || failedTask || previous.currentTask || null;
+  const explicitStatus = String(input.status || values.status || previous.status || 'running');
+  const terminalStatus = ['completed', 'completed_with_errors', 'failed', 'error', 'adapter_unavailable', 'cancelled'].includes(explicitStatus);
+  const live = terminalStatus ? { ...(input.live || previous.live || {}), active: false } : (input.live || previous.live || null);
+  const status = interrupts.length
+    ? 'interrupted'
+    : live?.active && !terminalStatus
+      ? 'running'
+      : explicitStatus;
+  return {
+    ...previous,
+    ...input,
+    workflowRunId,
+    values,
+    status,
+    interrupts,
+    interrupt,
+    currentTask,
+    live,
+    error: input.error ?? currentTask?.error ?? previous.error ?? '',
+    failedTaskIds: [...new Set(failedTaskIds.map(String))],
+    failedTasks,
+    completedTaskIds: [...new Set(completedTaskIds.map(String))],
+    done: Number(input.done ?? completedTaskIds.length ?? previous.done ?? 0),
+    failed: Number(input.failed ?? failedTaskIds.length ?? previous.failed ?? 0),
+    next: input.next || previous.next || [],
+    checkpoint: input.checkpoint || previous.checkpoint || null,
+  };
+}
+
+function workflowStatusCopy(view) {
+  if (view.status === 'interrupted') return { tone: 'paused', icon: 'Ⅱ', label: '等待你的操作', title: '工作流已暂停' };
+  if (['completed_with_errors', 'failed', 'error', 'adapter_unavailable'].includes(view.status) || view.failed > 0) {
+    return { tone: 'failed', icon: '!', label: '存在失败节点', title: '工作流需要处理' };
+  }
+  if (view.status === 'completed') return { tone: 'completed', icon: '✓', label: 'Checkpoint 已完成', title: '工作流执行完成' };
+  return { tone: 'running', icon: '↻', label: 'Checkpoint 运行中', title: 'LangGraph 工作流' };
+}
+
+function workflowQuestionText(question) {
+  return typeof question === 'string' ? question : String(question?.question || question?.text || '请补充信息');
+}
+
+function workflowCheckpointMeta(view) {
+  const node = view.next?.length
+    ? view.next.join(' → ')
+    : view.status === 'completed'
+      ? 'END'
+      : (view.failed > 0 || view.failedTaskIds.length ? 'FAILED' : '等待恢复');
+  const step = Number.isFinite(view.checkpoint?.step) ? `step ${view.checkpoint.step}` : 'step —';
+  const saved = view.checkpoint?.createdAt ? new Date(view.checkpoint.createdAt).toLocaleString() : '刚刚同步';
+  return { node, step, saved };
+}
+
+function renderWorkflowCard(input = {}) {
+  const view = normalizeWorkflowView(input);
+  if (!view.workflowRunId || (currentSessionId && input.sessionId && input.sessionId !== currentSessionId)) return null;
+  workflowViewState.set(view.workflowRunId, view);
+  rememberSessionWorkflow(currentSessionId, view.workflowRunId);
+  hideWelcome();
+
+  chatEl.querySelectorAll('.workflow-card').forEach(card => {
+    if (card.dataset.workflowId !== view.workflowRunId) card.remove();
+  });
+  let row = chatEl.querySelector(`.workflow-card[data-workflow-id="${CSS.escape(view.workflowRunId)}"]`);
+  if (!row) {
+    row = document.createElement('section');
+    row.className = 'workflow-card';
+    row.dataset.workflowId = view.workflowRunId;
+    chatEl.appendChild(row);
+  }
+
+  const copy = workflowStatusCopy(view);
+  const meta = workflowCheckpointMeta(view);
+  const taskTitle = view.currentTask?.title || view.currentTask?.id || '等待选择任务';
+  const interruptKind = view.interrupt?.kind || '';
+  const questions = Array.isArray(view.interrupt?.questions) ? view.interrupt.questions : [];
+  const review = view.interrupt?.review || view.values?.review || null;
+  const retryCandidates = view.failedTasks?.length
+    ? view.failedTasks
+    : (['failed', 'error', 'adapter_unavailable'].includes(view.status) && view.currentTask?.id ? [view.currentTask] : []);
+
+  const clarificationMarkup = interruptKind === 'clarification'
+    ? `<div class="workflow-questions">${questions.map((question, index) => `
+        <label><span>${esc(workflowQuestionText(question))}</span><input data-workflow-answer="${index}" data-question="${esc(workflowQuestionText(question))}" placeholder="输入后继续"></label>`).join('')}</div>`
+    : '';
+  const reviewMarkup = interruptKind === 'human_gate'
+    ? `<div class="workflow-review">
+        <span>Reviewer：${esc(review?.reviewer || '自动审查')}</span>
+        <strong>${esc(review?.verdict === 'pass' ? '建议通过' : review?.verdict || '等待人工确认')}</strong>
+        ${review?.suggestion ? `<p>${esc(review.suggestion)}</p>` : ''}
+        <textarea class="workflow-comment" rows="2" placeholder="可选：补充通过说明或返工要求"></textarea>
+      </div>`
+    : '';
+  const pausedActions = interruptKind === 'human_gate'
+    ? `<button class="workflow-action primary" data-workflow-action="pass">通过并继续</button><button class="workflow-action" data-workflow-action="rework">要求返工</button>`
+    : interruptKind === 'clarification'
+      ? `<button class="workflow-action primary" data-workflow-action="clarify">提交信息并继续</button>`
+      : '';
+  const retryRows = retryCandidates.map(task => {
+    const reviewOnly = (task.failure_stage === 'review' || task.review_only_pending) && task.previous_result;
+    const scope = reviewOnly ? 'review' : 'execute';
+    const actionable = task.status === 'failed' || ['failed', 'agent_repair_pending'].includes(task.review_status);
+    const canRetry = actionable && task.retryable !== false;
+    const stateText = !actionable ? '已重置，等待执行' : reviewOnly ? 'Agent 结果已保留' : 'Agent 执行失败';
+    return `<div class="workflow-failure-row">
+      <div><strong>${esc(task.title || task.id)}</strong><span>${esc(stateText)}${task.error ? ` · ${task.error}` : ''}</span></div>
+      ${canRetry ? `<button class="workflow-action danger" data-workflow-action="retry" data-retry-scope="${scope}" data-task-ids="${esc(String(task.id))}">${reviewOnly ? '只重试 Reviewer' : '重试 Agent'}</button>` : `<em>${actionable ? '不可自动重试' : '无需重试'}</em>`}
+    </div>`;
+  }).join('');
+  const retryPanel = retryRows
+    ? `<div class="workflow-failures"><div class="workflow-failures-title">失败节点处理 <span>逐项判断，不会一键重跑全部任务</span></div>${retryRows}</div>`
+    : '';
+  const liveText = view.live?.statusText || view.activityText || '';
+  const liveMarkup = view.status === 'running'
+    ? `<div class="workflow-live"><span class="workflow-live-dot"></span><div><strong>${esc(liveText || '工作流正在运行')}</strong><small>${esc(view.live?.agent ? `${view.live.agent} · ${view.live.phase || 'working'}` : (view.phase || 'LangGraph 正在切换节点'))}</small></div></div>`
+    : '';
+
+  row.className = `workflow-card ${copy.tone}`;
+  row.innerHTML = `
+    <div class="workflow-card-icon" aria-hidden="true">${copy.icon}</div>
+    <div class="workflow-card-main">
+      <div class="workflow-card-head"><strong>${copy.title}</strong><span class="workflow-status">${copy.label}</span></div>
+      <div class="workflow-current"><span>当前节点</span><b>${esc(meta.node)}</b><em>${esc(taskTitle)}</em></div>
+      ${liveMarkup}
+      ${view.error ? `<div class="workflow-error">${esc(view.error)}</div>` : ''}
+      ${reviewMarkup}${clarificationMarkup}${retryPanel}
+      <details class="workflow-checkpoint">
+        <summary>Checkpoint 状态</summary>
+        <div class="workflow-checkpoint-grid">
+          <span>完成 <b>${view.done}</b></span><span>失败 <b>${view.failed}</b></span><span>${esc(meta.step)}</span><span>${esc(meta.saved)}</span>
+        </div>
+        <code title="${esc(view.workflowRunId)}">${esc(view.workflowRunId)}</code>
+      </details>
+      <div class="workflow-actions">${pausedActions}<button class="workflow-action quiet" data-workflow-action="refresh">刷新状态</button></div>
+    </div>`;
+
+  row.querySelectorAll('[data-workflow-action]').forEach(button => {
+    button.onclick = async () => {
+      const action = button.dataset.workflowAction;
+      const setBusy = busy => row.querySelectorAll('button, input, textarea').forEach(control => { control.disabled = busy; });
+      setBusy(true);
+      try {
+        if (action === 'refresh') await refreshWorkflowCard(view.workflowRunId);
+        if (action === 'pass' || action === 'rework') {
+          const comment = row.querySelector('.workflow-comment')?.value.trim() || '';
+          await runDispatch({ resumeWorkflowId: view.workflowRunId, resumeValue: { decision: action, comment } });
+        }
+        if (action === 'clarify') {
+          const answers = [...row.querySelectorAll('[data-workflow-answer]')].map(input => ({
+            question: input.dataset.question,
+            answer: input.value.trim(),
+          }));
+          if (answers.some(item => !item.answer)) throw new Error('请先填写全部待确认信息');
+          await runDispatch({ resumeWorkflowId: view.workflowRunId, resumeValue: { answers } });
+        }
+        if (action === 'retry') await retryWorkflowTasks(view, button.dataset.taskIds.split(',').filter(Boolean), button.dataset.retryScope || 'execute');
+      } catch (error) {
+        showToast(error.message || '工作流操作失败', 'error');
+      } finally {
+        if (row.isConnected) setBusy(false);
+      }
+    };
+  });
+  scrollChat();
+  return row;
+}
+
+async function refreshWorkflowCard(workflowRunId, { quiet = false } = {}) {
+  if (!workflowRunId) return null;
+  try {
+    const response = await fetch(`/api/workflows/${encodeURIComponent(workflowRunId)}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `Checkpoint 读取失败 (${response.status})`);
+    return renderWorkflowCard({ ...data, workflowRunId });
+  } catch (error) {
+    if (!quiet) showToast(error.message, 'error');
+    return null;
+  }
+}
+
+async function restoreWorkflowCard(sessionId = currentSessionId) {
+  const linkedWorkflowId = new URLSearchParams(location.search).get('workflow') || '';
+  const workflowRunId = linkedWorkflowId || rememberedSessionWorkflow(sessionId);
+  if (!workflowRunId || sessionId !== currentSessionId) return;
+  await refreshWorkflowCard(workflowRunId, { quiet: true });
+}
+
+async function retryWorkflowTasks(view, taskIds = [], retryScope = 'execute') {
+  const ids = [...new Set(taskIds.map(String).filter(Boolean))];
+  if (!ids.length) throw new Error('Checkpoint 中没有可重试的任务');
+  for (const taskId of ids) {
+    const action = retryScope === 'review' ? 'retry-review' : 'rerun';
+    const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/${action}`, { method: 'POST' });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `任务 ${taskId} 重置失败`);
+  }
+  await loadTasks();
+  const nextWorkflowId = `${view.workflowRunId}:retry:${Date.now()}`;
+  renderWorkflowCard({
+    workflowRunId: nextWorkflowId,
+    status: 'running',
+    task: view.currentTask,
+    activityText: retryScope === 'review' ? '正在复用 Agent 结果并重新启动 Reviewer' : '正在重新启动 Agent 执行节点',
+    next: [retryScope === 'review' ? 'review_task' : 'run_task'],
+    failed: 0,
+    failedTaskIds: [],
+    error: '',
+  });
+  showToast(retryScope === 'review' ? 'Agent 结果已保留，正在重试 Reviewer' : `已重置 ${ids.length} 个失败节点，正在重新派发`, 'success');
+  await runDispatch({
+    taskIds: ids,
+    workflowId: nextWorkflowId,
+    humanGate: true,
+  });
+}
+
+function createTaskReviewCard({ id = '', title = '', reviewer = '', verdict = '', strategy = '', score = null, findings = [], suggestion = '', reason = '' } = {}) {
+  const passed = verdict === 'pass';
+  const rework = verdict === 'rework';
+  const repairing = verdict === 'agent_repair_pending'; // 兼容旧历史数据
+  const card = document.createElement('div');
+  card.className = `task-review-chat-card ${passed ? 'passed' : rework || repairing ? 'rework' : 'fallback'}`;
+  const strategyLabel = strategy === 'self_review' ? 'Agent 自验收' : strategy === 'cross_agent' ? '跨 Agent 验收' : '验收兜底';
+  card.innerHTML = `
+    <div class="task-review-chat-icon">${passed ? '✓' : rework ? '↻' : '!'}</div>
+    <div class="task-review-chat-main">
+      <div class="task-review-chat-title">${esc(title || id || '任务')} · ${passed ? '验收通过' : rework ? '要求返工' : repairing ? 'Reviewer 协议异常（执行结果已保留）' : '自动验收未完成'}</div>
+      <div class="task-review-chat-meta">${esc([reviewer, strategyLabel, score !== null ? `${score} 分` : ''].filter(Boolean).join(' · '))}</div>
+      ${suggestion || reason ? `<div class="task-review-chat-note">${esc(suggestion || reason)}</div>` : ''}
+      ${findings?.length ? `<ul>${findings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}
+    </div>
+    ${!passed && !rework && !repairing ? '<button class="task-review-fallback-btn">打开验收 Gate</button>' : ''}`;
+  card.querySelector('.task-review-fallback-btn')?.addEventListener('click', () => {
+    hubActiveTab = 'gate';
+    openHub();
+  });
+  return card;
+}
+
+function addTaskReviewCard(review) {
+  hideWelcome();
+  const card = createTaskReviewCard(review);
+  chatEl.appendChild(card);
+  scrollChat();
+  return card;
+}
+
 // ── radio group ───────────────────────────────────────────────
 function buildRadioGroup(containerId, items, defaultVal) {
   const el = document.getElementById(containerId);
@@ -882,7 +1267,8 @@ function getRadio(containerId) {
 // ── status ────────────────────────────────────────────────────
 async function loadStatus() {
   try {
-    const { agents } = await fetch('/api/status').then(r => r.json());
+    const { agents, workspace } = await fetch('/api/status').then(r => r.json());
+    appWorkspace = workspace || '';
     agentConfigList = agents;
     const pillsEl = document.getElementById('agentPills');
     pillsEl.innerHTML = agents.map(a =>
@@ -903,6 +1289,7 @@ async function loadStatus() {
       availableAgents[0]?.key
     );
     setConnectionStatus(availableAgents.length > 0 ? 'online' : 'degraded');
+    if (document.getElementById('chatWelcome')) renderWelcome();
   } catch {
     document.getElementById('agentPills').innerHTML =
       '<span class="agent-pill err"><span class="dot"></span>离线</span>';
@@ -1023,6 +1410,20 @@ function updateBulkCount() {
   document.getElementById('tasksBulkCount').textContent = `已选 ${selectedTaskIds.size}`;
 }
 
+function reconcileBulkSelection(visibleTasks = []) {
+  const visibleIds = new Set(visibleTasks.map(task => String(task.id)));
+  for (const id of selectedTaskIds) {
+    if (!visibleIds.has(id)) selectedTaskIds.delete(id);
+  }
+  const selectAll = document.getElementById('tasksSelectAll');
+  if (selectAll) {
+    const selectedVisible = [...visibleIds].filter(id => selectedTaskIds.has(id)).length;
+    selectAll.checked = visibleIds.size > 0 && selectedVisible === visibleIds.size;
+    selectAll.indeterminate = selectedVisible > 0 && selectedVisible < visibleIds.size;
+  }
+  updateBulkCount();
+}
+
 async function bulkApply(action) {
   const ids = [...selectedTaskIds];
   if (!ids.length) return;
@@ -1037,18 +1438,126 @@ async function bulkApply(action) {
   await loadTasks();
 }
 
+function suggestClarificationOptions(question = '') {
+  const text = String(question);
+  if (/直飞|中转/.test(text)) return ['仅直飞', '允许一次中转', '均可'];
+  if (/今天|明天|日期|起止日/.test(text)) return ['按最近可用日期', '今天开始', '明天开始'];
+  if (/是否|要不要|需不需要/.test(text)) return ['是', '否'];
+  return ['采用 Agent 推荐方案', '按当前默认设置继续'];
+}
+
+function normalizeClarificationQuestion(task, value) {
+  const question = typeof value === 'string' ? value : value?.question;
+  const supplied = Array.isArray(value?.options) ? value.options : [];
+  const options = [...new Set(supplied.map(option => String(option || '').trim()).filter(Boolean))].slice(0, 3);
+  return {
+    taskId: task.id,
+    taskTitle: task.title,
+    question: String(question || '').trim(),
+    options: options.length ? options : suggestClarificationOptions(question).slice(0, 3),
+  };
+}
+
+function renderClarificationTray(tasks = []) {
+  const tray = document.getElementById('clarificationTray');
+  if (!tray) return;
+  const blockedTasks = tasks.filter(task =>
+    task.session_id === currentSessionId && ['pending', 'waiting_input'].includes(task.status) && Array.isArray(task.open_questions) && task.open_questions.length
+  );
+  if (!blockedTasks.length) {
+    tray.classList.add('hidden');
+    tray.innerHTML = '';
+    return;
+  }
+  const runId = blockedTasks[0].run_id;
+  const questions = blockedTasks
+    .filter(task => task.run_id === runId)
+    .flatMap(task => task.open_questions.map(question => normalizeClarificationQuestion(task, question)))
+    .filter(item => item.question)
+    .slice(0, 3);
+  tray.innerHTML = `
+    <div class="clarification-head">
+      <div><strong>任务确实无法继续，需要你的确认</strong><span>请选择最符合情况的一项；只有“其他”需要输入文字。</span></div>
+      <span class="clarification-count">${questions.length} 项</span>
+    </div>
+    <div class="clarification-fields">
+      ${questions.map((item, index) => `<fieldset class="clarification-field" data-clarification-index="${index}">
+        <legend><b>${index + 1}</b><span>${esc(item.question)}</span></legend>
+        <div class="clarification-options">
+          ${item.options.map((option, optionIndex) => `<label class="clarification-choice">
+            <input type="radio" name="clarification-${index}" value="${esc(option)}" ${optionIndex === 0 ? 'checked' : ''}>
+            <span>${esc(option)}</span>
+          </label>`).join('')}
+          <label class="clarification-choice other-choice">
+            <input type="radio" name="clarification-${index}" value="__other__">
+            <span>其他</span>
+            <input type="text" class="clarification-other-input" placeholder="输入其他情况…" disabled>
+          </label>
+        </div>
+      </fieldset>`).join('')}
+    </div>
+    <div class="clarification-actions"><button type="button" id="clarificationSubmit">确认并继续执行</button></div>`;
+  tray.classList.remove('hidden');
+  tray.querySelectorAll('.clarification-field').forEach(field => {
+    const custom = field.querySelector('.clarification-other-input');
+    field.querySelectorAll('input[type="radio"]').forEach(radio => {
+      radio.onchange = () => {
+        custom.disabled = radio.value !== '__other__' || !radio.checked;
+        if (!custom.disabled) custom.focus();
+      };
+    });
+  });
+  tray.querySelector('#clarificationSubmit').onclick = async event => {
+    const answers = questions.map((item, index) => {
+      const field = tray.querySelector(`[data-clarification-index="${index}"]`);
+      const selected = field?.querySelector('input[type="radio"]:checked');
+      const answer = selected?.value === '__other__'
+        ? field.querySelector('.clarification-other-input')?.value.trim() || ''
+        : selected?.value || '';
+      return { ...item, answer };
+    });
+    if (answers.some(item => !item.answer)) {
+      showToast('请完成全部选择；选择“其他”时需要填写具体内容。', 'warn');
+      return;
+    }
+    event.currentTarget.disabled = true;
+    event.currentTarget.textContent = '正在保存…';
+    try {
+      const response = await fetch('/api/tasks/clarify', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: currentSessionId,
+          runId,
+          answers,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || '保存确认信息失败');
+      addUserBubble(`已确认任务信息：\n${answers.map((item, index) => `${index + 1}. ${item.answer}`).join('\n')}`);
+      await loadTasks();
+      if (!data.remaining?.length) await runDispatch({ runId });
+    } catch (error) {
+      showToast(error.message, 'error');
+      event.currentTarget.disabled = false;
+      event.currentTarget.textContent = '确认并继续执行';
+    }
+  };
+}
+
 async function loadTasks() {
   const sid = currentSessionId || '';
   const url = '/api/tasks' + (sid ? '?sessionId=' + encodeURIComponent(sid) : '');
   const { tasks } = await fetch(url).then(r => r.json()).catch(() => ({ tasks: [] }));
   allTasks = tasks;
   filterAndRenderTasks();
+  renderClarificationTray(tasks);
   // 有 pending 就显示 dispatch 按钮，否则隐藏
-  const hasPending = tasks.some(t => t.status === 'pending');
+  const hasClarifications = tasks.some(t => t.session_id === currentSessionId && ['pending', 'waiting_input'].includes(t.status) && Array.isArray(t.open_questions) && t.open_questions.length);
+  const hasPending = tasks.some(t => t.session_id === currentSessionId && t.status === 'pending');
   const dispatchBtn = document.getElementById('dispatchBtn');
   if (hasPending) {
     dispatchBtn.classList.remove('hidden');
-    dispatchBtn.disabled = isCurrentSessionRunning();
+    dispatchBtn.disabled = isCurrentSessionRunning() || hasClarifications;
   } else {
     dispatchBtn.classList.add('hidden');
     dispatchBtn.disabled = true;
@@ -1075,6 +1584,7 @@ function filterAndRenderTasks() {
     );
   }
   
+  reconcileBulkSelection(filtered);
   renderTasks(filtered);
 }
 
@@ -1152,10 +1662,38 @@ async function deleteTask(taskId) {
 
 const STATUS_DOT = {
   pending:     'sd-pending',
+  waiting_input: 'sd-pending',
   in_progress: 'sd-running',
   done:        'sd-done',
   failed:      'sd-failed',
 };
+
+function taskLifecycleMeta(task) {
+  if (task.status === 'waiting_input' || task.open_questions?.length) return { tone: 'review', label: '等待用户确认' };
+  if (task.review_status === 'agent_repair_pending') return { tone: 'blocked', label: 'Reviewer 异常待处理' };
+  if (task.gate_status === 'passed') return { tone: 'accepted', label: task.reviewer === 'human' ? '人工已验收' : 'Agent 已验收' };
+  if (task.gate_status === 'rework') return { tone: 'rework', label: task.reviewer === 'human' ? '人工要求返工' : 'Agent 要求返工' };
+  if (task.status === 'failed') return { tone: 'blocked', label: '失败阻塞' };
+  if (['failed', 'parse_failed', 'skipped'].includes(task.review_status)) return { tone: 'blocked', label: '验收异常' };
+  if (task.status === 'done') return { tone: 'review', label: 'Agent 验收中' };
+  if (task.status === 'in_progress') return { tone: 'running', label: '执行中' };
+  return { tone: 'pending', label: '待执行' };
+}
+
+function renderTaskReviewSummary(task) {
+  if (!task.review_status && !task.review_scorecard) return '';
+  const findings = Array.isArray(task.review_findings) ? task.review_findings : [];
+  const score = Number.isFinite(Number(task.review_score)) ? `${Number(task.review_score)} 分` : '';
+  const scorecard = task.review_scorecard && typeof task.review_scorecard === 'object'
+    ? `${Object.values(task.review_scorecard).filter(Boolean).length}/4 人工确认`
+    : '';
+  return `<div class="task-detail-section task-review-summary">
+    <div class="task-detail-label">审查结果</div>
+    <div class="task-review-meta">${esc([task.reviewer || 'reviewer', task.review_status, score, scorecard].filter(Boolean).join(' · '))}</div>
+    ${task.review_note ? `<div class="task-review-note">${esc(task.review_note)}</div>` : ''}
+    ${findings.length ? `<ul>${findings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}
+  </div>`;
+}
 
 function renderTasks(tasks) {
   const el = document.getElementById('tasksList');
@@ -1221,8 +1759,13 @@ function renderTasks(tasks) {
 
       const dotCls = STATUS_DOT[task.status] || 'sd-pending';
       const agentLabel = task.executed_by || task.agent || '';
+      const lifecycle = taskLifecycleMeta(task);
 
       const steps = (task.steps || []).map(s => `<li>${esc(s)}</li>`).join('');
+      const context = [
+        task.why ? `<div><b>为什么做：</b>${esc(task.why)}</div>` : '',
+        task.tradeoff ? `<div><b>关键取舍：</b>${esc(task.tradeoff)}</div>` : '',
+      ].filter(Boolean).join('');
       const accept = task.accept
         ? `<div class="task-detail-section"><div class="task-detail-label">验收标准</div>
            <div class="task-accept-text">✓ ${esc(task.accept)}</div></div>` : '';
@@ -1238,6 +1781,7 @@ function renderTasks(tasks) {
           <span class="task-status-dot ${dotCls}"></span>
           <span class="task-row-title" title="${esc(task.title)}">${esc(task.title)}</span>
           <span class="task-row-agent">${esc(agentLabel)}</span>
+          <span class="task-lifecycle-badge ${lifecycle.tone}">${lifecycle.label}</span>
           <div class="task-actions">
             <button class="task-action-btn" data-action="rerun" data-task-id="${esc(task.id)}" title="重新执行">↻</button>
             <button class="task-action-btn danger" data-action="delete" data-task-id="${esc(task.id)}" title="删除">✕</button>
@@ -1245,12 +1789,14 @@ function renderTasks(tasks) {
           <span class="task-chevron">›</span>
         </div>
         <div class="task-detail">
+          ${context ? `<div class="task-detail-section task-context">${context}</div>` : ''}
           ${steps ? `<div class="task-detail-section">
             <div class="task-detail-label">步骤</div>
             <ul>${steps}</ul></div>` : ''}
           ${accept}
           ${result}
           ${error}
+          ${renderTaskReviewSummary(task)}
         </div>`;
 
       item.querySelector('.task-row').onclick = (e) => {
@@ -1280,7 +1826,7 @@ function renderTasks(tasks) {
         cb.onchange = () => {
           if (cb.checked) selectedTaskIds.add(task.id);
           else selectedTaskIds.delete(task.id);
-          updateBulkCount();
+          reconcileBulkSelection(tasks);
         };
       }
 
@@ -1557,7 +2103,7 @@ function ssePost(url, body, handlers) {
           handlers.error?.({ message: '用户拒绝操作' });
           return resolve(null);
         }
-        handlers.error?.({ message: data.error || `请求失败 (${res.status})` });
+        handlers.error?.({ ...data, message: data.error || `请求失败 (${res.status})` });
         return resolve(null);
       }
       const reader = res.body.getReader();
@@ -2051,57 +2597,189 @@ document.getElementById('dispatchBtn').onclick = () => runDispatch();
 async function runDispatch(options = {}) {
   const dispatchBtn = document.getElementById('dispatchBtn');
   const dispatchSpinner = document.getElementById('dispatchSpinner');
+  const { resumeWorkflowId = '', resumeValue = null, ...dispatchOptions } = options;
+  let activeWorkflowId = resumeWorkflowId || rememberedSessionWorkflow(currentSessionId);
+  const showWorkflowLive = (statusText, phase = 'working', extra = {}) => {
+    if (!activeWorkflowId) return;
+    const previousTask = workflowViewState.get(activeWorkflowId)?.currentTask || null;
+    const currentTask = extra.currentTask ? { ...(previousTask || {}), ...extra.currentTask } : previousTask;
+    renderWorkflowCard({
+      workflowRunId: activeWorkflowId,
+      status: 'running',
+      interrupts: [],
+      ...extra,
+      currentTask,
+      live: {
+        active: true,
+        statusText,
+        phase,
+        agent: extra.agent || '',
+        currentActivity: extra.currentActivity || null,
+        lastActivityAt: new Date().toISOString(),
+      },
+    });
+  };
 
   dispatchBtn.disabled = true;
   dispatchSpinner.classList.remove('hidden');
 
   try {
-    const agentOnlyText = options.agentOnly ? `（仅 ${options.agentOnly}）` : '';
-    addSystemMsg(`开始执行 pending 任务${agentOnlyText}…`);
+    const agentOnlyText = dispatchOptions.agentOnly ? `（仅 ${dispatchOptions.agentOnly}）` : '';
+    addSystemMsg(resumeWorkflowId ? '正在从 checkpoint 恢复工作流…' : `开始执行 pending 任务${agentOnlyText}…`);
+    if (resumeWorkflowId) {
+      renderWorkflowCard({ workflowRunId: resumeWorkflowId, status: 'running', interrupts: [], error: '' });
+    }
 
-    await ssePost('/api/dispatch', { ...options, sessionId: currentSessionId, mode: 'dispatch' }, {
+    const url = resumeWorkflowId
+      ? `/api/workflows/${encodeURIComponent(resumeWorkflowId)}/resume`
+      : '/api/dispatch';
+    const body = resumeWorkflowId
+      ? { value: resumeValue, sessionId: currentSessionId, mode: 'dispatch' }
+      : { ...dispatchOptions, humanGate: dispatchOptions.humanGate ?? true, sessionId: currentSessionId, mode: 'dispatch' };
+    await ssePost(url, body, {
+      'workflow-start': ({ workflowRunId, ...state }) => {
+        activeWorkflowId = workflowRunId;
+        rememberSessionWorkflow(currentSessionId, workflowRunId);
+        renderWorkflowCard({ ...state, workflowRunId, status: 'running', interrupts: [] });
+      },
+      'workflow-interrupt': ({ workflowRunId, interrupts }) => {
+        activeWorkflowId = workflowRunId || activeWorkflowId;
+        renderWorkflowCard({ workflowRunId: activeWorkflowId, status: 'interrupted', interrupts });
+      },
       start:        ({ count }) => addSystemMsg(`共 ${count} 条任务待执行`),
       'task-start': ({ id, title, agent }) => {
+        if (activeWorkflowId) renderWorkflowCard({
+          workflowRunId: activeWorkflowId,
+          status: 'running',
+          interrupts: [],
+          next: ['run_task'],
+          currentTask: { id, title, agent },
+          live: { active: true, statusText: `${agent} 正在启动任务`, phase: 'starting', agent, taskId: id, taskTitle: title },
+        });
         setActiveAgent(agent);
         updateTaskDot(id, 'in_progress');
+        const task = allTasks.find(item => item.id === id);
+        if (task) renderSessionRunningTask({ ...task, status: 'in_progress', started_at: new Date().toISOString() }, {
+          taskId: id, taskTitle: title, agentKey: agent, phase: 'starting', statusText: `${agent} 正在启动`, startedAt: new Date().toISOString(),
+        });
         startAgentBubble(agent, currentSessionId);
         updateAgentStatus(`${agent} 正在执行：${title}`);
         showRunningPanel({ agent, mode: '执行任务', taskTitle: title });
       },
-      chunk:        ({ text }) => { appendTyping(text); bumpRunningChars('chunk', (text || '').length); },
-      thinking:     ({ text }) => { appendThinking(text); bumpRunningChars('thinking', (text || '').length); },
-      activity:     appendAgentActivity,
-      status:       ({ text, phase }) => updateAgentStatus(text, phase),
+      chunk:        ({ text }) => { appendTyping(text); bumpRunningChars('chunk', (text || '').length); bumpSessionRunningTaskMetric('output', (text || '').length); },
+      thinking:     ({ text }) => { appendThinking(text); bumpRunningChars('thinking', (text || '').length); bumpSessionRunningTaskMetric('thinking', (text || '').length); },
+      part:         appendTurnPart,
+      activity:     activity => {
+        appendAgentActivity(activity);
+        updateSessionRunningTaskCard({ phase: activity.phase || 'running', currentActivity: activity, lastActivityAt: new Date().toISOString() });
+        const label = activity.phase === 'completed' ? `${activity.name || '工具'} 已完成` : `正在调用 ${activity.name || '工具'}`;
+        showWorkflowLive(activity.summary ? `${label}：${activity.summary}` : label, activity.phase || 'tool', { currentActivity: activity });
+      },
+      status:       ({ text, phase }) => {
+        updateAgentStatus(text, phase);
+        updateSessionRunningTaskCard({ statusText: text, phase, lastActivityAt: new Date().toISOString() });
+        showWorkflowLive(text, phase || 'working');
+      },
       'task-done':  ({ id, title, agent, summary }) => {
         const stats = collectFinishStats();
         const hadOutput = finishTyping(stats);
         hideRunningPanel();
         updateTaskDot(id, 'done');
+        stopRunningTaskCardTimer();
+        chatEl.querySelector('.session-running-task')?.remove();
         if (title && !hadOutput) addResultCard(title, agent, summary, true);
+        showWorkflowLive('Agent 执行结果已保存，正在启动 Reviewer', 'review', { currentTask: { id, title, agent } });
       },
+      'task-review-resume': ({ id, title, reviewer, message }) => {
+        showWorkflowLive(message || '复用 Agent 结果，只重试 Reviewer', 'review', { currentTask: { id, title, reviewer } });
+      },
+      'task-review-start': ({ id, title, reviewer, strategy }) => {
+        addSystemMsg(`${reviewer} 正在${strategy === 'self_review' ? '自验收' : '验收'}任务「${title || ''}」…`);
+        showWorkflowLive(`${reviewer || 'Reviewer'} 正在${strategy === 'self_review' ? '自验收' : '验收'}「${title || ''}」`, 'review', { currentTask: { id, title, reviewer } });
+      },
+      'task-review-done': review => {
+        addTaskReviewCard(review);
+        if (review.verdict === 'rework') {
+          showWorkflowLive('Reviewer 要求返工：当前任务将重新执行，不会进入下一任务', 'rework', {
+            currentTask: { id: review.id, title: review.title, review_status: 'rework' },
+          });
+        } else if (review.verdict === 'pass') {
+          showWorkflowLive('Reviewer 已通过，等待你的人工确认', 'gate', {
+            currentTask: { id: review.id, title: review.title, review_status: 'pass' },
+          });
+        }
+        loadTasks();
+      },
+      'task-review-skip': ({ id, reason }) => {
+        addTaskReviewCard({ id, verdict: 'skipped', reason: reason === 'no-reviewer' ? '没有可用的 Reviewer Agent' : reason });
+        loadTasks();
+      },
+      'task-review-failed': ({ id, title, reviewer, reason, error, retryable, code }) => {
+        addTaskReviewCard({ id, reviewer, verdict: 'failed', reason: error || reason || '自动验收失败' });
+        showWorkflowLive(error || reason || 'Reviewer 失败，工作流正在停止', 'review_failed', {
+          currentTask: { id, title, reviewer, failure_stage: 'review', retryable, error: error || reason, review_status: 'failed' },
+          error: error || reason,
+          reviewErrorCode: code,
+        });
+        loadTasks();
+      },
+      'task-review-retrying': ({ reviewer, attempt, maxAttempts }) => {
+        showWorkflowLive(`${reviewer || 'Reviewer'} 输出格式异常，正在进行最后一次格式修复（${attempt + 1}/${maxAttempts}）`, 'review_repair');
+      },
+      'task-review-repair': review => { addTaskReviewCard({ ...review, verdict: 'failed' }); loadTasks(); },
       'task-failed':({ id, title, agent, error }) => {
         finishTyping();
         hideRunningPanel();
         updateTaskDot(id, 'failed');
         addResultCard(title || id, agent || '', error, false);
+        if (activeWorkflowId) renderWorkflowCard({
+          workflowRunId: activeWorkflowId,
+          status: 'running',
+          interrupts: [],
+          currentTask: { id, title, agent },
+          error,
+          live: { active: true, statusText: '节点失败，工作流正在安全停止', phase: 'halting', agent },
+        });
       },
       'worklist-chain': ({ from, to, parent_id, chain_task_id }) => {
         finishTyping();
         addSystemMsg(`→ ${from} 触发了 @${to} 继续执行`);
       },
-      done: ({ done, failed }) => {
+      paused: ({ workflowRunId, interrupts, ...state }) => {
+        activeWorkflowId = workflowRunId || activeWorkflowId;
+        finishTyping();
+        hideRunningPanel();
+        renderWorkflowCard({ ...state, workflowRunId: activeWorkflowId, status: 'interrupted', interrupts });
+        void refreshWorkflowCard(activeWorkflowId, { quiet: true });
+      },
+      done: ({ workflowRunId, done, failed, status }) => {
+        activeWorkflowId = workflowRunId || activeWorkflowId;
         hideRunningPanel();
         if (failed > 0) {
-          addResumePrompt(`✓ 执行完毕：${done} 成功 / ${failed} 失败`, true);
+          addSystemMsg(`执行结束：${done} 成功 / ${failed} 失败，可在工作流卡片中重试失败节点。`);
         } else {
           addSystemMsg(`✓ 全部执行完毕：${done} 成功`);
         }
+        if (activeWorkflowId) {
+          renderWorkflowCard({ workflowRunId: activeWorkflowId, status: status || (failed ? 'failed' : 'completed'), done, failed, interrupts: [], live: { active: false } });
+          void refreshWorkflowCard(activeWorkflowId, { quiet: true });
+        }
       },
-      error: ({ message }) => { hideRunningPanel(); addSystemMsg(`✗ ${message}`); },
+      error: ({ message, code }) => {
+        hideRunningPanel();
+        addSystemMsg(`✗ ${message}`);
+        if (activeWorkflowId) renderWorkflowCard({
+          workflowRunId: activeWorkflowId,
+          status: code === 'workflow_adapter_unavailable' ? 'adapter_unavailable' : 'error',
+          error: message,
+          interrupts: [],
+        });
+      },
       aborted: () => {
         finishTyping();
         hideRunningPanel();
-        addResumePrompt('⏹ 已中断执行，仍有未完成任务', false);
+        addSystemMsg('⏹ 已中断执行，可从工作流卡片查看 checkpoint。');
+        if (activeWorkflowId) void refreshWorkflowCard(activeWorkflowId, { quiet: true });
       },
     });
   } finally {
@@ -2292,7 +2970,7 @@ drawerMask.onclick  = closeDrawer;
 
 // ── Hub 指挥抽屉 ─────────────────────────────────────────────
 let hubActiveTab = 'overview';
-let hubState = { agents: [], tasks: [], skills: [], selectedSkills: [], skillsSummary: null, skillContextPreview: '', invocations: [], invocationSummary: null, lessons: [], subagents: [], subagentSummary: null, approvals: [], audit: [], schedules: [], scheduleRuns: [] };
+let hubState = { agents: [], tasks: [], skills: [], selectedSkills: [], skillsSummary: null, skillContextPreview: '', skillUsage: [], invocations: [], invocationSummary: null, costLedger: { rows: [], summary: {} }, lessons: [], subagents: [], subagentSummary: null, approvals: [], audit: [], schedules: [], scheduleRuns: [] };
 
 function openHub() {
   closeDrawer();
@@ -2314,11 +2992,14 @@ async function loadHub() {
     const skillPhase = getMode() === 'plan' ? 'plan' : 'run';
     const skillAgent = planAgentGroupEl.querySelector('.radio-btn.active')?.dataset.value || '';
     const skillUrl = `/api/skills?phase=${encodeURIComponent(skillPhase)}&agent=${encodeURIComponent(skillAgent)}&text=${encodeURIComponent(skillText)}`;
-    const [status, taskData, skillData, invocationData, lessonData, subagentData, approvalData, auditData, scheduleData, scheduleRunData] = await Promise.all([
+    const sessionQuery = encodeURIComponent(currentSessionId || '');
+    const [status, taskData, skillData, skillUsageData, invocationData, costData, lessonData, subagentData, approvalData, auditData, scheduleData, scheduleRunData] = await Promise.all([
       fetch('/api/status').then(r => r.json()),
       fetch('/api/tasks').then(r => r.json()).catch(() => ({ tasks: [] })),
       fetch(skillUrl).then(r => r.json()).catch(() => ({ skills: [], selected: [], summary: null, contextPreview: '' })),
-      fetch('/api/invocations').then(r => r.json()).catch(() => ({ invocations: [], summary: null })),
+      fetch('/api/skills/usage?sessionId=' + sessionQuery).then(r => r.json()).catch(() => ({ usage: [] })),
+      fetch('/api/invocations?sessionId=' + sessionQuery).then(r => r.json()).catch(() => ({ invocations: [], summary: null })),
+      fetch('/api/cost-ledger?sessionId=' + sessionQuery).then(r => r.json()).catch(() => ({ rows: [], summary: {} })),
       fetch('/api/lessons').then(r => r.json()).catch(() => ({ lessons: [] })),
       fetch('/api/subagents?sessionId=' + encodeURIComponent(currentSessionId || '')).then(r => r.json()).catch(() => ({ runs: [], summary: null })),
       fetch('/api/approvals').then(r => r.json()).catch(() => ({ approvals: [] })),
@@ -2333,8 +3014,10 @@ async function loadHub() {
       selectedSkills: skillData.selected || [],
       skillsSummary: skillData.summary || null,
       skillContextPreview: skillData.contextPreview || '',
+      skillUsage: skillUsageData.usage || [],
       invocations: invocationData.invocations || [],
       invocationSummary: invocationData.summary || null,
+      costLedger: costData || { rows: [], summary: {} },
       lessons: lessonData.lessons || [],
       subagents: subagentData.runs || [],
       subagentSummary: subagentData.summary || null,
@@ -2407,6 +3090,7 @@ function renderHub() {
   else if (hubActiveTab === 'skills') renderer = renderHubSkills;
   else if (hubActiveTab === 'lessons') renderer = renderHubLessons;
   else if (hubActiveTab === 'invocations') renderer = renderHubInvocations;
+  else if (hubActiveTab === 'costs') renderer = renderHubCosts;
   else if (hubActiveTab === 'gate') renderer = renderHubGate;
   else if (hubActiveTab === 'subagents') renderer = renderHubSubagents;
   else if (hubActiveTab === 'approvals') renderer = renderHubApprovals;
@@ -2421,9 +3105,10 @@ function hubTabIntro(tab) {
   const map = {
     overview:    { icon: '📊', title: '总览', desc: 'agent / 任务 / 调用 / 课程的整体快照。点 KPI 数字可跳转对应 tab。' },
     agents:      { icon: '🤖', title: 'Agent 管理', desc: '查看并配置 CLI 路径、Base URL、API Key、模型、角色卡。可使用模板快速套用。' },
-    skills:      { icon: '🧩', title: 'Skills 路由', desc: '按需加载的 Skill 清单。支持导入新 skill；agent 调用时根据 mention 路由按需注入。' },
-    lessons:     { icon: '📚', title: 'Lessons 课程', desc: 'agent 失败时记录的踩坑与原因，供下次任务规划参考。' },
-    invocations: { icon: '⏱', title: '调用历史', desc: '所有 agent CLI 调用记录：耗时、状态、退出码、stderr。可定位疑难 case。' },
+    skills:      { icon: '🧩', title: 'Skills 路由', desc: '配置按需、常驻或手动加载，并按当前会话追溯每一次真实命中。' },
+    lessons:     { icon: '📚', title: 'Lessons 风险记忆', desc: '失败经验会在后续相似任务中作为风险上下文注入；任务删除后仍保留来源快照。' },
+    invocations: { icon: '⏱', title: '调用追踪', desc: '当前会话的 agent 调用：做了什么、属于哪个任务、用了哪些 Skill/Lesson、结果如何。' },
+    costs:       { icon: '💰', title: '任务成本账本', desc: '按任务/会话汇总调用次数、耗时、失败和估算 Token；通过 Gate 才计为已验收。' },
     gate:        { icon: '🚦', title: 'Reviewer Gate', desc: '任务完成后的人工通过 / 返工节点。后续将由 reviewer agent 自动审。' },
     subagents:   { icon: '⑂', title: '子代理运行', desc: '结构化 spawn_subagent 派生的运行记录、状态和结果。' },
     approvals:   { icon: '✓', title: '审批与审计', desc: '敏感操作必须由服务端签发审批，批准后的操作指纹必须完全匹配。' },
@@ -2664,6 +3349,13 @@ function renderHubSchedules() {
   });
 }
 
+const REVIEW_SCORECARD_LABELS = {
+  correctness: '结果正确',
+  completeness: '交付完整',
+  evidence: '证据充分',
+  safety: '风险可接受',
+};
+
 function renderHubGate() {
   const stats = gateStats(hubState.tasks);
   const gateTasks = [...hubState.tasks]
@@ -2683,18 +3375,34 @@ function renderHubGate() {
         ${gateTasks.length ? gateTasks.map(t => {
           const badge = gateBadge(t);
           const canReview = t.status === 'done' && t.gate_status !== 'passed';
-          return `<div class="hub-row">
+          const findings = Array.isArray(t.review_findings) ? t.review_findings : [];
+          const priorScorecard = t.review_scorecard && typeof t.review_scorecard === 'object'
+            ? Object.entries(REVIEW_SCORECARD_LABELS).map(([key, label]) => `${t.review_scorecard[key] ? '✓' : '○'} ${label}`).join(' · ')
+            : '';
+          return `<div class="hub-row gate-task-row">
             <div class="hub-row-main">
               <div class="hub-row-title">${esc(t.title || t.id)}</div>
               <div class="hub-row-meta">${esc(t.agent || 'unknown')} · ${esc(t.run_id || '无 run')} · ${esc(t.accept || '无验收说明')}</div>
+              ${t.review_status ? `<div class="gate-auto-review">
+                <strong>自动审查：${esc(t.review_status)}${Number.isFinite(Number(t.review_score)) ? ` · ${Number(t.review_score)} 分` : ''}</strong>
+                ${t.review_note ? `<span>${esc(t.review_note)}</span>` : ''}
+                ${findings.length ? `<ul>${findings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}
+              </div>` : ''}
               ${t.review_note ? `<div class="hub-row-meta">Gate 说明：${esc(t.review_note)}</div>` : ''}
+              ${canReview ? `<div class="gate-review-card" data-gate-card="${esc(t.id)}">
+                <div class="gate-scorecard-title">人工验收评分卡 <span>全部确认后才可通过</span></div>
+                <div class="gate-scorecard-options">
+                  ${Object.entries(REVIEW_SCORECARD_LABELS).map(([key, label]) => `<label><input type="checkbox" data-score-key="${key}"> ${label}</label>`).join('')}
+                </div>
+                <textarea class="gate-review-note" rows="2" placeholder="通过时可补充说明；返工时请写清需要修改的内容"></textarea>
+                <div class="gate-scorecard-actions">
+                  <button class="hub-mini-btn" data-hub-action="gate-pass" data-task-id="${esc(t.id)}" disabled>确认通过</button>
+                  <button class="hub-mini-btn danger" data-hub-action="gate-rework" data-task-id="${esc(t.id)}" disabled>要求返工</button>
+                </div>
+              </div>` : priorScorecard ? `<div class="gate-scorecard-history">${esc(priorScorecard)}</div>` : ''}
             </div>
             <div class="hub-row-side">
               <span class="hub-badge ${badge.tone}">${badge.text}</span>
-              ${canReview ? `<div class="hub-row-actions">
-                <button class="hub-mini-btn" data-hub-action="gate-pass" data-task-id="${esc(t.id)}">通过</button>
-                <button class="hub-mini-btn danger" data-hub-action="gate-rework" data-task-id="${esc(t.id)}">返工</button>
-              </div>` : ''}
             </div>
           </div>`;
         }).join('') : '<div class="hub-empty">暂无可审核任务。执行任务完成后，这里会出现 Gate 操作。</div>'}
@@ -2708,6 +3416,23 @@ function renderHubGate() {
       </div>
     </section>`;
   bindHubActions();
+  bindGateScorecards();
+}
+
+function bindGateScorecards() {
+  hubBody.querySelectorAll('.gate-review-card').forEach(card => {
+    const checks = [...card.querySelectorAll('[data-score-key]')];
+    const note = card.querySelector('.gate-review-note');
+    const pass = card.querySelector('[data-hub-action="gate-pass"]');
+    const rework = card.querySelector('[data-hub-action="gate-rework"]');
+    const update = () => {
+      pass.disabled = !checks.every(input => input.checked);
+      rework.disabled = !note.value.trim();
+    };
+    checks.forEach(input => input.addEventListener('change', update));
+    note.addEventListener('input', update);
+    update();
+  });
 }
 
 function renderHubAgents() {
@@ -2745,7 +3470,14 @@ function renderHubSkills() {
   function skillCard(skill, { showMounts = false, showInstall = false, installed = false } = {}) {
     const isEnabled = skill.enabled !== false;
     const isSelected = selectedNames.has(skill.name);
+    const loadingLabels = { on_demand: '按需命中', always: '常驻加载', manual: '手动指定' };
     const mountsHtml = showMounts ? `
+      <div class="skill-install-tip">加载策略：
+        <select class="skill-loading-select" data-skill="${esc(skill.name)}">
+          ${Object.entries(loadingLabels).map(([value, label]) => `<option value="${value}" ${skill.loading === value ? 'selected' : ''}>${label}</option>`).join('')}
+        </select>
+        <span>手动模式用 @skill:${esc(skill.name)} 指定</span>
+      </div>
       <div class="skill-mounts">
         ${mountKeys.map(k => `
           <label class="skill-mount-label">
@@ -2781,21 +3513,29 @@ function renderHubSkills() {
     <div class="hub-kpi-grid">
       <div class="hub-kpi"><div class="hub-kpi-label">技能总数</div><div class="hub-kpi-value">${hubState.skills.length}</div></div>
       <div class="hub-kpi"><div class="hub-kpi-label">分类</div><div class="hub-kpi-value">${categories.length}</div></div>
-      <div class="hub-kpi"><div class="hub-kpi-label">本次命中</div><div class="hub-kpi-value">${hubState.selectedSkills.length}</div></div>
-      <div class="hub-kpi"><div class="hub-kpi-label">加载方式</div><div class="hub-kpi-value">按需</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">当前会话命中</div><div class="hub-kpi-value">${hubState.skillUsage.length}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">加载策略</div><div class="hub-kpi-value">3 种</div></div>
     </div>
 
     <div class="skill-tabs">
-      <button class="skill-tab active" data-stab="loaded">本次加载 <span class="skill-tab-count">${hubState.selectedSkills.length}</span></button>
+      <button class="skill-tab active" data-stab="loaded">命中溯源 <span class="skill-tab-count">${hubState.skillUsage.length}</span></button>
+      <button class="skill-tab" data-stab="preview-hit">当前输入预览 <span class="skill-tab-count">${hubState.selectedSkills.length}</span></button>
       <button class="skill-tab" data-stab="installed">已安装 <span class="skill-tab-count">${hubState.skills.length}</span></button>
       <button class="skill-tab" data-stab="market">🛒 市场</button>
       <button class="skill-tab" data-stab="preview">Prompt 预览</button>
     </div>
 
     <div class="skill-tab-panel" data-spanel="loaded">
-      ${hubState.selectedSkills.length
-        ? hubState.selectedSkills.map(s => skillCard(s, { showMounts: false })).join('')
-        : '<div class="hub-empty">当前输入没有匹配到 skill。输入目标或切到拆任务模式再打开 Hub。</div>'}
+      ${hubState.skillUsage.length ? hubState.skillUsage.slice(0, 30).map(u => `<div class="hub-row">
+        <div class="hub-row-main"><div class="hub-row-title">${esc(u.skill)} · ${esc(u.agent || 'unknown')}</div>
+        <div class="hub-row-meta">${esc(u.mode || 'call')} · ${esc(u.task_title || u.task_id || '会话调用')} · invocation ${esc(u.invocation_id)}</div>
+        <div class="hub-row-meta">${esc(u.timestamp || '')} · ${esc(u.loading || 'on_demand')} / ${esc(u.reason || 'matched')}</div></div>
+        <span class="hub-badge ${u.status === 'success' ? 'ok' : u.status === 'interrupted' ? 'warn' : 'err'}">${esc(u.status || 'unknown')}</span>
+      </div>`).join('') : '<div class="hub-empty">当前会话还没有真实 Skill 调用记录。这里不会再用输入框预估值冒充命中次数。</div>'}
+    </div>
+
+    <div class="skill-tab-panel hidden" data-spanel="preview-hit">
+      ${hubState.selectedSkills.length ? hubState.selectedSkills.map(s => skillCard(s, { showMounts: false })).join('') : '<div class="hub-empty">当前输入没有匹配到 Skill。</div>'}
     </div>
 
     <div class="skill-tab-panel hidden" data-spanel="installed">
@@ -2959,6 +3699,16 @@ function renderHubSkills() {
     renderMarketList(marketCache[currentMarketSrc].skills || [], listEl, e.target.value);
   });
 
+  hubBody.querySelectorAll('.skill-loading-select').forEach(select => {
+    select.onchange = async () => {
+      await fetch(`/api/skills/${encodeURIComponent(select.dataset.skill)}/loading`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ loading: select.value }),
+      });
+      await loadHub();
+    };
+  });
+
   prefetchSkillRegistry('myteam-official');
   prefetchSkillRegistry('clowder-ai');
 }
@@ -2977,10 +3727,10 @@ function renderHubLessons() {
       <div class="hub-kpi"><div class="hub-kpi-label">Lessons</div><div class="hub-kpi-value">${lessons.length}</div></div>
       <div class="hub-kpi"><div class="hub-kpi-label">最近记录</div><div class="hub-kpi-value">${recent.length}</div></div>
       <div class="hub-kpi"><div class="hub-kpi-label">主要 Agent</div><div class="hub-kpi-value">${esc(topAgent?.[0] || '-')}</div></div>
-      <div class="hub-kpi"><div class="hub-kpi-label">来源</div><div class="hub-kpi-value">失败</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">协作作用</div><div class="hub-kpi-value">风险注入</div></div>
     </div>
     <section class="hub-section">
-      <div class="hub-section-title">踩坑记录 <span class="hub-mini-note">来自 .myteam/lessons.jsonl</span></div>
+      <div class="hub-section-title">踩坑记录 <span class="hub-mini-note">相似任务执行前自动检索 Top 3，并写入调用的 lesson_ids</span></div>
       <div class="hub-list">
         ${recent.length ? recent.map(lesson => {
           const when = lesson.timestamp ? formatTime(lesson.timestamp) : '-';
@@ -2993,9 +3743,10 @@ function renderHubLessons() {
               <div class="hub-row-meta">${esc(error.length > 150 ? `${error.slice(0, 150)}...` : error)}</div>
             </div>
             <div class="hub-row-side">
-              <span class="hub-badge err">lesson</span>
+              <span class="hub-badge ${lesson.source_task_exists ? 'warn' : 'info'}">${lesson.source_task_exists ? '已关联' : '快照保留'}</span>
               ${taskKey ? `<div class="hub-row-actions">
-                <button class="hub-mini-btn" data-hub-action="lesson-task" data-task-query="${esc(taskKey)}">查看任务</button>
+                ${lesson.source_task_exists ? `<button class="hub-mini-btn" data-hub-action="lesson-task" data-task-query="${esc(taskKey)}">查看任务</button>` : `<button class="hub-mini-btn" data-hub-action="lesson-snapshot" data-lesson-id="${esc(lesson.id)}">查看快照</button>`}
+                ${lesson.session_id ? `<button class="hub-mini-btn" data-hub-action="lesson-session" data-session-id="${esc(lesson.session_id)}">关联对话</button>` : ''}
               </div>` : ''}
             </div>
           </div>`;
@@ -3007,8 +3758,9 @@ function renderHubLessons() {
 
 function renderHubInvocations() {
   const summary = hubState.invocationSummary || { total: 0, success: 0, failed: 0, interrupted: 0, avgDurationMs: 0, byAgent: {} };
-  const recent = hubState.invocations.slice(0, 8);
+  const recent = hubState.invocations.slice(0, 30);
   const agentRows = Object.entries(summary.byAgent || {});
+  const statusLabel = { success: '已完成', failed: '失败', interrupted: '已中断', running: '执行中' };
   hubBody.innerHTML = `
     <div class="hub-kpi-grid">
       <div class="hub-kpi"><div class="hub-kpi-label">调用总数</div><div class="hub-kpi-value">${summary.total || 0}</div></div>
@@ -3029,19 +3781,49 @@ function renderHubInvocations() {
       </div>
     </section>
     <section class="hub-section">
-      <div class="hub-section-title">最近调用 <span class="hub-mini-note">来自 .myteam/invocations.jsonl</span></div>
+      <div class="hub-section-title">当前会话调用链 <span class="hub-mini-note">点击记录展开输入/输出摘要；旧记录可能暂无关联字段</span></div>
       <div class="hub-list">
-        ${recent.length ? recent.map(i => `<div class="hub-row">
+        ${recent.length ? recent.map(i => `<div class="hub-row hub-invocation-row" data-invocation-id="${esc(i.id)}">
           <div class="hub-row-main">
-            <div class="hub-row-title">${esc(i.agent)} · ${esc(i.label || 'call')}</div>
-            <div class="hub-row-meta">${esc(i.started_at || '')} · ${formatDuration(i.duration_ms)} · prompt ${i.prompt_chars || 0} 字符 · 输出 ${i.output_chars || 0} 字符</div>
+            <div class="hub-row-title">${esc(i.agent)} · ${esc(i.mode || i.label || 'call')} ${i.task_title ? `· ${esc(i.task_title)}` : ''}</div>
+            <div class="hub-row-meta">${esc(i.started_at || '')} · ${formatDuration(i.duration_ms)} · 输入约 ${i.input_tokens_est || Math.ceil((i.prompt_chars || 0) / 4)} token · 输出约 ${i.output_tokens_est || Math.ceil((i.output_chars || 0) / 4)} token</div>
+            <div class="hub-row-meta">session ${esc(i.session_id || '旧记录未关联')} · task ${esc(i.task_id || '-')} · run ${esc(i.run_id || '-')} · invocation ${esc(i.id)}</div>
+            ${(i.skills || []).length ? `<div class="hub-row-meta">Skills：${i.skills.map(s => esc(s.name || s)).join('、')}</div>` : ''}
+            ${(i.lesson_ids || []).length ? `<div class="hub-row-meta">Lessons：${i.lesson_ids.map(esc).join('、')}</div>` : ''}
             ${i.error ? `<div class="hub-row-meta">${esc(i.error)}</div>` : ''}
+            <div class="hub-trace-preview hidden"><strong>输入摘要</strong>\n${esc(i.prompt_preview || '旧记录未保存')}\n\n<strong>输出摘要</strong>\n${esc(i.output_preview || i.stderr || '暂无输出')}</div>
           </div>
-          <span class="hub-badge ${i.status === 'success' ? 'ok' : i.status === 'interrupted' ? 'warn' : 'err'}">${esc(i.status || 'unknown')}</span>
+          <span class="hub-badge ${i.status === 'success' ? 'ok' : i.status === 'interrupted' ? 'warn' : 'err'}">${esc(statusLabel[i.status] || i.status || '未知')}</span>
         </div>`).join('') : '<div class="hub-empty">暂无调用记录。</div>'}
       </div>
     </section>
     `;
+  hubBody.querySelectorAll('.hub-invocation-row').forEach(row => {
+    row.onclick = () => row.querySelector('.hub-trace-preview')?.classList.toggle('hidden');
+  });
+}
+
+function renderHubCosts() {
+  const ledger = hubState.costLedger || { rows: [], summary: {} };
+  const summary = ledger.summary || {};
+  hubBody.innerHTML = `
+    <div class="hub-kpi-grid">
+      <div class="hub-kpi"><div class="hub-kpi-label">调用次数</div><div class="hub-kpi-value">${summary.calls || 0}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">总耗时</div><div class="hub-kpi-value">${formatDuration(summary.duration_ms || 0)}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">估算 Token</div><div class="hub-kpi-value">${((summary.input_tokens_est || 0) + (summary.output_tokens_est || 0)).toLocaleString()}</div></div>
+      <div class="hub-kpi"><div class="hub-kpi-label">已验收任务</div><div class="hub-kpi-value">${summary.accepted_tasks || 0}</div></div>
+    </div>
+    <section class="hub-section">
+      <div class="hub-section-title">当前会话成本账本 <span class="hub-mini-note">${esc(ledger.estimation || '')}</span></div>
+      <div class="hub-list">${(ledger.rows || []).length ? ledger.rows.map(row => `<div class="hub-row">
+        <div class="hub-row-main">
+          <div class="hub-row-title">${esc(row.task_title || (row.task_id ? `任务 ${row.task_id}` : '会话调用'))}</div>
+          <div class="hub-row-meta">${row.calls} 次调用 · ${formatDuration(row.duration_ms)} · 失败 ${row.failures} · 输入约 ${row.input_tokens_est} / 输出约 ${row.output_tokens_est} token</div>
+          <div class="hub-row-meta">task ${esc(row.task_id || '-')} · run ${esc(row.run_id || '-')} · session ${esc(row.session_id || '-')}</div>
+        </div>
+        <span class="hub-badge ${row.accepted ? 'ok' : row.failures ? 'err' : 'warn'}">${row.accepted ? '已验收' : row.status === 'conversation' ? '会话' : '未验收'}</span>
+      </div>`).join('') : '<div class="hub-empty">当前会话尚无可核算调用。新调用会自动记账。</div>'}</div>
+    </section>`;
 }
 
 function renderHubTasks() {
@@ -3092,6 +3874,15 @@ function bindHubActions() {
       if (action === 'lesson-task') {
         await focusTasks(btn.dataset.taskQuery || '');
       }
+      if (action === 'lesson-snapshot') {
+        const lesson = (hubState.lessons || []).find(item => item.id === btn.dataset.lessonId);
+        const snapshot = lesson?.source_task_snapshot;
+        alert(snapshot ? `任务：${snapshot.title || snapshot.id}\n目标：${snapshot.goal || '-'}\n验收：${snapshot.accept || '-'}\n状态：${snapshot.status || '-'}` : '该历史记录暂无快照。');
+      }
+      if (action === 'lesson-session' && btn.dataset.sessionId) {
+        closeHub();
+        await switchSession(btn.dataset.sessionId);
+      }
       if (action === 'skill-import') {
         await openSkillImportDialog();
       }
@@ -3127,12 +3918,21 @@ async function openSkillImportDialog() {
 
 async function submitGateDecision(taskId, decision, btn) {
   if (!taskId) return;
+  const card = btn.closest('.gate-review-card');
+  const note = card?.querySelector('.gate-review-note')?.value.trim() || '';
+  const scorecard = card ? Object.fromEntries(
+    [...card.querySelectorAll('[data-score-key]')].map(input => [input.dataset.scoreKey, input.checked])
+  ) : null;
+  if (decision === 'rework' && !note) {
+    showToast('请先写清返工内容，让下一位 Agent 知道要修改什么。', 'warn');
+    return;
+  }
   btn.disabled = true;
   try {
     const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/gate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ decision }),
+      body: JSON.stringify({ decision, note, scorecard }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Gate 操作失败');
@@ -3847,6 +4647,7 @@ drawerSaveBtn.onclick = async () => {
 // ── Session 管理 ──────────────────────────────────────────────
 let currentSessionId = null;
 let sessionStateById = new Map();
+const HIDDEN_DRAFT_SESSION_KEY = 'myteam.hiddenDraftSessionId';
 const HISTORY_PAGE_SIZE = 20;
 let historyPage = { hasMore: false, nextBefore: null, loading: false };
 
@@ -3860,11 +4661,8 @@ function clearChatArea() {
   const w = document.createElement('div');
   w.className = 'chat-welcome';
   w.id = 'chatWelcome';
-  w.innerHTML = `
-    <div class="emoji">🤝</div>
-    <h2>欢迎来到 myteam</h2>
-    <p>直接发消息和 agent 对话，用 <code style="background:var(--surface2);padding:1px 5px;border-radius:4px;font-size:12px;">@claude</code>、<code style="background:var(--surface2);padding:1px 5px;border-radius:4px;font-size:12px;">@codex</code> 或 <code style="background:var(--surface2);padding:1px 5px;border-radius:4px;font-size:12px;">@kimi</code> 指定 agent。<br>切换到「拆任务」模式可以把目标分解成可执行清单。</p>`;
   chatEl.appendChild(w);
+  renderWelcome(w);
   window.welcome = w;
 }
 
@@ -3976,8 +4774,12 @@ async function loadSessions() {
   try {
     const { activeId, sessions } = await fetch('/api/sessions').then(r => r.json());
     currentSessionId = activeId;
-    sessionStateById = new Map(sessions.map(session => [session.id, session.run_state || { status: 'idle' }]));
-    renderSessionList(sessions, activeId);
+    const hiddenDraftId = localStorage.getItem(HIDDEN_DRAFT_SESSION_KEY) || '';
+    const hiddenDraft = sessions.find(session => session.id === hiddenDraftId);
+    if (!hiddenDraft || hiddenDraft.message_count > 0) localStorage.removeItem(HIDDEN_DRAFT_SESSION_KEY);
+    const visibleSessions = sessions.filter(session => session.id !== hiddenDraftId || session.message_count > 0);
+    sessionStateById = new Map(visibleSessions.map(session => [session.id, session.run_state || { status: 'idle' }]));
+    renderSessionList(visibleSessions, activeId);
     return activeId;
   } catch (err) {
     console.error('loadSessions failed:', err);
@@ -4019,6 +4821,7 @@ function scrollToBottomAfterLayout() {
 }
 
 async function createSession() {
+  localStorage.removeItem(HIDDEN_DRAFT_SESSION_KEY);
   const { session } = await fetch('/api/sessions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -4034,9 +4837,13 @@ async function createSession() {
 }
 
 async function deleteSession(sessionId) {
+  const deletingLastVisibleSession = sessionStateById.size === 1;
   const { activeId, trashed } = await fetch(`/api/sessions?id=${sessionId}`, {
     method: 'DELETE',
   }).then(r => r.json());
+  if (deletingLastVisibleSession && activeId && activeId !== sessionId) {
+    localStorage.setItem(HIDDEN_DRAFT_SESSION_KEY, activeId);
+  }
   if (sessionId === currentSessionId) {
     currentSessionId = activeId;
     clearChatArea();
@@ -4048,6 +4855,7 @@ async function deleteSession(sessionId) {
 }
 
 function showUndoToast(sessionId) {
+  document.querySelectorAll('.undo-toast').forEach(existing => existing.remove());
   const toast = document.createElement('div');
   toast.className = 'undo-toast';
   toast.innerHTML = `<span>对话已删除</span><button class="undo-btn">撤销</button>`;
@@ -4176,6 +4984,89 @@ function renderSessionRecovery() {
   scrollChat();
 }
 
+let runningTaskCardTimer = null;
+
+function runningPhaseLabel(phase = '') {
+  return ({ starting: '正在启动 Agent', waiting: '等待 Agent 输出', thinking: '正在分析', streaming: '正在生成结果', running: '正在调用工具', working: '正在处理工具结果', completed: '工具调用完成' })[phase] || '任务执行中';
+}
+
+function updateSessionRunningTaskCard({ phase, statusText, currentActivity, outputChars, thinkingChars, lastActivityAt } = {}) {
+  const card = chatEl.querySelector('.session-running-task');
+  if (!card) return;
+  if (outputChars !== undefined) card.dataset.outputChars = String(outputChars);
+  if (thinkingChars !== undefined) card.dataset.thinkingChars = String(thinkingChars);
+  if (phase) card.dataset.phase = phase;
+  const status = currentActivity?.summary || statusText;
+  if (status) card.querySelector('.session-running-status').textContent = status;
+  if (phase) card.querySelector('.session-running-phase').textContent = runningPhaseLabel(phase);
+  card.querySelector('.session-running-metrics').textContent = `输出 ${Number(card.dataset.outputChars || 0).toLocaleString()} 字符 · 分析 ${Number(card.dataset.thinkingChars || 0).toLocaleString()} 字符`;
+  if (lastActivityAt) card.querySelector('.session-running-active').textContent = `最后活跃 ${formatTime(lastActivityAt)}`;
+}
+
+function bumpSessionRunningTaskMetric(kind, amount) {
+  const card = chatEl.querySelector('.session-running-task');
+  if (!card) return;
+  const key = kind === 'thinking' ? 'thinkingChars' : 'outputChars';
+  updateSessionRunningTaskCard({
+    phase: kind === 'thinking' ? 'thinking' : 'streaming',
+    statusText: kind === 'thinking' ? 'Agent 正在分析任务' : 'Agent 正在生成结果',
+    [key]: Number(card.dataset[key] || 0) + Number(amount || 0),
+    lastActivityAt: new Date().toISOString(),
+  });
+}
+
+function stopRunningTaskCardTimer() {
+  if (runningTaskCardTimer) clearInterval(runningTaskCardTimer);
+  runningTaskCardTimer = null;
+}
+
+function renderSessionRunningTask(task, run = {}) {
+  stopRunningTaskCardTimer();
+  chatEl.querySelector('.session-running-task')?.remove();
+  if (!task || task.session_id !== currentSessionId) return;
+  hideWelcome();
+  const card = document.createElement('div');
+  card.className = 'session-running-task';
+  card.dataset.taskId = task.id;
+  card.dataset.outputChars = String(run.outputChars || 0);
+  card.dataset.thinkingChars = String(run.thinkingChars || 0);
+  const started = Date.parse(task.started_at || run.startedAt || '') || Date.now();
+  card.innerHTML = `
+    <span class="session-running-pulse"></span>
+    <div class="session-running-copy">
+      <strong>任务正在后台执行</strong>
+      <span>${esc(task.title || run.taskTitle || task.id)} · ${esc(task.executed_by || task.agent || run.agentKey || '')}</span>
+      <span class="session-running-status">${esc(run.statusText || runningPhaseLabel(run.phase))}</span>
+      <small><span class="session-running-phase">${esc(runningPhaseLabel(run.phase))}</span> · <span class="session-running-metrics">输出 ${Number(run.outputChars || 0).toLocaleString()} 字符 · 分析 ${Number(run.thinkingChars || 0).toLocaleString()} 字符</span></small>
+      <small>刷新页面不会中断任务 · 已运行 <span class="session-running-elapsed">${esc(formatDuration(Date.now() - started))}</span> · <span class="session-running-active">${run.lastActivityAt ? `最后活跃 ${formatTime(run.lastActivityAt)}` : '等待状态更新'}</span></small>
+    </div>
+    <button type="button">查看任务</button>`;
+  card.querySelector('button').onclick = () => document.getElementById('tasksExpandBtn')?.click();
+  chatEl.appendChild(card);
+  updateSessionRunningTaskCard(run);
+  let pollTick = 0;
+  runningTaskCardTimer = setInterval(async () => {
+    if (!card.isConnected || currentSessionId !== task.session_id) return stopRunningTaskCardTimer();
+    card.querySelector('.session-running-elapsed').textContent = formatDuration(Date.now() - started);
+    pollTick += 1;
+    if (pollTick % 2) return;
+    try {
+      const { running = [] } = await fetch('/api/running').then(response => response.json());
+      const active = running.find(item => item.sessionId === currentSessionId && (!item.taskId || item.taskId === task.id));
+      if (active) updateSessionRunningTaskCard(active);
+      else {
+        const { tasks = [] } = await fetch('/api/tasks').then(response => response.json());
+        if (!tasks.some(item => item.id === task.id && item.status === 'in_progress')) {
+          card.remove();
+          stopRunningTaskCardTimer();
+          loadTasks();
+        }
+      }
+    } catch {}
+  }, 1000);
+  scrollChat();
+}
+
 async function waitForSessionRecovery(attempts = 12) {
   for (let attempt = 0; attempt < attempts; attempt++) {
     await loadSessions();
@@ -4208,6 +5099,22 @@ function renderAssistantHistoryBubble(h) {
 function renderHistoryEntry(h, prepend = false) {
   if (h.role === 'user') {
     return addUserBubble(h.text, { prepend, scroll: false, attachments: h.attachments || [] });
+  }
+  if (h.role === 'assistant' && h.kind === 'task-review') {
+    hideWelcome();
+    const card = createTaskReviewCard({
+      id: h.taskId,
+      title: h.taskTitle,
+      reviewer: h.agent,
+      ...(h.review || {}),
+    });
+    if (prepend) {
+      const pager = document.getElementById('historyPager');
+      chatEl.insertBefore(card, pager ? pager.nextSibling : chatEl.firstElementChild);
+    } else {
+      chatEl.appendChild(card);
+    }
+    return card;
   }
   if (h.role === 'assistant') {
     hideWelcome();
@@ -4309,7 +5216,10 @@ async function loadHistory({ older = false } = {}) {
     }
     historyPage.hasMore = Boolean(page?.hasMore);
     historyPage.nextBefore = page?.nextBefore ?? null;
-    if (!older) renderSessionRecovery();
+    if (!older) {
+      renderSessionRecovery();
+      await restoreWorkflowCard(currentSessionId);
+    }
   } catch {
     // Chat still works if history cannot be loaded.
   } finally {
@@ -4320,8 +5230,8 @@ async function loadHistory({ older = false } = {}) {
 
 (async function init() {
   await loadStatus();
-  loadTasks();
   await loadSessions();
+  await loadTasks();
   await loadHistory();
   await restoreRunningState();
   loadArtifacts();
@@ -4335,7 +5245,8 @@ async function reconnectSessionStream(sessionId, agentKey, taskTitle) {
   // only reconnect for the currently visible session
   if (sessionId !== currentSessionId) return;
   try {
-    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/stream`);
+    // History has already restored persisted parts; only subscribe to new live events.
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/stream?replay=0`);
     if (!res.ok || !res.body) return;
     const reader = res.body.getReader();
     const dec = new TextDecoder();
@@ -4364,13 +5275,32 @@ async function reconnectSessionStream(sessionId, agentKey, taskTitle) {
         try { parsed = JSON.parse(data); } catch { continue; }
         if (event === 'nostream') { break; }
         if (event === 'start') { ensureBubble(parsed.agent || agentKey); continue; }
-        if (event === 'status') { ensureBubble(parsed.agent || agentKey); updateAgentStatus(parsed.text, parsed.phase); continue; }
+        if (event === 'status') {
+          ensureBubble(parsed.agent || agentKey);
+          updateAgentStatus(parsed.text, parsed.phase);
+          updateSessionRunningTaskCard({ statusText: parsed.text, phase: parsed.phase, lastActivityAt: new Date().toISOString() });
+          const workflowRunId = rememberedSessionWorkflow(sessionId);
+          if (workflowRunId) renderWorkflowCard({ workflowRunId, status: 'running', live: { active: true, statusText: parsed.text, phase: parsed.phase, agent: parsed.agent || agentKey, lastActivityAt: new Date().toISOString() } });
+          continue;
+        }
         if (event === 'part') { ensureBubble(parsed.agent || agentKey); appendTurnPart(parsed); continue; }
-        if (event === 'chunk' && parsed.text) { ensureBubble(parsed.agent || agentKey); appendTyping(parsed.text); bumpRunningChars('chunk', (parsed.text||'').length); continue; }
-        if (event === 'thinking' && parsed.text) { appendThinking(parsed.text); bumpRunningChars('thinking', (parsed.text||'').length); continue; }
-        if (event === 'activity') { appendAgentActivity(parsed); continue; }
-        if (event === 'done') { finishTyping(collectFinishStats()); hideRunningPanel(); loadSessions(); break; }
-        if (event === 'error') { finishTyping(); hideRunningPanel(); addSystemMsg(`? ${parsed.message||''}`); break; }
+        if (event === 'chunk' && parsed.text) { ensureBubble(parsed.agent || agentKey); appendTyping(parsed.text); bumpRunningChars('chunk', (parsed.text||'').length); bumpSessionRunningTaskMetric('output', (parsed.text || '').length); continue; }
+        if (event === 'thinking' && parsed.text) { appendThinking(parsed.text); bumpRunningChars('thinking', (parsed.text||'').length); bumpSessionRunningTaskMetric('thinking', (parsed.text || '').length); continue; }
+        if (event === 'activity') {
+          appendAgentActivity(parsed);
+          updateSessionRunningTaskCard({ phase: parsed.phase || 'running', currentActivity: parsed, lastActivityAt: new Date().toISOString() });
+          const workflowRunId = rememberedSessionWorkflow(sessionId);
+          const activityText = parsed.summary ? `${parsed.name || '工具'}：${parsed.summary}` : `${parsed.name || '工具'} ${parsed.phase === 'completed' ? '已完成' : '运行中'}`;
+          if (workflowRunId) renderWorkflowCard({ workflowRunId, status: 'running', live: { active: true, statusText: activityText, phase: parsed.phase || 'tool', agent: agentKey, currentActivity: parsed, lastActivityAt: new Date().toISOString() } });
+          continue;
+        }
+        if (event === 'task-review-done') { addTaskReviewCard(parsed); loadTasks(); continue; }
+        if (event === 'task-review-retrying') { updateSessionRunningTaskCard({ statusText: `Reviewer 正在修复输出格式（${parsed.attempt}/${parsed.maxAttempts}）`, phase: 'working', lastActivityAt: new Date().toISOString() }); continue; }
+        if (event === 'task-review-repair') { addTaskReviewCard({ ...parsed, verdict: 'agent_repair_pending' }); loadTasks(); continue; }
+        if (event === 'task-review-skip') { addTaskReviewCard({ ...parsed, verdict: 'skipped', reason: '没有可用的 Reviewer Agent' }); loadTasks(); continue; }
+        if (event === 'task-review-failed') { addTaskReviewCard({ ...parsed, verdict: 'failed', reason: parsed.error || parsed.reason || '自动验收失败' }); loadTasks(); continue; }
+        if (event === 'done') { finishTyping(collectFinishStats()); hideRunningPanel(); stopRunningTaskCardTimer(); chatEl.querySelector('.session-running-task')?.remove(); loadTasks(); loadSessions(); break; }
+        if (event === 'error') { finishTyping(); hideRunningPanel(); stopRunningTaskCardTimer(); chatEl.querySelector('.session-running-task')?.remove(); addSystemMsg(`? ${parsed.message||''}`); break; }
       }
     }
   } catch (e) {
@@ -4385,33 +5315,45 @@ async function restoreRunningState() {
       fetch('/api/running'),
       fetch('/api/tasks')
     ]);
-    const { running = [] } = await runningRes.json();
+    const { running = [], dispatches = [] } = await runningRes.json();
     const { tasks = [] } = await tasksRes.json();
+    for (const dispatch of dispatches) {
+      if (dispatch.workflowRunId) {
+        rememberSessionWorkflow(dispatch.sessionId, dispatch.workflowRunId);
+        if (dispatch.sessionId === currentSessionId) {
+          await refreshWorkflowCard(dispatch.workflowRunId, { quiet: true });
+        }
+      }
+      if (running.some(item => item.sessionId === dispatch.sessionId)) continue;
+      const nextTask = tasks.find(task => task.session_id === dispatch.sessionId && task.status === 'pending');
+      running.push({
+        sessionId: dispatch.sessionId,
+        clientRunId: dispatch.clientRunId,
+        agentKey: dispatch.agentKey || nextTask?.agent || '',
+        mode: 'dispatch',
+        taskId: dispatch.taskId || nextTask?.id || '',
+        taskTitle: dispatch.taskTitle || nextTask?.title || '正在切换到下一项任务',
+        workflowRunId: dispatch.workflowRunId || '',
+        phase: dispatch.phase || 'waiting',
+        statusText: dispatch.statusText || '当前批次仍在执行，正在切换任务',
+        startedAt: dispatch.startedAt,
+        lastActivityAt: dispatch.lastActivityAt || null,
+      });
+    }
     const inProgress = tasks.filter(t => t.status === 'in_progress');
     for (const t of inProgress) {
-      if (!running.some(r => r.sessionId === t.run_id)) {
+      const existing = running.find(r => r.sessionId === t.session_id && (!r.taskId || r.taskId === t.id));
+      if (existing) {
+        existing.taskId ||= t.id;
+        if (!existing.taskTitle || existing.taskTitle === existing.taskId) existing.taskTitle = t.title;
+      } else {
         running.push({
-          sessionId: t.run_id,
+          sessionId: t.session_id,
+          taskId: t.id,
           agentKey: t.executed_by || t.agent,
           mode: 'dispatch',
           taskTitle: t.title,
           startedAt: t.started_at || t.updated_at || new Date().toISOString(),
-        });
-      }
-    }
-    const activeRunIds = new Set(running.map(r => r.sessionId));
-    const doneTasks = tasks.filter(t => t.status === 'done');
-    for (const d of doneTasks) {
-      const pendingInRun = tasks.filter(t => t.run_id === d.run_id && t.status === 'pending');
-      if (pendingInRun.length > 0 && !activeRunIds.has(d.run_id)) {
-        activeRunIds.add(d.run_id);
-        const firstPending = pendingInRun[0];
-        running.push({
-          sessionId: firstPending.run_id,
-          agentKey: firstPending.agent,
-          mode: 'dispatch',
-          taskTitle: firstPending.title,
-          startedAt: firstPending.started_at || firstPending.updated_at || new Date().toISOString(),
         });
       }
     }
@@ -4431,6 +5373,26 @@ async function restoreRunningState() {
       
       // 如果是当前 session，恢复 runningState 面板
       if (r.sessionId === currentSessionId) {
+        const activeTask = tasks.find(task => task.id === r.taskId)
+          || inProgress.find(task => task.session_id === currentSessionId);
+        const workflowRunId = r.workflowRunId || rememberedSessionWorkflow(currentSessionId);
+        if (workflowRunId) renderWorkflowCard({
+          workflowRunId,
+          status: 'running',
+          task: activeTask || null,
+          live: {
+            active: true,
+            statusText: r.statusText || `${r.agentKey || 'Agent'} 正在执行「${r.taskTitle || activeTask?.title || ''}」`,
+            phase: r.phase || 'working',
+            agent: r.agentKey || activeTask?.agent || '',
+            currentActivity: r.currentActivity || null,
+            startedAt: r.startedAt || null,
+            lastActivityAt: r.lastActivityAt || null,
+            outputChars: Number(r.outputChars || 0),
+            thinkingChars: Number(r.thinkingChars || 0),
+          },
+        });
+        renderSessionRunningTask(activeTask, r);
         showRunningPanel({
           agent: r.agentKey,
           mode: r.mode,
@@ -4471,12 +5433,65 @@ const artifactsPreviewTitle = document.getElementById('artifactsPreviewTitle');
 const artifactsPreviewContent = document.getElementById('artifactsPreviewContent');
 const artifactsCopyBtn = document.getElementById('artifactsCopyBtn');
 const artifactsOpenBtn = document.getElementById('artifactsOpenBtn');
+const artifactsSessionName = document.getElementById('artifactsSessionName');
+const artifactsResizeHandle = document.getElementById('artifactsResizeHandle');
 
 let apVisible = false;
 let apActiveTab = 'chat'; // 'chat' | 'workspace'
 let apCurrentArtifact = null;
 let apArtifacts = [];
 let apWsFiles = [];
+
+const AP_PANEL_WIDTH_KEY = 'myteam.artifactsPanelWidth';
+function setArtifactsPanelWidth(width) {
+  const min = 420;
+  const max = Math.max(min, window.innerWidth - 280);
+  const next = Math.max(min, Math.min(max, Number(width) || 0));
+  document.documentElement.style.setProperty('--files-panel-width', `${next}px`);
+  return next;
+}
+const savedArtifactsPanelWidth = Number(localStorage.getItem(AP_PANEL_WIDTH_KEY));
+if (savedArtifactsPanelWidth > 0 && window.innerWidth > 720) setArtifactsPanelWidth(savedArtifactsPanelWidth);
+
+artifactsResizeHandle?.addEventListener('pointerdown', event => {
+  if (window.innerWidth <= 720) return;
+  event.preventDefault();
+  artifactsResizeHandle.setPointerCapture(event.pointerId);
+  artifactsPanel.classList.add('resizing');
+  document.body.classList.add('artifacts-resizing');
+  const resize = moveEvent => setArtifactsPanelWidth(window.innerWidth - moveEvent.clientX);
+  const finish = upEvent => {
+    const width = setArtifactsPanelWidth(window.innerWidth - upEvent.clientX);
+    localStorage.setItem(AP_PANEL_WIDTH_KEY, String(width));
+    artifactsPanel.classList.remove('resizing');
+    document.body.classList.remove('artifacts-resizing');
+    artifactsResizeHandle.removeEventListener('pointermove', resize);
+    artifactsResizeHandle.removeEventListener('pointerup', finish);
+    artifactsResizeHandle.removeEventListener('pointercancel', finish);
+  };
+  artifactsResizeHandle.addEventListener('pointermove', resize);
+  artifactsResizeHandle.addEventListener('pointerup', finish);
+  artifactsResizeHandle.addEventListener('pointercancel', finish);
+});
+artifactsResizeHandle?.addEventListener('dblclick', () => {
+  document.documentElement.style.removeProperty('--files-panel-width');
+  localStorage.removeItem(AP_PANEL_WIDTH_KEY);
+});
+window.addEventListener('resize', () => {
+  const saved = Number(localStorage.getItem(AP_PANEL_WIDTH_KEY));
+  if (saved > 0 && window.innerWidth > 720) {
+    const width = setArtifactsPanelWidth(saved);
+    localStorage.setItem(AP_PANEL_WIDTH_KEY, String(width));
+  }
+});
+
+function resetArtifactPreview(message = '选择左侧文件查看内容') {
+  apCurrentArtifact = null;
+  artifactsPreviewHeader.classList.add('hidden');
+  artifactsPreviewTitle.textContent = '';
+  artifactsOpenBtn.style.display = 'none';
+  artifactsPreviewContent.innerHTML = `<div class="artifacts-empty" style="padding:24px">${esc(message)}</div>`;
+}
 
 // ── 面板开关 ─────────────────────────────────────────────────
 function openArtifactsPanel() {
@@ -4506,7 +5521,7 @@ artifactsPanel.querySelectorAll('.ap-tab').forEach(btn => {
     artifactsPanel.querySelectorAll('.ap-tab').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     apActiveTab = btn.dataset.aptab;
-    apCurrentArtifact = null;
+    resetArtifactPreview(apActiveTab === 'chat' ? '本次对话暂无文件' : '工作区暂无未归属文件');
     renderArtifactList();
     if (apActiveTab === 'chat' && apArtifacts.length) selectArtifact(apArtifacts[0]);
     else if (apActiveTab === 'workspace' && apWsFiles.length) selectWsFile(apWsFiles[0]);
@@ -4522,12 +5537,19 @@ async function loadArtifacts() {
       fetch('/api/workspace/recent?limit=30').then(r => r.json()).catch(() => ({ files: [] })),
     ]);
     apArtifacts = chatData.artifacts || [];
-    apWsFiles = wsData.files || [];
+    const attributedPaths = new Set(apArtifacts.map(item => String(item.path || '').replace(/\\/g, '/').toLowerCase()));
+    apWsFiles = (wsData.files || []).filter(file => !attributedPaths.has(String(file.path || '').replace(/\\/g, '/').toLowerCase()));
+    artifactsSessionName.textContent = chatData.session ? `${chatData.session.name} · ${chatData.session.id}` : '未选择对话';
     artifactsBtnCount.textContent = apArtifacts.length > 99 ? '99+' : String(apArtifacts.length);
     artifactsBtnCount.classList.toggle('hidden', apArtifacts.length === 0);
+    const currentBelongsToTab = apCurrentArtifact && (
+      (apActiveTab === 'chat' && apCurrentArtifact.source === 'chat')
+      || (apActiveTab === 'workspace' && apCurrentArtifact.source === 'workspace')
+    );
+    if (!currentBelongsToTab) resetArtifactPreview(apActiveTab === 'chat' ? '本次对话暂无文件' : '工作区暂无未归属文件');
     renderArtifactList();
     // 默认选中第一项
-    if (!apCurrentArtifact) {
+    if (!currentBelongsToTab) {
       if (apActiveTab === 'chat' && apArtifacts.length) selectArtifact(apArtifacts[0]);
       else if (apActiveTab === 'workspace' && apWsFiles.length) selectWsFile(apWsFiles[0]);
     }
@@ -4563,7 +5585,7 @@ function renderArtifactList() {
         <span class="artifact-item-icon">${apTypeIcon(a.type, a.lang)}</span>
         <div class="artifact-item-info">
           <div class="artifact-item-name">${esc(a.path || a.id)}</div>
-          <div class="artifact-item-meta">${esc(a.agent || '')} · ${apRelativeTime(a.createdAt)}</div>
+          <div class="artifact-item-meta">${esc(a.taskTitle ? `任务：${a.taskTitle}` : a.agent || '对话输出')} · ${apRelativeTime(a.createdAt)}</div>
         </div>
         <span class="artifact-item-badge">${esc(a.type)}</span>
       </div>
@@ -4573,7 +5595,7 @@ function renderArtifactList() {
     });
   } else {
     if (!apWsFiles.length) {
-      artifactsList.innerHTML = '<div class="artifacts-empty">工作区暂无近期文件。</div>';
+      artifactsList.innerHTML = '<div class="artifacts-empty">工作区暂无近期文件。这里仅展示尚未能归属到当前会话的文件。</div>';
       return;
     }
     artifactsList.innerHTML = apWsFiles.map((f, i) => `

@@ -2474,10 +2474,13 @@ async function handle(req, res) {
     return res.end(JSON.stringify({ ok: true, agents: result }));
   }
 
-  // GET /api/tasks
+  // GET /api/tasks?sessionId=xxx
   if (req.method === 'GET' && pathname === '/api/tasks') {
+    const taskSid = url.searchParams.get('sessionId') || '';
+    const allTasks = readTasks();
+    const tasks = taskSid ? allTasks.filter(t => t.session_id === taskSid) : allTasks;
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ tasks: readTasks() }));
+    return res.end(JSON.stringify({ tasks }));
   }
 
   // GET /api/models?baseUrl=...&apiKey=... — 从 OpenAI 兼容 API 拉取模型列表
@@ -3269,7 +3272,12 @@ async function handle(req, res) {
     const agentOverride = body.agent || '';
     const dispatchSession = getSession(sessionId) || getActiveSession();
 
-    let pending = readTasks().filter(t => t.status === 'pending');
+    let allTasks = readTasks();
+    // ????? session ??????
+    if (dispatchSession) {
+      allTasks = allTasks.filter(t => t.session_id === dispatchSession.id);
+    }
+    let pending = allTasks.filter(t => t.status === 'pending');
     if (filterRun) pending = pending.filter(t => t.run_id === filterRun);
     if (filterTask) pending = pending.filter(t => t.id === filterTask);
     if (filterAgent) pending = pending.filter(t => t.agent === filterAgent);
@@ -3817,10 +3825,16 @@ async function handle(req, res) {
 }
 
 const server = createServer((req, res) => {
+  var _start = Date.now();
+  console.log('[' + new Date().toISOString() + '] ' + req.method + ' ' + req.url);
   handle(req, res).catch(err => {
     console.error('handler error:', err);
     if (!res.headersSent) res.writeHead(500);
     res.end(JSON.stringify({ error: err.message }));
+  });
+  res.on('close', function() {
+    var _elapsed = Date.now() - _start;
+    console.log('[' + new Date().toISOString() + '] ' + req.method + ' ' + req.url + ' ' + res.statusCode + ' (' + _elapsed + 'ms)');
   });
 });
 

@@ -1038,7 +1038,9 @@ async function bulkApply(action) {
 }
 
 async function loadTasks() {
-  const { tasks } = await fetch('/api/tasks').then(r => r.json()).catch(() => ({ tasks: [] }));
+  const sid = currentSessionId || '';
+  const url = '/api/tasks' + (sid ? '?sessionId=' + encodeURIComponent(sid) : '');
+  const { tasks } = await fetch(url).then(r => r.json()).catch(() => ({ tasks: [] }));
   allTasks = tasks;
   filterAndRenderTasks();
   // 有 pending 就显示 dispatch 按钮，否则隐藏

@@ -2635,7 +2635,7 @@ async function runDispatch(options = {}) {
       : '/api/dispatch';
     const body = resumeWorkflowId
       ? { value: resumeValue, sessionId: currentSessionId, mode: 'dispatch' }
-      : { ...dispatchOptions, humanGate: dispatchOptions.humanGate ?? true, sessionId: currentSessionId, mode: 'dispatch' };
+      : { ...dispatchOptions, humanGate: dispatchOptions.humanGate ?? false, sessionId: currentSessionId, mode: 'dispatch' };
     await ssePost(url, body, {
       'workflow-start': ({ workflowRunId, ...state }) => {
         activeWorkflowId = workflowRunId;

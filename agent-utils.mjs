@@ -232,7 +232,35 @@ const AGENT_ENV_MAP = {
 };
 
 function buildAgentSpawnEnv(agent) {
+  // 从当前进程环境开始，但先清除可能从宿主机泄露的认证/代理变量，
+  // 避免 IDE 集成（如 VSCode Claude Code）的环境变量与 agent 配置冲突。
+  // 典型场景：ANTHROPIC_AUTH_TOKEN=PROXY_MANAGED 会覆盖 ANTHROPIC_API_KEY，
+  // 导致 Claude CLI 用 OAuth token 而非 agent 的 API key 去认证。
   const env = { ...process.env };
+  const CONFLICTING_ENV_VARS = [
+    // Claude / Anthropic — IDE 集成/本地代理残留
+    'ANTHROPIC_AUTH_TOKEN',
+    'ANTHROPIC_BASE_URL',
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_MODEL',
+    'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+    'ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME',
+    'ANTHROPIC_DEFAULT_SONNET_MODEL',
+    'ANTHROPIC_DEFAULT_SONNET_MODEL_NAME',
+    'ANTHROPIC_DEFAULT_OPUS_MODEL',
+    'ANTHROPIC_DEFAULT_OPUS_MODEL_NAME',
+    // Codex / OpenAI — 可能被其他工具设置的代理/认证
+    'OPENAI_API_KEY',
+    'OPENAI_BASE_URL',
+    'OPENAI_ORG_ID',
+    'OPENAI_PROJECT_ID',
+    // IDE hook 回调地址 — CLI 可能尝试回调不存在的 hook server
+    'CLAUDE_CODE_HOOK_URL',
+  ];
+  for (const key of CONFLICTING_ENV_VARS) {
+    delete env[key];
+  }
+
   const mapping = AGENT_ENV_MAP[agent.key] || {};
   // 写入按 agent 类型映射的 env 名
   if (agent.baseUrl && mapping.baseUrl) env[mapping.baseUrl] = agent.baseUrl;
@@ -534,6 +562,11 @@ export function checkAgentLaunchable(agentKey, cfg, timeoutMs = 3000) {
     try {
       // 这里只做很轻的 --help 检测，用来确认“文件能不能被系统启动”。
       child = spawn(spawnPath, spawnArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+      child.on('error', (err) => {
+        if (err.code === 'EPERM') {
+          finish(true, '');
+        }
+      });
     } catch (err) {
       finish(false, formatLaunchError(agentKey, err));
       return;

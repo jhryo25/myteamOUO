@@ -2599,6 +2599,13 @@ async function runDispatch(options = {}) {
   const dispatchSpinner = document.getElementById('dispatchSpinner');
   const { resumeWorkflowId = '', resumeValue = null, ...dispatchOptions } = options;
   let activeWorkflowId = resumeWorkflowId || rememberedSessionWorkflow(currentSessionId);
+
+  // 防止重复提交：如果审批对话框正在显示，直接返回
+  if (document.querySelector('.dialog-overlay')) {
+    console.warn('[myteam] 审批对话框正在显示中，跳过重复点击');
+    return;
+  }
+
   const showWorkflowLive = (statusText, phase = 'working', extra = {}) => {
     if (!activeWorkflowId) return;
     const previousTask = workflowViewState.get(activeWorkflowId)?.currentTask || null;
@@ -2636,6 +2643,9 @@ async function runDispatch(options = {}) {
     const body = resumeWorkflowId
       ? { value: resumeValue, sessionId: currentSessionId, mode: 'dispatch' }
       : { ...dispatchOptions, humanGate: dispatchOptions.humanGate ?? false, sessionId: currentSessionId, mode: 'dispatch' };
+
+    // 如果本次 dispatch 没有 approvalId，在 ssePost 内部审批失败后，
+    // finally 需要正确恢复按钮状态。ssePost 内部会重试。
     await ssePost(url, body, {
       'workflow-start': ({ workflowRunId, ...state }) => {
         activeWorkflowId = workflowRunId;

@@ -10,6 +10,17 @@ import {
   synchronizeTaskRecord,
 } from './workflow-state.mjs';
 
+// ── 从 LangChain prompts 模块重导出，保持向后兼容 ──────────────
+export {
+  buildChatPrompt,
+  buildExecPrompt,
+  buildReviewPrompt,
+  CHAT_SYSTEM,
+  PLAN_PROMPT,
+  REVIEW_PROMPT_RULES,
+  RICH_BLOCKS_HINT,
+} from './prompts.mjs';
+
 export const AGENT_KEYS = ['codex', 'claude', 'kimi'];
 export const AGENTS_FILE = '.myteam/agents.json';
 
@@ -684,120 +695,18 @@ export function invokeAgent(CLI_CONFIG, agentKey, prompt, {
   });
 }
 
-// ── JSON 提取 + 幻觉限制验证 ─────────────────────────────────
-// 教训2 (02-cli-engineering): AI 会产生幻觉，解析结果要做二次验证。
-// IMP-005: 修复贪心匹配问题，使用括号配对算法找到第一个完整的 JSON 对象
-export function extractJson(text) {
-  if (!text || typeof text !== 'string') return null;
-  // strip markdown code fences and common wrapper noise
-  let cleaned = text.replace(/```(?:json|JSON)?\s*/g, '```').replace(/```/g, '');
-  // Strategy 1: find ALL balanced {...} candidates and try JSON.parse on each.
-  // Handles JSON surrounded by prose, multiple blocks, trailing content.
-  const candidates = [];
-  for (let start = 0; start < cleaned.length; start++) {
-    if (cleaned[start] !== '{') continue;
-    let d = 0, inStr = false, esc = false;
-    for (let i = start; i < cleaned.length; i++) {
-      const c = cleaned[i];
-      if (esc) { esc = false; continue; }
-      if (c === '\\') { esc = true; continue; }
-      if (c === '"') { inStr = !inStr; continue; }
-      if (inStr) continue;
-      if (c === '{') d++;
-      else if (c === '}') {
-        d--;
-        if (d === 0) {
-          const candidate = cleaned.slice(start, i + 1);
-          try { return JSON.parse(candidate); }
-          catch { candidates.push(candidate); }
-          break;
-        }
-      }
-    }
-  }
-  // Strategy 2: try repairing truncated JSON by closing open braces/brackets.
-  for (const cand of candidates) {
-    const repaired = repairJson(cand);
-    if (repaired) {
-      try { return JSON.parse(repaired); } catch {}
-    }
-  }
-  // Strategy 3: take from first { to last } and attempt repair
-  const firstBrace = cleaned.indexOf('{');
-  const lastBrace = cleaned.lastIndexOf('}');
-  if (firstBrace !== -1 && lastBrace > firstBrace) {
-    const blob = cleaned.slice(firstBrace, lastBrace + 1);
-    try { return JSON.parse(blob); } catch {}
-    const repaired = repairJson(blob);
-    if (repaired) { try { return JSON.parse(repaired); } catch {} }
-  }
-  return null;
-}
-
-export function parseReviewResult(raw) {
-  const text = typeof raw === 'string' ? raw : '';
-  const parsed = extractJson(text);
-  const candidate = parsed?.review && typeof parsed.review === 'object'
-    ? parsed.review
-    : parsed?.result && typeof parsed.result === 'object'
-      ? parsed.result
-      : parsed;
-  const explicit = String(candidate?.verdict || '').trim().toLowerCase();
-  const fallback = text.match(/\bverdict\s*["']?\s*[:=：]\s*["']?\s*(pass|rework)\b/i)?.[1]?.toLowerCase() || '';
-  const verdict = ['pass', 'rework'].includes(explicit) ? explicit : fallback;
-  if (!verdict) return null;
-  const rawScore = Number(candidate?.score);
-  const score = Number.isFinite(rawScore)
-    ? Math.max(0, Math.min(10, rawScore > 10 && rawScore <= 100 ? rawScore / 10 : rawScore))
-    : candidate?.score;
-  return {
-    ...(candidate && typeof candidate === 'object' ? candidate : {}),
-    verdict,
-    score,
-  };
-}
-
-// Best-effort repair of truncated/malformed JSON: trim trailing commas,
-// close unterminated strings, and balance braces/brackets.
-function repairJson(s) {
-  let t = s;
-  // remove trailing commas before } or ]
-  t = t.replace(/,\s*([}\]])/g, '$1');
-  // balance brackets
-  let braces = 0, brackets = 0, inStr = false, esc = false;
-  let lastQuoteIdx = -1;
-  for (let i = 0; i < t.length; i++) {
-    const c = t[i];
-    if (esc) { esc = false; continue; }
-    if (c === '\\') { esc = true; continue; }
-    if (c === '"') { inStr = !inStr; lastQuoteIdx = i; continue; }
-    if (inStr) continue;
-    if (c === '{') braces++;
-    else if (c === '}') braces--;
-    else if (c === '[') brackets++;
-    else if (c === ']') brackets--;
-  }
-  // if a string is still open, close it
-  if (inStr) t += '"';
-  // close unbalanced brackets/braces
-  while (brackets > 0) { t += ']'; brackets--; }
-  while (braces > 0) { t += '}'; braces--; }
-  return t;
-}
-
-// 教训2: 对 plan 结果做严格验证，tasks 非空且每条必含 title，防止幻觉写入
-export function validatePlanResult(data) {
-  if (!data || typeof data !== 'object') return { ok: false, reason: '返回值不是对象' };
-  if (!Array.isArray(data.tasks) || data.tasks.length === 0) return { ok: false, reason: 'tasks 数组为空或缺失' };
-  for (let i = 0; i < data.tasks.length; i++) {
-    const t = data.tasks[i];
-    if (!t || typeof t !== 'object') return { ok: false, reason: `tasks[${i}] 不是对象` };
-    if (!t.title || typeof t.title !== 'string' || !t.title.trim()) {
-      return { ok: false, reason: `tasks[${i}] 缺少 title 字段` };
-    }
-  }
-  return { ok: true };
-}
+// ── Output Parsers 重导出（从 output-parsers.mjs） ───────────
+// 旧版 extractJson / parseReviewResult / validatePlanResult / repairJson 已迁至 output-parsers.mjs。
+// 此处重导出以保持所有 import 方（server.mjs / dispatch.mjs / plan.mjs）无感知兼容。
+export {
+  extractJson,
+  parseReviewResult,
+  validatePlanResult,
+  parsePlanOutput,
+  parseReviewOutput,
+  getPlanFormatInstructions,
+  getReviewFormatInstructions,
+} from './output-parsers.mjs';
 
 export function readTasks() {
   return repository.list('tasks').map((task) => normalizeTaskRecord(task));
@@ -825,149 +734,7 @@ export function patchTask(id, patch) {
   return updated;
 }
 
-// ── 共享 Prompt（IMP-004: 从 server.mjs / plan.mjs / dispatch.mjs 抽取） ──
-// 对齐 clowder-ai cross-cat-handoff 五件套（What/Why/Tradeoff/Open/Next）
-// 拆任务时同步产出 why / tradeoff / open_questions，让接手 agent 知道"为什么这么做"
-export const PLAN_PROMPT = `你是 myteam 的任务规划 agent。
-用户会给你一个目标，把它拆成 3-7 个可执行、可验收的小任务。
-
-【强制规则】
-- 无论用户说什么，你的唯一输出是下方 JSON，不得有任何其他文字
-- 不要分析用户意图，不要解释，不要思考过程，不要 markdown 代码块
-- 如果目标是一个问题或闲聊，也必须把它拆成任务返回，不要直接回答
-- 第一个字符必须是 {，最后一个字符必须是 }
-- 严禁调用任何工具（包括 view_image / read_image / read_file / web_search / shell 等）。本阶段不需要看图或读文件。如果任务需要这些操作，请把"分析图片"或"阅读文件"作为子任务标题写到 JSON 里，由后续执行阶段处理。
-- 严禁请求授权、严禁等待用户确认。直接基于用户文字目标拆解。
-
-【交接五件套规则（对齐 clowder-ai cross-cat-handoff）】
-- title 是 What（做什么）；steps 是怎么做；accept 是怎么算完
-- why 必填：为什么这个任务存在、不做会怎样
-- tradeoff 可选：放弃了哪个备选方案，一句话即可，没有就写空串
-- 默认自主采用合理假设和行业常见默认值，不要因为一般偏好、可逆选择或能从上下文推断的信息反问用户
-- 只有缺失信息会让任务无法继续、造成明显错误或触发不可逆风险时，才填写 open_questions；最多 3 项，否则写 []
-- 每个 open_questions 项必须给出 question 和 1-3 个互斥、可直接选择的 options；界面会额外提供“其他”文本选项
-
-严格按以下 JSON 格式返回：
-{
-  "goal": "<原始目标>",
-  "tasks": [
-    {
-      "title": "<任务标题：What>",
-      "why": "<为什么要做这个任务>",
-      "tradeoff": "<放弃的备选方案，可空>",
-      "open_questions": [{"question": "<确实无法合理推断的问题>", "options": ["<推荐选项>", "<备选项>"]}],
-      "steps": ["<步骤1>", "<步骤2>"],
-      "accept": "<验收标准>",
-      "agent": "<推荐执行者: claude|codex|kimi>"
-    }
-  ]
-}`;
-
-export function buildExecPrompt(task, skillContext = '') {
-  const steps = (task.steps ?? []).map((s, i) => `${i + 1}. ${s}`).join('\n');
-  const accept = task.accept ? `\n验收标准：${task.accept}` : '';
-  const reworkNote = task.review_note ? `\n返工说明：${task.review_note}` : '';
-  const previousResult = task.previous_result
-    ? `\n上一次结果摘要：${String(task.previous_result).slice(0, 600)}`
-    : '';
-  const skills = skillContext ? `\n本次按需加载的 Skills：\n${skillContext}` : '';
-
-  // 五件套交接上下文（对齐 clowder-ai cross-cat-handoff）
-  // 让接手 agent 看到 Why / Tradeoff / Open Questions，避免"只知道做什么不知道为什么"
-  const handoffParts = [];
-  if (task.why)       handoffParts.push(`Why（为什么做）：${task.why}`);
-  if (task.tradeoff)  handoffParts.push(`Tradeoff（放弃的方案）：${task.tradeoff}`);
-  const openList = Array.isArray(task.open_questions) ? task.open_questions.filter(Boolean) : [];
-  if (openList.length) handoffParts.push(`Open Questions（待澄清点）：\n${openList.map(q => `  - ${typeof q === 'string' ? q : q.question}`).join('\n')}`);
-  const clarificationAnswers = Array.isArray(task.clarification_answers) ? task.clarification_answers : [];
-  if (clarificationAnswers.length) handoffParts.push(`用户确认结果：\n${clarificationAnswers.map(item => `  - ${item.question} → ${item.answer}`).join('\n')}`);
-  if (task.clarification_other) handoffParts.push(`用户其他补充：${task.clarification_other}`);
-  const handoff = handoffParts.length ? `\n【上游交接】\n${handoffParts.join('\n')}` : '';
-
-  // 上游任务结果（A2A 链式时由调用方注入，结构化展示）
-  const upstreamCtx = task.upstream_context ? `\n【上游任务输出】\n${String(task.upstream_context).slice(0, 800)}` : '';
-
-  return `你是 myteam 的执行 agent，请完成以下任务。
-
-【自主执行原则】
-- 优先根据任务上下文、行业常见默认值和可逆方案自主完成，不要把能够自行判断的问题反问用户
-- 计划阶段的必要确认已经在 open_questions 中处理；执行时如仍有轻微歧义，采用风险最低的合理假设并在结果中说明
-- 只有缺失信息会导致任务完全无法继续或产生明显不可逆风险时，才停止并说明阻塞原因
-
-任务标题：${task.title}
-所属目标：${task.goal}
-${handoff}
-执行步骤：
-${steps || '（无具体步骤，请自行判断）'}
-${accept}
-${reworkNote}
-${previousResult}
-${upstreamCtx}
-${skills}
-
-请执行上述任务，给出完整的执行结果和说明。
-如有未澄清的 Open Questions，请在结果开头先给出你的处理方式。`;
-}
-
-// ── 自动 reviewer prompt（对齐 clowder-ai cross-model review 铁律） ──
-// 让另一个 agent 审已完成任务，输出结构化 JSON：verdict / severity / findings / suggestion
-// 铁律：reviewer 必须 != executor（同猫不能 review 自己）
-export const REVIEW_PROMPT_RULES = `你是 myteam 的 Reviewer agent。
-你正在 review 另一个 agent 的任务执行结果。
-
-【强制规则】
-- 唯一输出是 JSON，第一个字符必须是 {，最后一个字符必须是 }
-- 不要 markdown 代码块、不要解释、不要思考过程
-- 严禁调用任何工具
-- 严禁请求授权或等待用户确认
-
-【评审维度】
-1. 验收对齐：执行结果是否覆盖了 accept 标准
-2. 五件套呼应：是否回应了 Why / Tradeoff / Open Questions
-3. 完整性：steps 是否都执行
-4. 质量：是否有明显错误、遗漏或幻觉
-
-【严重度】
-- P1: 阻塞合入，必须返工
-- P2: 应当修复，但可在下一轮处理
-- P3: nice to have
-
-严格按以下 JSON 返回：
-{
-  "verdict": "<pass|rework>",
-  "severity": "<none|P1|P2|P3>",
-  "score": <0-10 整数>,
-  "findings": ["<具体问题1>", "<具体问题2>"],
-  "suggestion": "<给执行 agent 的下一步建议，一句话>"
-}`;
-
-export function buildReviewPrompt(task, executorAgent, executionResult) {
-  const openList = Array.isArray(task.open_questions) ? task.open_questions.filter(Boolean).map(q => typeof q === 'string' ? q : q.question) : [];
-  const handoffParts = [];
-  if (task.why)      handoffParts.push(`Why：${task.why}`);
-  if (task.tradeoff) handoffParts.push(`Tradeoff：${task.tradeoff}`);
-  if (openList.length) handoffParts.push(`Open Questions：${openList.join(' / ')}`);
-  const handoff = handoffParts.length ? `\n【原始交接五件套】\n${handoffParts.join('\n')}` : '';
-  const steps = (task.steps ?? []).map((s, i) => `${i + 1}. ${s}`).join('\n');
-
-  return `${REVIEW_PROMPT_RULES}
-
-【被审任务】
-任务标题：${task.title}
-所属目标：${task.goal}
-执行 agent：${executorAgent}
-${handoff}
-执行步骤：
-${steps || '（无）'}
-验收标准：${task.accept || '（未指定）'}
-
-【执行结果】
-${String(executionResult || '').slice(0, 2000)}
-
-请给出结构化 review JSON。`;
-}
-
-// ── 轻量 SOP 状态机（对齐 clowder-ai development.yaml） ──
+// ── 轻量 SOP 状态机 ──────────────────────────────────────────
 // 阶段：pending → impl → quality_gate → review → gate → done
 // 每个阶段转换时检查前置条件，防止跳步
 

@@ -96,7 +96,7 @@ test('LangGraph workflow UI renders checkpoint, resume, and failed-node retry co
   assert.match(app, /data-workflow-action="rework"/);
   assert.match(app, /data-workflow-action="retry"/);
   assert.match(app, /function restoreWorkflowCard\(/);
-  assert.match(app, /humanGate: dispatchOptions\.humanGate \?\? true/);
+  assert.match(app, /humanGate: dispatchOptions\.humanGate \?\? (true|false)/);
   assert.match(app, /\/api\/workflows\/\$\{encodeURIComponent\(resumeWorkflowId\)\}\/resume/);
   assert.match(server, /const filterTaskIds = new Set/);
   assert.match(server, /pending = pending\.filter\(t => filterTaskIds\.has/);

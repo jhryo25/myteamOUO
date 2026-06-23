@@ -15,7 +15,6 @@ import {
 import { parseSpawnSubagentDirectives, SPAWN_SUBAGENT_PROTOCOL } from './collaboration-context.mjs';
 import { repository } from './storage.mjs';
 import { transitionTaskLifecycle } from './workflow-state.mjs';
-import { getSharedCheckpointer } from './workflow/checkpointer.mjs';
 import { LangGraphDispatchEngine } from './workflow/dispatch-graph.mjs';
 
 const CLI_CONFIG = buildCliConfig(loadEnv());
@@ -115,6 +114,24 @@ const ports = {
 
 const workflowRunId = `dispatch-cli:${filterRunId || randomUUID()}:${Date.now()}`;
 const engine = new LangGraphDispatchEngine(ports, { checkpointer: getSharedCheckpointer() });
+
+// 持久化 adapter descriptor（CLI 场景也支持从其他 CLI 进程恢复）
+const adapterDescriptor = {
+  sessionId: pending[0]?.session_id || '',
+  agentKeys: configuredAgents,
+  taskScope: {
+    taskIds: pending.map((t) => t.id),
+    filterRunId,
+    filterTaskId,
+    cursor: 0,
+  },
+  approvalFingerprint: null,
+  options: { maxReworkAttempts: 1, maxSpawnDepth: 2, requireHumanGate: false },
+};
+try {
+  repository.upsertWorkflowAdapter(workflowRunId, adapterDescriptor);
+} catch (e) { /* 静默失败 */ }
+
 const snapshot = await engine.run({
   workflowRunId,
   sessionId: pending[0]?.session_id || '',

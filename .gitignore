@@ -34,3 +34,7 @@ reports/
 # 系统文件
 .DS_Store
 Thumbs.db
+
+# 服务日志（本地运行时产生）
+.server-stderr.log
+.server-stdout.log

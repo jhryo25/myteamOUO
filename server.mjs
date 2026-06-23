@@ -19,7 +19,7 @@ import {
   transitionTaskLifecycle,
 } from './workflow-state.mjs';
 import { LangGraphDispatchEngine } from './workflow/dispatch-graph.mjs';
-import { getSharedCheckpointer } from './workflow/checkpointer.mjs';
+import { getSharedCheckpointer, reconstructPorts } from './workflow/checkpointer.mjs';
 import { LangGraphTurnEngine } from './workflow/turn-graph.mjs';
 import { getDangerLevel, openPathWithDefaultApp, resolveWorkspaceHtmlPath } from './commandSafety.mjs';
 import { repository } from './storage.mjs';
@@ -51,6 +51,8 @@ import {
   createTurnPartsCollector,
   transitionSessionRunState,
 } from './collaboration-context.mjs';
+import { runWorkflowCleanup, deleteWorkflow } from './workflow/cleanup.mjs';
+import { MyteamCallbackHandler, recordInvocation, createInvocationContext, recordAudit, recordLesson } from './callbacks.mjs';
 
 let ENV = loadEnv();
 let CLI_CONFIG = buildCliConfig(ENV);
@@ -87,8 +89,22 @@ const chainTaskMessages = new Map();
 const chainTaskSSE = new Map();
 
 function pushChainMessage(taskId, msg) {
+  const fullMessage = { ...msg, timestamp: new Date().toISOString() };
   if (!chainTaskMessages.has(taskId)) chainTaskMessages.set(taskId, []);
-  chainTaskMessages.get(taskId).push({ ...msg, timestamp: new Date().toISOString() });
+  chainTaskMessages.get(taskId).push(fullMessage);
+  // 双写 SQLite：服务重启后消息不丢失
+  try {
+    repository.insertChainMessage({
+      id: `${taskId}:${chainTaskMessages.get(taskId).length}:${randomUUID().slice(0, 6)}`,
+      taskId,
+      sessionId: '',
+      role: msg.role || (msg.type || 'system'),
+      content: JSON.stringify(msg),
+      agentKey: msg.agent || null,
+    });
+  } catch (e) {
+    // 静默失败：内存缓存仍保留，不影响执行
+  }
   const listeners = chainTaskSSE.get(taskId);
   if (listeners) {
     const sseData = 'data: ' + JSON.stringify(msg) + '\n\n';
@@ -99,7 +115,16 @@ function pushChainMessage(taskId, msg) {
 }
 
 function getChainMessages(taskId) {
-  return chainTaskMessages.get(taskId) || [];
+  // 先从 SQLite 查询（含服务重启恢复的消息），再合并内存中的热缓存
+  const memory = chainTaskMessages.get(taskId) || [];
+  try {
+    const persisted = repository.listChainMessages(taskId);
+    return persisted.map((row) => {
+      try { return JSON.parse(row.content); } catch { return { type: row.role, content: row.content, timestamp: row.createdAt }; }
+    });
+  } catch (e) {
+    return memory.length ? memory : [];
+  }
 }
 
 const shellResults = new Map();
@@ -1554,6 +1579,10 @@ const CHAT_SYSTEM = {
   kimi:   `You are Kimi, a helpful AI assistant in the myteam workspace. You handle lightweight execution, drafting, and quick analysis. Reply in Chinese. Prefer reasonable assumptions over asking follow-up questions. Ask only when missing information makes useful progress impossible or creates irreversible risk; when asking, provide 1-3 mutually exclusive suggested answers plus an Other option.${RICH_BLOCKS_HINT}`,
 };
 
+// ── buildChatPrompt 从 prompts.mjs 导入使用 ──────────────────
+// server.mjs 保留此本地函数以兼容现有调用，内部委托给 prompts 模块。
+// 注意：prompts.mjs 的 buildChatPrompt 是 async（返回 Promise），
+// 这里保持同步兼容。
 function buildChatPrompt(userMessage, agentKey, history) {
   const system = CHAT_SYSTEM[agentKey] || CHAT_SYSTEM.codex;
   // 取最近 10 条历史避免 token 过多
@@ -1628,7 +1657,16 @@ function rememberWorkflowEngine(workflowRunId, value) {
   workflowEngines.delete(workflowRunId);
   workflowEngines.set(workflowRunId, { ...value, updatedAt: Date.now() });
   while (workflowEngines.size > WORKFLOW_ENGINE_LIMIT) {
-    workflowEngines.delete(workflowEngines.keys().next().value);
+    const oldest = workflowEngines.keys().next().value;
+    workflowEngines.delete(oldest);
+  }
+  // 持久化 adapter descriptor 到 myteam.sqlite，支持跨进程恢复
+  if (value.descriptor) {
+    try {
+      repository.upsertWorkflowAdapter(workflowRunId, value.descriptor);
+    } catch (error) {
+      console.warn(`[myteam] failed to persist workflow adapter ${workflowRunId}: ${error.message}`);
+    }
   }
 }
 let childIdSeq = 0;
@@ -2399,6 +2437,11 @@ async function handle(req, res) {
   // POST /api/chat { message, sessionId? } — SSE 流式对话，支持 @mention 路由
   if (req.method === 'POST' && pathname === '/api/chat') {
     const body = await readBody(req);
+    const callbackCtx = createInvocationContext({
+      sessionId: String(body.sessionId || ''),
+      agentKey: '',
+      mode: 'chat',
+    });
     const message = (body.message || '').trim();
     const resumeRequested = Boolean(body.resume);
     const clientRunId = String(body.clientRunId || '');
@@ -3787,18 +3830,84 @@ async function handle(req, res) {
   const workflowResumeMatch = pathname.match(/^\/api\/workflows\/([^/]+)\/resume$/);
   if (req.method === 'POST' && workflowResumeMatch) {
     const workflowRunId = decodeURIComponent(workflowResumeMatch[1]);
-    const record = workflowEngines.get(workflowRunId);
+    let record = workflowEngines.get(workflowRunId);
+
+    // 如果当前进程没有 engine（服务重启），尝试从持久化 adapter descriptor 重建
     if (!record) {
-      return json(res, 409, {
-        error: 'workflow checkpoint 存在，但当前进程没有可恢复的 Agent adapter；请从任务面板重新派发。',
-        code: 'workflow_adapter_unavailable',
-      });
+      const descriptor = repository.getWorkflowAdapter(workflowRunId);
+      if (!descriptor) {
+        return json(res, 409, {
+          error: 'workflow checkpoint 存在，但 adapter descriptor 缺失；请从任务面板重新派发。',
+          code: 'workflow_adapter_unavailable',
+        });
+      }
+      // 重建 CLI config（从 .env 读取；API key 不持久化到 DB）
+      const freshCliConfig = buildCliConfig(loadEnv());
+      const availableKeys = descriptor.agentKeys.filter((key) => freshCliConfig[key]?.path);
+      if (!availableKeys.length) {
+        return json(res, 409, {
+          error: 'workflow adapter descriptor 存在，但对应 Agent CLI 不可用。请检查配置后重新派发。',
+          code: 'workflow_agent_unavailable',
+          configuredKeys: descriptor.agentKeys,
+        });
+      }
+
+      // 引入 dispatch 内部函数所需的作用域变量（对重建后的简化版留空）
+      const dispatchSession = getSession(descriptor.sessionId);
+      const agentOverride = '';
+
+      // 从 descriptor 重建 ports callbacks
+      const rebuildCallbacks = {
+        emit(event, data) {
+          if (event === 'workflow-interrupt') sseSend(res, 'workflow-interrupt', { workflowRunId, ...data });
+          if (event === 'worklist-chain') sseSend(res, 'worklist-chain', data);
+          if (event === 'task-review-resume') sseSend(res, 'task-review-resume', data);
+        },
+        async transitionTask(task, nextState, meta) {
+          const latest = readTasks().find((item) => item.id === task.id) || task;
+          const updated = transitionTaskLifecycle(latest, nextState, meta);
+          repository.upsert('tasks', updated);
+          return updated;
+        },
+        async executeTask(task) {
+          return executeTask(task, Number(task.chain_depth || 0), task.chain_history || [], { graphManaged: true });
+        },
+        async reviewTask(task, execution) {
+          return runAutoReview(
+            task,
+            execution?.agent || task.executed_by || task.agent,
+            execution?.result || task.previous_result || '',
+            execution?.collaborationContext || buildTaskCollaborationContext(task),
+            { deferGate: Boolean(descriptor.options?.requireHumanGate) },
+          );
+        },
+        materializeSpawns: materializeGraphSpawns,
+        async applyClarification(task, answer) {
+          const answers = Array.isArray(answer?.answers) ? answer.answers : [];
+          const updated = synchronizeTaskRecord(task, {
+            open_questions: [],
+            clarification_answers: [...(task.clarification_answers || []), ...answers],
+            status: 'pending',
+          }, {
+            eventId: `langgraph:clarification:${workflowRunId}:${task.id}`,
+            reason: 'clarification_completed',
+          });
+          repository.upsert('tasks', updated);
+          return updated;
+        },
+      };
+
+      const ports = reconstructPorts(descriptor, rebuildCallbacks, freshCliConfig);
+      const engine = new LangGraphDispatchEngine(ports, { checkpointer: langGraphCheckpointer });
+      record = { engine, setResponse: null, updatedAt: Date.now(), descriptor };
+      rememberWorkflowEngine(workflowRunId, record);
+      console.warn(`[myteam] workflow adapter ${workflowRunId} rebuilt from persisted descriptor`);
     }
     const body = await readBody(req);
     sseInit(res);
     record.setResponse?.(res);
     try {
-      const snapshot = await record.engine.resume(workflowRunId, body.value ?? body);
+      const snapshot = await record.engine.resume(workflowRunId, body.resume ?? body.value ?? body);
       const paused = snapshot.interrupts.length > 0;
       sseSend(res, paused ? 'paused' : 'done', {
         workflowRunId,
@@ -3811,6 +3920,20 @@ async function handle(req, res) {
       sseSend(res, 'error', { message: error.message, code: 'workflow_resume_failed' });
     }
     return res.end();
+  }
+
+  // DELETE /api/workflows/:workflowRunId — 手动清理单个 workflow（checkpoint + adapter，不删业务数据）
+  const workflowDeleteMatch = pathname.match(/^\/api\/workflows\/([^/]+)\/delete$/);
+  if (req.method === 'DELETE' && workflowDeleteMatch) {
+    const workflowRunId = decodeURIComponent(workflowDeleteMatch[1]);
+    const adapter = repository.getWorkflowAdapter(workflowRunId);
+    if (!adapter) {
+      return json(res, 404, { error: 'workflow adapter 不存在', code: 'workflow_not_found' });
+    }
+    const ok = deleteWorkflow(workflowRunId, langGraphCheckpointer, repository);
+    workflowEngines.delete(workflowRunId);
+    console.warn(`[myteam] manually deleted workflow ${workflowRunId}`);
+    return json(res, 200, { ok, workflowRunId, note: '业务 task/session 数据已保留' });
   }
 
   // POST /api/dispatch { runId?, taskId?, agent? } — SSE
@@ -4158,6 +4281,17 @@ async function handle(req, res) {
         pushChainMessage(task.id, { type: 'task-start', agent: agentKey, title: task.title, subagentRunId });
         updateSubagentRun(subagentRunId, { status: 'running', agent: agentKey });
         appendSubagentMessage(subagentRunId, { type: 'system', content: 'Subagent started: ' + task.title });
+        // 双写到 chain_task_messages 表
+        try {
+          repository.insertChainMessage({
+            id: `${task.id}:start:${randomUUID().slice(0, 6)}`,
+            taskId: task.id,
+            sessionId: dispatchSession?.id || sessionId || '',
+            role: 'system',
+            content: `Subagent started: ${task.title} (agent: ${agentKey})`,
+            agentKey,
+          });
+        } catch (e) { /* 静默失败 */ }
       }
       let taskTurnRecord = null;
       let taskTurnCollector = null;
@@ -4248,6 +4382,17 @@ async function handle(req, res) {
         if (depth > 0) {
           pushChainMessage(task.id, { type: 'task-done', agent: agentKey, title: task.title, summary, subagentRunId });
           appendSubagentMessage(subagentRunId, { type: 'assistant', content: result || '' });
+          // 双写任务完成到 chain_task_messages 表
+          try {
+            repository.insertChainMessage({
+              id: `${task.id}:done:${randomUUID().slice(0, 6)}`,
+              taskId: task.id,
+              sessionId: dispatchSession?.id || sessionId || '',
+              role: 'assistant',
+              content: String(result || '').slice(0, 8000),
+              agentKey,
+            });
+          } catch (e) { /* 静默失败 */ }
           updateSubagentRun(subagentRunId, {
             status: 'done',
             finishedAt: Date.now(),
@@ -4505,9 +4650,28 @@ async function handle(req, res) {
       },
     };
     const engine = new LangGraphDispatchEngine(graphPorts, { checkpointer: langGraphCheckpointer });
+    // 构建可持久化的 adapter descriptor，支持跨进程恢复
+    const adapterDescriptor = {
+      sessionId: dispatchSession?.id || sessionId,
+      agentKeys: Object.keys(CLI_CONFIG).filter((key) => CLI_CONFIG[key]?.path),
+      taskScope: {
+        taskIds: pending.map((t) => t.id),
+        filterRun,
+        filterTask,
+        cursor: 0,
+      },
+      approvalFingerprint: body.approvalId || null,
+      options: {
+        maxReworkAttempts: Math.max(0, Math.min(3, Number(body.maxReworkAttempts ?? 1))),
+        maxSpawnDepth: WORKLIST_MAX_DEPTH,
+        requireHumanGate: Boolean(body.humanGate),
+        reviewSpawned: false,
+      },
+    };
     rememberWorkflowEngine(graphWorkflowId, {
       engine,
       setResponse(nextResponse) { workflowRes = nextResponse; },
+      descriptor: adapterDescriptor,
     });
     activeDispatches.get(dispatchLockId).workflowRunId = graphWorkflowId;
     sseSend(res, 'workflow-start', { workflowRunId: graphWorkflowId, engine: 'langgraph' });
@@ -4809,6 +4973,34 @@ server.on('error', (err) => {
   process.exit(1);
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
   console.log(`\n  myteam server running on http://localhost:${PORT}\n`);
+
+  // ── 服务启动时执行 workflow 清理 ───────────────────────────────────
+  try {
+    const cleanupResult = await runWorkflowCleanup(langGraphCheckpointer, repository);
+    if (cleanupResult.deleted > 0 || cleanupResult.errors.length > 0) {
+      console.warn(
+        `[myteam] startup workflow cleanup: ${cleanupResult.deleted} deleted, ${cleanupResult.skipped} skipped, ${cleanupResult.errors.length} errors`
+      );
+      for (const err of cleanupResult.errors) {
+        console.warn(`[myteam:cleanup] ${err}`);
+      }
+    }
+  } catch (e) {
+    console.warn(`[myteam] startup workflow cleanup error: ${e.message}`);
+  }
+
+  // ── 定时清理：每 6 小时执行一次 ────────────────────────────────────
+  const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
+  setInterval(async () => {
+    try {
+      const result = await runWorkflowCleanup(langGraphCheckpointer, repository);
+      if (result.deleted > 0) {
+        console.warn(`[myteam] periodic cleanup: ${result.deleted} expired workflows deleted`);
+      }
+    } catch (e) {
+      // 静默
+    }
+  }, CLEANUP_INTERVAL_MS);
 });

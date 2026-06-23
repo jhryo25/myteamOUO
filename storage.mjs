@@ -23,6 +23,9 @@ const ENTITY_TABLES = [
   'schedule_runs',
 ];
 
+const WORKFLOW_ADAPTER_TABLE = 'workflow_adapters';
+const CHAIN_TASK_MESSAGES_TABLE = 'chain_task_messages';
+
 const LEGACY_FILES = {
   tasks: '.myteam/tasks.jsonl',
   lessons: '.myteam/lessons.jsonl',
@@ -97,6 +100,40 @@ export class MyteamRepository {
       } catch (error) {
         this.db.exec('ROLLBACK');
         throw new Error(`database migration failed: ${error.message}`);
+      }
+    }
+    if (!applied.has(2)) {
+      this.db.exec('BEGIN IMMEDIATE');
+      try {
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS ${WORKFLOW_ADAPTER_TABLE} (
+            workflow_run_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            agent_keys TEXT NOT NULL,
+            task_scope TEXT NOT NULL,
+            approval_fingerprint TEXT,
+            options_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS ${CHAIN_TASK_MESSAGES_TABLE} (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            agent_key TEXT,
+            created_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_chain_task_messages_task ON ${CHAIN_TASK_MESSAGES_TABLE}(task_id);
+          CREATE INDEX IF NOT EXISTS idx_chain_task_messages_session ON ${CHAIN_TASK_MESSAGES_TABLE}(session_id);
+        `);
+        this.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)')
+          .run(2, new Date().toISOString());
+        this.db.exec('COMMIT');
+      } catch (error) {
+        this.db.exec('ROLLBACK');
+        throw new Error(`database migration v2 failed: ${error.message}`);
       }
     }
   }
@@ -266,6 +303,129 @@ export class MyteamRepository {
 
   assertTable(table) {
     if (!ENTITY_TABLES.includes(table)) throw new Error(`unsupported repository table: ${table}`);
+  }
+
+  // ── workflow adapter descriptor persistence ─────────────────────────
+
+  upsertWorkflowAdapter(workflowRunId, descriptor) {
+    const now = new Date().toISOString();
+    const existing = this.db.prepare(
+      `SELECT created_at FROM ${WORKFLOW_ADAPTER_TABLE} WHERE workflow_run_id = ?`
+    ).get(workflowRunId);
+    this.db.prepare(`
+      INSERT INTO ${WORKFLOW_ADAPTER_TABLE}(workflow_run_id, session_id, agent_keys, task_scope, approval_fingerprint, options_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(workflow_run_id) DO UPDATE SET
+        session_id = excluded.session_id,
+        agent_keys = excluded.agent_keys,
+        task_scope = excluded.task_scope,
+        approval_fingerprint = excluded.approval_fingerprint,
+        options_json = excluded.options_json,
+        updated_at = excluded.updated_at
+    `).run(
+      workflowRunId,
+      String(descriptor.sessionId || ''),
+      JSON.stringify(descriptor.agentKeys || []),
+      JSON.stringify(descriptor.taskScope || {}),
+      descriptor.approvalFingerprint || null,
+      JSON.stringify(descriptor.options || {}),
+      existing?.created_at || now,
+      now,
+    );
+  }
+
+  getWorkflowAdapter(workflowRunId) {
+    const row = this.db.prepare(
+      `SELECT * FROM ${WORKFLOW_ADAPTER_TABLE} WHERE workflow_run_id = ?`
+    ).get(workflowRunId);
+    if (!row) return null;
+    return {
+      workflowRunId: row.workflow_run_id,
+      sessionId: row.session_id,
+      agentKeys: JSON.parse(row.agent_keys),
+      taskScope: JSON.parse(row.task_scope),
+      approvalFingerprint: row.approval_fingerprint || null,
+      options: JSON.parse(row.options_json || '{}'),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  listWorkflowAdapters({ olderThanDays = 0, limit = 0 } = {}) {
+    let sql = `SELECT workflow_run_id, created_at, updated_at FROM ${WORKFLOW_ADAPTER_TABLE}`;
+    const params = [];
+    if (olderThanDays > 0) {
+      const cutoff = new Date(Date.now() - olderThanDays * 86400000).toISOString();
+      sql += ' WHERE updated_at < ?';
+      params.push(cutoff);
+    }
+    sql += ' ORDER BY updated_at ASC';
+    if (limit > 0) {
+      sql += ` LIMIT ${Math.max(1, Number(limit))}`;
+    }
+    return this.db.prepare(sql).all(...params).map((row) => ({
+      workflowRunId: row.workflow_run_id,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  deleteWorkflowAdapter(workflowRunId) {
+    return this.db.prepare(
+      `DELETE FROM ${WORKFLOW_ADAPTER_TABLE} WHERE workflow_run_id = ?`
+    ).run(workflowRunId).changes > 0;
+  }
+
+  // ── chain task message persistence ──────────────────────────────────
+
+  insertChainMessage({ id, taskId, sessionId, role, content, agentKey }) {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO ${CHAIN_TASK_MESSAGES_TABLE}(id, task_id, session_id, role, content, agent_key, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      String(id || randomUUID()),
+      String(taskId || ''),
+      String(sessionId || ''),
+      String(role || 'system'),
+      String(content || ''),
+      agentKey || null,
+      now,
+    );
+  }
+
+  listChainMessages(taskId) {
+    return this.db.prepare(
+      `SELECT * FROM ${CHAIN_TASK_MESSAGES_TABLE} WHERE task_id = ? ORDER BY created_at ASC`
+    ).all(taskId).map((row) => ({
+      id: row.id,
+      taskId: row.task_id,
+      sessionId: row.session_id,
+      role: row.role,
+      content: row.content,
+      agentKey: row.agent_key,
+      createdAt: row.created_at,
+    }));
+  }
+
+  listAllChainMessages({ limit = 5000 } = {}) {
+    return this.db.prepare(
+      `SELECT * FROM ${CHAIN_TASK_MESSAGES_TABLE} ORDER BY created_at ASC LIMIT ?`
+    ).all(limit).map((row) => ({
+      id: row.id,
+      taskId: row.task_id,
+      sessionId: row.session_id,
+      role: row.role,
+      content: row.content,
+      agentKey: row.agent_key,
+      createdAt: row.created_at,
+    }));
+  }
+
+  deleteChainMessages(taskId) {
+    return this.db.prepare(
+      `DELETE FROM ${CHAIN_TASK_MESSAGES_TABLE} WHERE task_id = ?`
+    ).run(taskId).changes;
   }
 
   close() {

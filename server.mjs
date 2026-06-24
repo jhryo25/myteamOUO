@@ -53,6 +53,7 @@ import {
 } from './collaboration-context.mjs';
 import { runWorkflowCleanup, deleteWorkflow } from './workflow/cleanup.mjs';
 import { MyteamCallbackHandler, recordInvocation, createInvocationContext, recordAudit, recordLesson } from './callbacks.mjs';
+import { DispatchContextCache } from './dispatch-context-cache.mjs';
 
 let ENV = loadEnv();
 let CLI_CONFIG = buildCliConfig(ENV);
@@ -4114,8 +4115,18 @@ async function handle(req, res) {
 
     let done = 0, failed = 0;
 
+    // ── Dispatch 上下文缓存：同一个 dispatch run 内跨任务复用 ────────
+    const contextCache = new DispatchContextCache({ session: dispatchSession, agentOverride });
+    // 预计算 workspace bridge（一次 dispatch 内不变）
+    contextCache.workspaceBridge = buildWorkspaceBridge({ workspace: currentWorkspace() });
+
     function buildTaskCollaborationContext(task) {
-      const capsule = refreshSessionContinuity(dispatchSession, 'dispatch');
+      // 复用 capsule（同 session 同 run 内不变）
+      const capsule = contextCache.getOrRefreshContinuity(
+        () => refreshSessionContinuity(dispatchSession, 'dispatch'),
+        task.agent || '',
+      ) || refreshSessionContinuity(dispatchSession, 'dispatch');
+      contextCache.capsule = capsule; // 首个任务写入
       const continuity = formatContinuityBridge(capsule);
       const evidence = buildTopKEvidenceBridge({
         query: [task.goal, task.title, task.accept, ...(task.steps || [])].join('\n'),
@@ -4123,7 +4134,11 @@ async function handle(req, res) {
         capsule,
         k: 3,
       });
-      const workspace = buildWorkspaceBridge({ workspace: currentWorkspace() });
+      // 复用 workspace bridge（跨任务不变）
+      const workspace = contextCache.getOrRefreshWorkspace(
+        () => buildWorkspaceBridge({ workspace: currentWorkspace() }),
+      ) || buildWorkspaceBridge({ workspace: currentWorkspace() });
+      contextCache.workspaceBridge = workspace; // 首个任务写入
       const lessons = relevantLessons([task.goal, task.title, task.accept, ...(task.steps || [])].join('\n'), task.agent, 3);
       const lessonContext = buildLessonContext(lessons);
       saveSessions();

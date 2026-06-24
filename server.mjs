@@ -1917,6 +1917,25 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
       lastActivity = Date.now();
       childRecord.lastActivityAt = new Date(lastActivity).toISOString();
     };
+    // ── 单任务硬超时：不管有没有输出，到时间就截断 ──────────────────
+    // 区别于 watchdog（多久没输出才触发），这是"跑太久了无论如何都要停"。
+    // 防止 agent 在循环调用工具、自我质疑、重复输出等场景下永远跑不完。
+    const TASK_HARD_TIMEOUT_MS = Number(process.env.MYTEAM_TASK_TIMEOUT_MS) || 15 * 60 * 1000;
+    const HARD_TIMEOUT_MESSAGE = `task hard timeout after ${Math.round(TASK_HARD_TIMEOUT_MS / 60000)}min`;
+    const taskStartedAt = Date.now();
+    function checkHardTimeout() {
+      if (Date.now() - taskStartedAt > TASK_HARD_TIMEOUT_MS) {
+        childRecord.phase = 'timeout';
+        childRecord.statusText = HARD_TIMEOUT_MESSAGE;
+        try { child.kill('SIGTERM'); } catch {}
+        // 不等 SIGKILL——close 事件会自然触发 fail()，这里先清理
+        setTimeout(() => { if (!child.killed) { try { child.kill('SIGKILL'); } catch {} } }, 3000);
+        sseSend(res, 'status', { agent: agentKey, phase: 'timeout', text: HARD_TIMEOUT_MESSAGE });
+        // 不直接 fail()——让 close handler 处理，避免重复 settled
+        return true;
+      }
+      return false;
+    }
     const thinkingTimer = setTimeout(() => {
       if (!fullText && !settled) {
         childRecord.phase = 'waiting';
@@ -1927,6 +1946,8 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
     const TIMEOUT_MS = 30 * 60 * 1000; // 教训1: 30min
 
     watchdog = setInterval(() => {
+      // ── 硬超时检查 ──────────────────────────────────────
+      if (checkHardTimeout()) return; // timeout already handled
       if (Date.now() - lastActivity > TIMEOUT_MS) {
         child.kill('SIGTERM');
         fail(new Error('timeout after 30min'), cid);
@@ -1937,6 +1958,8 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
     rl.on('line', (line) => {
       touch(); // 教训1: readline 接管后在这里刷新
       if (!line.trim()) return;
+      // ── 每行检查硬超时 ──────────────────────────────────
+      if (checkHardTimeout()) return;
       stdoutTail = `${stdoutTail}\n${line}`.slice(-4000);
       let out;
       try {
@@ -1979,7 +2002,21 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
           sseSend(res, 'thinking', { text: thinking });
         }
       }
+      // ── 工具调用次数上限：防止 agent 在循环调用工具中永远跑不完 ──
+      const MAX_TOOL_CALLS = Number(process.env.MYTEAM_MAX_TOOL_CALLS) || 80;
+      let toolCallCount = 0;
+      const TOOL_LIMIT_MESSAGE = `tool call limit exceeded (${MAX_TOOL_CALLS})`;
+
       for (const activity of activities) {
+        if (activity.phase === 'started') toolCallCount++;
+        if (toolCallCount > MAX_TOOL_CALLS) {
+          childRecord.phase = 'tool_limit';
+          childRecord.statusText = TOOL_LIMIT_MESSAGE;
+          sseSend(res, 'status', { agent: agentKey, phase: 'tool_limit', text: TOOL_LIMIT_MESSAGE });
+          try { child.kill('SIGTERM'); } catch {}
+          setTimeout(() => { if (!child.killed) { try { child.kill('SIGKILL'); } catch {} } }, 2000);
+          return; // 不再处理更多 activity
+        }
         childRecord.phase = activity.phase === 'completed' ? 'working' : (activity.phase || 'working');
         childRecord.statusText = activity.summary || `${activity.name || '工具'} ${activity.phase || '运行中'}`;
         childRecord.currentActivity = {
@@ -3339,9 +3376,36 @@ async function handle(req, res) {
       return res.end(JSON.stringify({ error: '任务不存在' }));
     }
     
-    // 重置任务状态为 pending，并同步唯一 lifecycle 契约。
-    Object.assign(task, synchronizeTaskRecord(task, {
-      status: 'pending',
+    // 重置任务状态为 pending，并使用 transitionTaskLifecycle 确保 lifecycle.state 同步。
+    // 兼容非标准状态：先复位到 queued，再根据是否有 open_questions 推进到 waiting_input。
+    const currentState = task.lifecycle?.state || 'queued';
+    let resetTask = task;
+    if (!['queued', 'waiting_input', 'cancelled'].includes(currentState)) {
+      resetTask = transitionTaskLifecycle(task, 'queued', {
+        eventId: `manual-rerun-reset:${taskId}:${Date.now()}`,
+        reason: 'manual_rerun_state_align',
+        patch: {
+          status: 'pending',
+          phase: 'pending',
+          result: null,
+          error: null,
+          started_at: null,
+          finished_at: null,
+          gate_status: null,
+          review_status: null,
+          review_note: null,
+          reviewed_at: null,
+          reviewer: null,
+          test_status: null,
+          review_scorecard: null,
+          previous_result: null,
+          review_only_pending: false,
+        },
+      });
+    }
+    const hasQuestions = Array.isArray(task.open_questions) && task.open_questions.filter(Boolean).length > 0;
+    const updated = synchronizeTaskRecord(resetTask, {
+      status: hasQuestions ? 'waiting_input' : 'pending',
       phase: 'pending',
       result: null,
       error: null,
@@ -3359,7 +3423,8 @@ async function handle(req, res) {
     }, {
       eventId: `manual-rerun:${taskId}:${Date.now()}`,
       reason: 'manual_rerun',
-    }));
+    });
+    Object.assign(task, updated);
     writeAllTasks(tasks);
     
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -3431,16 +3496,42 @@ async function handle(req, res) {
 
     const now = new Date().toISOString();
     if (decision === 'pass') {
-      Object.assign(task, synchronizeTaskRecord(task, {
-        gate_status: 'passed',
-        review_status: 'passed',
-        review_note: note || '人工确认通过',
-        reviewed_at: now,
-        reviewer: 'human',
-        test_status: 'manual_passed',
-        review_scorecard: reviewScorecard,
-        phase: 'done', // SOP: gate → done (最终完成)
-      }, { eventId: `human-gate:pass:${taskId}:${now}`, reason: 'human_gate_passed', at: now }));
+      // 确保 lifecycle 状态合法：先转到 completed，再同步旧字段
+      const curState = task.lifecycle?.state || 'running';
+      if (curState !== 'completed' && curState !== 'waiting_approval') {
+        if (['running', 'reviewing', 'running'].includes(curState)) {
+          Object.assign(task, transitionTaskLifecycle(task, 'waiting_approval', {
+            eventId: `human-gate:prep:${taskId}:${now}`,
+            reason: 'human_gate_state_align',
+            patch: {},
+          }));
+        }
+        Object.assign(task, transitionTaskLifecycle(task, 'completed', {
+          eventId: `human-gate:completed:${taskId}:${now}`,
+          reason: 'human_gate_passed',
+          patch: {
+            gate_status: 'passed',
+            review_status: 'passed',
+            review_note: note || '人工确认通过',
+            reviewed_at: now,
+            reviewer: 'human',
+            test_status: 'manual_passed',
+            review_scorecard: reviewScorecard,
+            phase: 'done',
+          },
+        }));
+      } else {
+        Object.assign(task, synchronizeTaskRecord(task, {
+          gate_status: 'passed',
+          review_status: 'passed',
+          review_note: note || '人工确认通过',
+          reviewed_at: now,
+          reviewer: 'human',
+          test_status: 'manual_passed',
+          review_scorecard: reviewScorecard,
+          phase: 'done',
+        }, { eventId: `human-gate:pass:${taskId}:${now}`, reason: 'human_gate_passed', at: now }));
+      }
     } else {
       Object.assign(task, synchronizeTaskRecord(task, {
         status: 'pending',

@@ -66,11 +66,26 @@ export function createTaskSubgraph(rawPorts) {
       });
       const reviewBase = task.lifecycle?.state === 'reviewing'
         ? task
-        : await ports.transitionTask(task, 'running', {
-          eventId: `langgraph:review-resume-prepare:${state.workflowRunId}:${task.id}`,
-          reason: 'review_only_retry_prepare',
-          patch: { error: null, failure_stage: null, retryable: null },
-        });
+        : (['running', 'queued', 'rework', 'interrupted'].includes(task.lifecycle?.state)
+            ? await ports.transitionTask(task, 'running', {
+                eventId: `langgraph:review-resume-prepare:${state.workflowRunId}:${task.id}`,
+                reason: 'review_only_retry_prepare',
+                patch: { error: null, failure_stage: null, retryable: null },
+              })
+            : await (async () => {
+                // 当前 lifecycle 状态无法直接转 running（如 completed / failed / waiting_approval）
+                // 先复位到 queued，再走 queued → running
+                const reset = await ports.transitionTask(task, 'queued', {
+                  eventId: `langgraph:review-reset:${state.workflowRunId}:${task.id}`,
+                  reason: 'review_only_retry_state_reset',
+                  patch: { error: null, failure_stage: null, retryable: null, status: 'pending', phase: 'review' },
+                });
+                return await ports.transitionTask(reset, 'running', {
+                  eventId: `langgraph:review-resume-prepare:${state.workflowRunId}:${task.id}`,
+                  reason: 'review_only_retry_prepare_after_reset',
+                  patch: {},
+                });
+              })());
       const reviewing = await ports.transitionTask(reviewBase, 'reviewing', {
         eventId: `langgraph:review-resume:${state.workflowRunId}:${task.id}`,
         reason: 'review_only_retry',
@@ -252,7 +267,26 @@ export function createTaskSubgraph(rawPorts) {
   };
 
   const complete = async (state) => {
-    const completed = await ports.transitionTask(state.currentTask, 'completed', {
+    // 只有 currentTask 处于允许的状态才能转 completed
+    // （rework 节点可能留下 'rework' 状态，而不是 'reviewing'）
+    let taskToComplete = state.currentTask;
+    const curState = taskToComplete.lifecycle?.state;
+    if (curState !== 'reviewing' && curState !== 'waiting_approval' && curState !== 'running') {
+      // 先转回合法中间态再推进
+      if (['queued', 'rework', 'interrupted'].includes(curState)) {
+        taskToComplete = await ports.transitionTask(taskToComplete, 'running', {
+          eventId: `langgraph:complete-prep:${state.workflowRunId}:${taskToComplete.id}`,
+          reason: 'complete_state_align',
+          patch: {},
+        });
+        taskToComplete = await ports.transitionTask(taskToComplete, 'reviewing', {
+          eventId: `langgraph:complete-review-transient:${state.workflowRunId}:${taskToComplete.id}`,
+          reason: 'complete_state_align',
+          patch: { review_status: state.review?.verdict || 'pass' },
+        });
+      }
+    }
+    const completed = await ports.transitionTask(taskToComplete, 'completed', {
       eventId: `langgraph:completed:${state.workflowRunId}:${state.currentTask.id}`,
       reason: state.review?.verdict === 'skipped' ? 'review_skipped' : 'review_passed',
       patch: {

@@ -3947,6 +3947,24 @@ async function handle(req, res) {
       // 引入 dispatch 内部函数所需的作用域变量（对重建后的简化版留空）
       const dispatchSession = getSession(descriptor.sessionId);
       const agentOverride = '';
+      // 重建 contextCache 以支持 collaborationContext 复用
+      const contextCache = new DispatchContextCache({ session: dispatchSession, agentOverride });
+      contextCache.workspaceBridge = buildWorkspaceBridge({ workspace: currentWorkspace() });
+      // 重建后的 execute/review：无法访问原始 closure-local 函数，
+      // 调用独立版（见下方 #rebuildExecute / #rebuildReview）。
+      rebuildCallbacks.executeTask = async (task) => {
+        return executeTask(task, Number(task.chain_depth || 0), task.chain_history || [], { graphManaged: true });
+      };
+      rebuildCallbacks.reviewTask = async (task, execution) => {
+        return runAutoReview(
+          task,
+          execution?.agent || task.executed_by || task.agent,
+          execution?.result || task.previous_result || '',
+          execution?.collaborationContext || buildTaskCollaborationContext(task),
+          { deferGate: Boolean(descriptor.options?.requireHumanGate) },
+        );
+      };
+      rebuildCallbacks.materializeSpawns = materializeGraphSpawns;
 
       // 从 descriptor 重建 ports callbacks
       const rebuildCallbacks = {
@@ -3961,19 +3979,11 @@ async function handle(req, res) {
           repository.upsert('tasks', updated);
           return updated;
         },
-        async executeTask(task) {
-          return executeTask(task, Number(task.chain_depth || 0), task.chain_history || [], { graphManaged: true });
-        },
-        async reviewTask(task, execution) {
-          return runAutoReview(
-            task,
-            execution?.agent || task.executed_by || task.agent,
-            execution?.result || task.previous_result || '',
-            execution?.collaborationContext || buildTaskCollaborationContext(task),
-            { deferGate: Boolean(descriptor.options?.requireHumanGate) },
-          );
-        },
-        materializeSpawns: materializeGraphSpawns,
+        // 重启恢复场景的简化 execute/review：不再能访问 closure-local executeTask()/runAutoReview()，
+        // 改为调用独立版（见下方 #rebuildExecute、#rebuildReview）。
+        executeTask: null,   // 实际调用前由下方注入
+        reviewTask: null,     // 实际调用前由下方注入
+        materializeSpawns: null,
         async applyClarification(task, answer) {
           const answers = Array.isArray(answer?.answers) ? answer.answers : [];
           const updated = synchronizeTaskRecord(task, {

@@ -3870,3 +3870,77 @@ body.artifacts-resizing { cursor: col-resize; user-select: none; }
   .workflow-action.quiet { margin-left: 0; }
 }
 
+/* ═══════════════════════════════════════════════════════════════
+   Task Review Cards — 验收进度与结果的可视化卡片
+   ═══════════════════════════════════════════════════════════════ */
+.task-review-chat-card {
+  --rc-pass: #16a34a;
+  --rc-rework: #d97706;
+  --rc-repair: #6b21a8;
+  --rc-reviewing: #2563eb;
+  display: flex; gap: 12px;
+  margin: 10px 0; padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  align-items: flex-start;
+  animation: reviewSlideIn 0.35s ease-out;
+}
+@keyframes reviewSlideIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.task-review-chat-card.passed { border-left: 4px solid var(--rc-pass); }
+.task-review-chat-card.rework { border-left: 4px solid var(--rc-rework); }
+.task-review-chat-card.fallback { border-left: 4px solid var(--muted); }
+.task-review-chat-card.reviewing {
+  border-left: 4px solid var(--rc-reviewing);
+  background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
+  border-color: #93c5fd;
+}
+.task-review-chat-icon {
+  width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px; font-weight: 700;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.task-review-chat-card.passed .task-review-chat-icon { background: #dcfce7; color: var(--rc-pass); }
+.task-review-chat-card.rework .task-review-chat-icon { background: #fef3c7; color: var(--rc-rework); }
+.task-review-chat-card.fallback .task-review-chat-icon { background: #f1f5f9; color: var(--muted); }
+.task-review-chat-card.reviewing .task-review-chat-icon {
+  background: #dbeafe; color: var(--rc-reviewing);
+  animation: reviewPulse 1.5s ease-in-out infinite;
+}
+@keyframes reviewPulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50%      { transform: scale(1.15); opacity: 0.7; }
+}
+.task-review-chat-main { flex: 1; min-width: 0; }
+.task-review-chat-title { font-weight: 600; font-size: 13px; margin-bottom: 2px; color: var(--text); }
+.task-review-chat-meta { font-size: 12px; color: var(--muted); margin-bottom: 2px; }
+.task-review-chat-note { font-size: 12px; color: #52525b; margin-top: 4px; padding: 6px 8px; background: #f8fafc; border-radius: 4px; }
+.task-review-spinner {
+  width: 100%; height: 3px; margin-top: 8px;
+  background: #e5e7eb; border-radius: 2px; overflow: hidden;
+}
+.task-review-spinner::after {
+  content: '';
+  display: block; width: 40%; height: 100%;
+  background: var(--rc-reviewing);
+  border-radius: 2px;
+  animation: reviewBar 1.8s ease-in-out infinite;
+}
+@keyframes reviewBar {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+.task-review-chat-card ul { margin: 6px 0 0 16px; font-size: 12px; color: var(--muted); }
+.task-review-fallback-btn {
+  margin-top: 4px; padding: 3px 10px;
+  font-size: 11px; border: 1px solid var(--line);
+  border-radius: 4px; background: white; cursor: pointer;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.task-review-fallback-btn:hover { background: var(--gray-soft); color: var(--text); }

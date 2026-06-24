@@ -3385,30 +3385,36 @@ async function handle(req, res) {
     }
     
     // 重置任务状态为 pending，并使用 transitionTaskLifecycle 确保 lifecycle.state 同步。
-    // 兼容非标准状态：先复位到 queued，再根据是否有 open_questions 推进到 waiting_input。
+    // 对于 failed / completed / running 等非初始状态，先 transition 到 queued 再同步。
     const currentState = task.lifecycle?.state || 'queued';
     let resetTask = task;
     if (!['queued', 'waiting_input', 'cancelled'].includes(currentState)) {
+      // 对于 failed 状态的任务，需要特别处理 failure_stage / retryable 等字段的清理
+      const patchDefaults = {
+        status: 'pending',
+        phase: 'pending',
+        result: null,
+        error: null,
+        started_at: null,
+        finished_at: null,
+        gate_status: null,
+        review_status: null,
+        review_note: null,
+        reviewed_at: null,
+        reviewer: null,
+        test_status: null,
+        review_scorecard: null,
+        previous_result: null,
+        review_only_pending: false,
+        failure_stage: null,
+        retryable: null,
+        interruption_reason: null,
+        interrupted_at: null,
+      };
       resetTask = transitionTaskLifecycle(task, 'queued', {
-        eventId: `manual-rerun-reset:${taskId}:${Date.now()}`,
+        eventId: `manual-rerun-reset:${taskId}:${new Date().toISOString()}`,
         reason: 'manual_rerun_state_align',
-        patch: {
-          status: 'pending',
-          phase: 'pending',
-          result: null,
-          error: null,
-          started_at: null,
-          finished_at: null,
-          gate_status: null,
-          review_status: null,
-          review_note: null,
-          reviewed_at: null,
-          reviewer: null,
-          test_status: null,
-          review_scorecard: null,
-          previous_result: null,
-          review_only_pending: false,
-        },
+        patch: patchDefaults,
       });
     }
     const hasQuestions = Array.isArray(task.open_questions) && task.open_questions.filter(Boolean).length > 0;
@@ -3428,8 +3434,10 @@ async function handle(req, res) {
       review_scorecard: null,
       previous_result: null,
       review_only_pending: false,
+      failure_stage: null,
+      retryable: null,
     }, {
-      eventId: `manual-rerun:${taskId}:${Date.now()}`,
+      eventId: `manual-rerun:${taskId}:${new Date().toISOString()}`,
       reason: 'manual_rerun',
     });
     Object.assign(task, updated);
@@ -4237,9 +4245,20 @@ async function handle(req, res) {
       };
       try {
         const statuses = await getAgentStatuses();
-        // 优先交叉 Agent 验收；仅有一个 Agent 可用时退化为独立的自验收调用。
-        const reviewer = statuses.find(a => a.available && a.key !== executorAgent)
-          || statuses.find(a => a.available && a.key === executorAgent);
+        // 优先交叉 Agent 验收（排除 executor 自己）；
+        // 但除非用户显式启用了 plan 中的 agent 角色，否则排除 codex 作为验收 agent，
+        // 因为 codex 通常是计划/总控角色，不应揽下所有验收工作。
+        // 仅有一个可用 agent 时退化为自验收。
+        const executor = executorAgent || task.executed_by || task.agent;
+        let reviewer = null;
+        if (statuses.filter(a => a.available && a.key !== executor).length > 1) {
+          // 有多个非 executor 的 agent 时，优先选 claude，其次非 codex 的
+          reviewer = statuses.find(a => a.available && a.key !== executor && a.key !== 'codex')
+            || statuses.find(a => a.available && a.key !== executor);
+        } else {
+          reviewer = statuses.find(a => a.available && a.key !== executor)
+            || statuses.find(a => a.available && a.key === executor);
+        }
         if (!reviewer) {
           const outcome = { verdict: 'skipped', reviewer: null, reason: '没有可用的 reviewer agent' };
           patchTask(task.id, {

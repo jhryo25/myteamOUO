@@ -443,6 +443,10 @@ export function createDispatchGraph(rawPorts, { checkpointer = new MemorySaver()
   };
 
   const advance = (state) => ({ cursor: state.cursor + 1, currentTask: null });
+
+  // P1 修复：halt 记录失败后继续推进队列，不再丢弃剩余任务。
+  // halt → select_task，直接回到任务选择节点。halt 内部已递增 cursor 并
+  // 返回 currentTask: null。select_task 看到 cursor >= tasks.length 就会 route 到 finish。
   const halt = async (state) => {
     const tasks = [...state.tasks];
     tasks[state.cursor] = state.currentTask;
@@ -450,15 +454,15 @@ export function createDispatchGraph(rawPorts, { checkpointer = new MemorySaver()
     const summary = {
       workflowRunId: state.workflowRunId,
       sessionId: state.sessionId,
-      status: 'failed',
+      status: 'running',
       done: state.completedTaskIds.length,
       failed: failedTaskIds.length,
       blockedTaskId: state.currentTask?.id || null,
       remaining: Math.max(0, state.tasks.length - state.cursor - 1),
     };
-    await ports.onWorkflowComplete(summary, { ...state, tasks, failedTaskIds, status: 'failed' });
-    ports.emit('workflow-failed', summary);
-    return { tasks, failedTaskIds, status: 'failed' };
+    await ports.onWorkflowComplete(summary, { ...state, tasks, failedTaskIds, status: 'running' });
+    // no emit('workflow-failed') — 继续下一个任务
+    return { tasks, failedTaskIds, cursor: state.cursor + 1, currentTask: null };
   };
   const finish = async (state) => {
     const status = state.failedTaskIds.length ? 'completed_with_errors' : 'completed';
@@ -499,7 +503,7 @@ export function createDispatchGraph(rawPorts, { checkpointer = new MemorySaver()
     .addEdge('enqueue_spawns', 'advance')
     .addEdge('advance', 'select_task')
     .addEdge('finish', END)
-    .addEdge('halt', END)
+    .addEdge('halt', 'select_task')
     .compile({ checkpointer, name: 'myteam-dispatch-workflow' });
 }
 

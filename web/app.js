@@ -1217,18 +1217,27 @@ function createTaskReviewCard({ id = '', title = '', reviewer = '', verdict = ''
   const passed = verdict === 'pass';
   const rework = verdict === 'rework';
   const repairing = verdict === 'agent_repair_pending'; // 兼容旧历史数据
+  const reviewing = verdict === 'reviewing'; // P2: 验收进行中的交互反馈
   const card = document.createElement('div');
-  card.className = `task-review-chat-card ${passed ? 'passed' : rework || repairing ? 'rework' : 'fallback'}`;
+  if (id) card.id = id;
+  card.className = `task-review-chat-card ${passed ? 'passed' : rework || repairing ? 'rework' : reviewing ? 'reviewing' : 'fallback'}`;
   const strategyLabel = strategy === 'self_review' ? 'Agent 自验收' : strategy === 'cross_agent' ? '跨 Agent 验收' : '验收兜底';
-  card.innerHTML = `
-    <div class="task-review-chat-icon">${passed ? '✓' : rework ? '↻' : '!'}</div>
-    <div class="task-review-chat-main">
-      <div class="task-review-chat-title">${esc(title || id || '任务')} · ${passed ? '验收通过' : rework ? '要求返工' : repairing ? 'Reviewer 协议异常（执行结果已保留）' : '自动验收未完成'}</div>
-      <div class="task-review-chat-meta">${esc([reviewer, strategyLabel, score !== null ? `${score} 分` : ''].filter(Boolean).join(' · '))}</div>
-      ${suggestion || reason ? `<div class="task-review-chat-note">${esc(suggestion || reason)}</div>` : ''}
-      ${findings?.length ? `<ul>${findings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}
-    </div>
-    ${!passed && !rework && !repairing ? '<button class="task-review-fallback-btn">打开验收 Gate</button>' : ''}`;
+  card.innerHTML = reviewing
+    ? `<div class="task-review-chat-icon">⟳</div>
+       <div class="task-review-chat-main">
+         <div class="task-review-chat-title">${esc(title || id || '任务')} · 正在验收中</div>
+         <div class="task-review-chat-meta">${esc([reviewer, strategyLabel].filter(Boolean).join(' · '))}</div>
+         ${reason ? `<div class="task-review-chat-note">${esc(reason)}</div>` : ''}
+         <div class="task-review-spinner"></div>
+       </div>`
+    : `<div class="task-review-chat-icon">${passed ? '✓' : rework ? '↻' : '!'}</div>
+      <div class="task-review-chat-main">
+        <div class="task-review-chat-title">${esc(title || id || '任务')} · ${passed ? '验收通过' : rework ? '要求返工' : repairing ? 'Reviewer 协议异常（执行结果已保留）' : '自动验收未完成'}</div>
+        <div class="task-review-chat-meta">${esc([reviewer, strategyLabel, score !== null ? `${score} 分` : ''].filter(Boolean).join(' · '))}</div>
+        ${suggestion || reason ? `<div class="task-review-chat-note">${esc(suggestion || reason)}</div>` : ''}
+        ${findings?.length ? `<ul>${findings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}
+      </div>
+      ${!passed && !rework && !repairing ? '<button class="task-review-fallback-btn">打开验收 Gate</button>' : ''}`;
   card.querySelector('.task-review-fallback-btn')?.addEventListener('click', () => {
     hubActiveTab = 'gate';
     openHub();
@@ -1238,6 +1247,16 @@ function createTaskReviewCard({ id = '', title = '', reviewer = '', verdict = ''
 
 function addTaskReviewCard(review) {
   hideWelcome();
+  // P2: 如果已有同一任务的验收卡片，更新而非重复添加
+  if (review.id) {
+    const existing = document.getElementById(review.id);
+    if (existing) {
+      const updated = createTaskReviewCard(review);
+      existing.replaceWith(updated);
+      scrollChat();
+      return updated;
+    }
+  }
   const card = createTaskReviewCard(review);
   chatEl.appendChild(card);
   scrollChat();
@@ -2725,12 +2744,20 @@ async function runDispatch(options = {}) {
       },
       'task-review-resume': ({ id, title, reviewer, message }) => {
         showWorkflowLive(message || '复用 Agent 结果，只重试 Reviewer', 'review', { currentTask: { id, title, reviewer } });
+        // P2: 验收阶段让用户感知更强的交互反馈
+        const existReview = document.getElementById(`trc-${CSS.escape(id)}`);
+        if (!existReview) addTaskReviewCard({ id: `trc-${id}`, title, reviewer, verdict: 'reviewing', reason: message || '正在重新启动 Reviewer' });
       },
       'task-review-start': ({ id, title, reviewer, strategy }) => {
         addSystemMsg(`${reviewer} 正在${strategy === 'self_review' ? '自验收' : '验收'}任务「${title || ''}」…`);
         showWorkflowLive(`${reviewer || 'Reviewer'} 正在${strategy === 'self_review' ? '自验收' : '验收'}「${title || ''}」`, 'review', { currentTask: { id, title, reviewer } });
+        // P2: 验收阶段开始时在聊天区插入明确的验收进度卡片
+        const existReview = document.getElementById(`trc-${CSS.escape(id)}`);
+        if (!existReview) addTaskReviewCard({ id: `trc-${id}`, title, reviewer: reviewer || 'Reviewer', verdict: 'reviewing', strategy, reason: `${reviewer || 'Reviewer'} 正在${strategy === 'self_review' ? '自验收' : '跨 Agent 验收'}「${title || id}」` });
       },
       'task-review-done': review => {
+        // P2 修复：验收完成时统一用 trc- 前缀 id，确保替换掉验收中卡片
+        review.id = review.id ? `trc-${review.id}` : review.id;
         addTaskReviewCard(review);
         if (review.verdict === 'rework') {
           showWorkflowLive('Reviewer 要求返工：当前任务将重新执行，不会进入下一任务', 'rework', {

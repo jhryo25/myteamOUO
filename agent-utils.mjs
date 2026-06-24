@@ -243,37 +243,26 @@ const AGENT_ENV_MAP = {
 };
 
 function buildAgentSpawnEnv(agent) {
-  // 从当前进程环境开始，但先清除可能从宿主机泄露的认证/代理变量，
-  // 避免 IDE 集成（如 VSCode Claude Code）的环境变量与 agent 配置冲突。
-  // 典型场景：ANTHROPIC_AUTH_TOKEN=PROXY_MANAGED 会覆盖 ANTHROPIC_API_KEY，
-  // 导致 Claude CLI 用 OAuth token 而非 agent 的 API key 去认证。
-  const env = { ...process.env };
-  const CONFLICTING_ENV_VARS = [
-    // Claude / Anthropic — IDE 集成/本地代理残留
-    'ANTHROPIC_AUTH_TOKEN',
-    'ANTHROPIC_BASE_URL',
-    'ANTHROPIC_API_KEY',
-    'ANTHROPIC_MODEL',
-    'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-    'ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME',
-    'ANTHROPIC_DEFAULT_SONNET_MODEL',
-    'ANTHROPIC_DEFAULT_SONNET_MODEL_NAME',
-    'ANTHROPIC_DEFAULT_OPUS_MODEL',
-    'ANTHROPIC_DEFAULT_OPUS_MODEL_NAME',
-    // Codex / OpenAI — 可能被其他工具设置的代理/认证
-    'OPENAI_API_KEY',
-    'OPENAI_BASE_URL',
-    'OPENAI_ORG_ID',
-    'OPENAI_PROJECT_ID',
-    // IDE hook 回调地址 — CLI 可能尝试回调不存在的 hook server
-    'CLAUDE_CODE_HOOK_URL',
-  ];
-  for (const key of CONFLICTING_ENV_VARS) {
-    delete env[key];
+  // 重要：不继承 process.env，避免 IDE（VSCode Claude Code）的完整环境泄露给子进程，
+  // 导致上下文 token 超限、认证冲突等问题。
+  // 只保留最小集合：PATH / HOME / USERPROFILE / SystemRoot / TEMP / TMP。
+  const env = {};
+  const KEEP_ENV_VARS = new Set([
+    'PATH', 'HOME', 'HOMEPATH', 'USERPROFILE', 'SYSTEMROOT', 'SYSTEMDRIVE',
+    'TEMP', 'TMP', 'TMPDIR', 'COMSPEC', 'PATHEXT', 'APPDATA', 'LOCALAPPDATA',
+    'NODE_PATH',  // Node.js 可能需要的模块路径
+    'LANG', 'LC_ALL', 'LC_CTYPE',
+  ]);
+  for (const key of KEEP_ENV_VARS) {
+    if (process.env[key]) env[key] = process.env[key];
+  }
+  // 保留通过 .env 文件显式配置的 agent 路径相关变量（不含认证 token）
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key === 'MYTEAM_DB_PATH') env[key] = value;
   }
 
-  const mapping = AGENT_ENV_MAP[agent.key] || {};
   // 写入按 agent 类型映射的 env 名
+  const mapping = AGENT_ENV_MAP[agent.key] || {};
   if (agent.baseUrl && mapping.baseUrl) env[mapping.baseUrl] = agent.baseUrl;
   if (agent.apiKey  && mapping.apiKey)  env[mapping.apiKey]  = agent.apiKey;
   if (agent.model   && mapping.model)   env[mapping.model]   = agent.model;

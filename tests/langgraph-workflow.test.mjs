@@ -122,7 +122,7 @@ test('LangGraph task subgraph loops through bounded rework before completing', a
   assert.equal(fake.records.get('t1').lifecycle.state, 'completed');
 });
 
-test('review protocol failure halts the queue and preserves execution for reviewer-only retry', async () => {
+test('review protocol failure records the task as failed but continues the queue', async () => {
   const fake = fakePorts({
     reviewTask() {
       return { verdict: 'review_error', code: 'review_protocol_failed', retryable: true, reason: 'invalid reviewer payload' };
@@ -135,14 +135,14 @@ test('review protocol failure halts the queue and preserves execution for review
     tasks: [task('t1'), task('t2')],
   });
 
-  assert.equal(state.values.status, 'failed');
-  assert.deepEqual(state.values.failedTaskIds, ['t1']);
-  assert.equal(fake.calls.execute, 1, 'the next task must not start after reviewer failure');
-  assert.equal(fake.calls.review, 1);
-  assert.equal(fake.records.has('t2'), false);
+  // P1 修复：halt 不再终止队列，而是继续处理剩余任务。
+  assert.equal(state.values.status, 'completed_with_errors');
+  assert.equal(fake.calls.execute, 2, 't2 must execute after t1 fails');
+  assert.equal(fake.calls.review, 2);
   assert.equal(fake.records.get('t1').failure_stage, 'review');
   assert.equal(fake.records.get('t1').review_only_pending, true);
   assert.equal(fake.records.get('t1').previous_result, 'result:t1');
+  assert.equal(fake.records.get('t2').lifecycle.state, 'failed');
 });
 
 test('review-only retry skips Agent execution and reruns only Reviewer', async () => {

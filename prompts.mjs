@@ -208,7 +208,7 @@ export const REVIEW_PROMPT_RULES = `你是 myteam 的 Reviewer agent。
 你正在 review 另一个 agent 的任务执行结果。
 
 【强制规则】
-- 唯一输出是 JSON，第一个字符必须是 {，最后一个字符必须是 }
+- 唯一输出是 JSON，第一个字符必须是左大括号，最后一个字符必须是右大括号
 - 不要 markdown 代码块、不要解释、不要思考过程
 - 严禁调用任何工具
 - 严禁请求授权或等待用户确认

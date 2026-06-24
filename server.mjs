@@ -4302,6 +4302,23 @@ async function handle(req, res) {
           ...outcome,
         });
         recordReviewHistory(outcome);
+        // 确保 lifecycle 状态同步：如果 reviewer 返回 rework，显式写入 lifecycle state
+        if (data.verdict === 'rework') {
+          try {
+            const latest = readTasks().find(item => item.id === task.id) || task;
+            const reworked = transitionTaskLifecycle(latest, 'rework', {
+              eventId: `review-rework:${task.id}:${Date.now()}`,
+              reason: 'review_requested_rework',
+              patch: reviewPatch,
+            });
+            Object.assign(task, reworked);
+          } catch (lifecycleErr) {
+            // 如果 transitionTaskLifecycle 抛异常（如 lifecycle.state 不在允许转 rework 的集合中），
+            // 退而求其次：让图节点自行对齐，这里只写入旧字段
+            console.warn(`[myteam] lifecycle rework transition failed for ${task.id}: ${lifecycleErr.message} — using legacy sync`);
+            patchTask(task.id, reviewPatch);
+          }
+        }
         return outcome;
       } catch (err) {
         const outcome = {

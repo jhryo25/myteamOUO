@@ -3534,22 +3534,47 @@ async function handle(req, res) {
         }, { eventId: `human-gate:pass:${taskId}:${now}`, reason: 'human_gate_passed', at: now }));
       }
     } else {
-      Object.assign(task, synchronizeTaskRecord(task, {
-        status: 'pending',
-        gate_status: 'rework',
-        review_status: 'rework',
-        review_note: note || '人工要求返工，请按验收标准补齐结果',
-        reviewed_at: now,
-        reviewer: 'human',
-        test_status: 'manual_rework',
-        review_scorecard: reviewScorecard,
-        previous_result: task.result || task.previous_result || null,
-        result: null,
-        error: null,
-        started_at: null,
-        finished_at: null,
-        phase: 'impl', // SOP: rework 回退到 impl
-      }, { eventId: `human-gate:rework:${taskId}:${now}`, reason: 'human_gate_rework', at: now }));
+      // 人工要求返工：显式写入 lifecycle.state = 'rework'
+      try {
+        Object.assign(task, transitionTaskLifecycle(task, 'rework', {
+          eventId: `human-gate:rework:${taskId}:${now}`,
+          reason: 'human_gate_requested_rework',
+          patch: {
+            status: 'pending',
+            gate_status: 'rework',
+            review_status: 'rework',
+            review_note: note || '人工要求返工，请按验收标准补齐结果',
+            reviewed_at: now,
+            reviewer: 'human',
+            test_status: 'manual_rework',
+            review_scorecard: reviewScorecard,
+            previous_result: task.result || task.previous_result || null,
+            result: null,
+            error: null,
+            started_at: null,
+            finished_at: null,
+            phase: 'impl',
+          },
+        }));
+      } catch (lifecycleErr) {
+        console.warn(`[myteam] human gate rework lifecycle transition failed for ${taskId}: ${lifecycleErr.message}`);
+        Object.assign(task, synchronizeTaskRecord(task, {
+          status: 'pending',
+          gate_status: 'rework',
+          review_status: 'rework',
+          review_note: note || '人工要求返工，请按验收标准补齐结果',
+          reviewed_at: now,
+          reviewer: 'human',
+          test_status: 'manual_rework',
+          review_scorecard: reviewScorecard,
+          previous_result: task.result || task.previous_result || null,
+          result: null,
+          error: null,
+          started_at: null,
+          finished_at: null,
+          phase: 'impl',
+        }, { eventId: `human-gate:rework:${taskId}:${now}`, reason: 'human_gate_rework', at: now }));
+      }
     }
 
     writeAllTasks(tasks);

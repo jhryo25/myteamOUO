@@ -4709,7 +4709,14 @@ async function handle(req, res) {
       },
       async transitionTask(task, nextState, meta) {
         const latest = readTasks().find((item) => item.id === task.id) || task;
-        const updated = transitionTaskLifecycle(latest, nextState, meta);
+        // 使用 state.currentTask 传入的 canonical 状态（已在图节点内 normalizeTaskRecord），
+        // 而非 SQLite 中可能过时的记录。只在两者 major 不一致时以 SQLite 为主。
+        const graphState = task.lifecycle?.state;
+        const dbState = latest.lifecycle?.state;
+        const canonical = graphState && graphState !== dbState
+          ? { ...latest, lifecycle: { ...latest.lifecycle, state: graphState } }
+          : latest;
+        const updated = transitionTaskLifecycle(canonical, nextState, meta);
         repository.upsert('tasks', updated);
         return updated;
       },

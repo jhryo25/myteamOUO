@@ -45,7 +45,7 @@ const TASK_TRANSITIONS = Object.freeze({
   running: new Set(['reviewing', 'waiting_approval', 'interrupted', 'completed', 'failed', 'cancelled']),
   reviewing: new Set(['waiting_approval', 'rework', 'interrupted', 'completed', 'failed', 'cancelled']),
   waiting_approval: new Set(['rework', 'completed', 'cancelled']),
-  rework: new Set(['waiting_input', 'running', 'failed', 'cancelled']),
+  rework: new Set(['waiting_input', 'running', 'reviewing', 'failed', 'cancelled']),
   interrupted: new Set(['queued', 'running', 'failed', 'cancelled']),
   completed: new Set(['queued', 'rework']),
   failed: new Set(['queued', 'running', 'cancelled']),

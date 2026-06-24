@@ -238,7 +238,26 @@ export function createTaskSubgraph(rawPorts) {
       ports.emit('task-failed', { id: failed.id, title: failed.title, error: message });
       return { currentTask: failed, reworkAttempts: attempt, taskOutcome: 'failed', error: message };
     }
-    const reworkTask = await ports.transitionTask(state.currentTask, 'rework', {
+    // 确保 state.currentTask 的 lifecycle.state 是 'reviewing' 或可合法到达 'rework' 的状态。
+    // 如果是 'rework'（上次重做后未推进），先走 running → reviewing 对齐。
+    let taskToRework = state.currentTask;
+    const curState = taskToRework.lifecycle?.state || 'reviewing';
+    if (!['reviewing', 'waiting_approval', 'running'].includes(curState)) {
+      // 非标准到达（如 interrupt 恢复、手动 Gate 写入等），先复位
+      if (['queued', 'rework', 'interrupted', 'failed'].includes(curState)) {
+        taskToRework = await ports.transitionTask(taskToRework, 'running', {
+          eventId: `langgraph:rework-prep:${state.workflowRunId}:${taskToRework.id}:${attempt}`,
+          reason: 'rework_state_align',
+          patch: {},
+        });
+        taskToRework = await ports.transitionTask(taskToRework, 'reviewing', {
+          eventId: `langgraph:rework-reviewing:${state.workflowRunId}:${taskToRework.id}:${attempt}`,
+          reason: 'rework_state_align',
+          patch: { review_status: null },
+        });
+      }
+    }
+    const reworkTask = await ports.transitionTask(taskToRework, 'rework', {
       eventId: `langgraph:rework:${state.workflowRunId}:${state.currentTask.id}:${attempt}`,
       reason: 'review_requested_rework',
       patch: {

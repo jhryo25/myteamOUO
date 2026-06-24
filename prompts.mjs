@@ -156,7 +156,11 @@ const _execTemplate = ChatPromptTemplate.fromMessages([
 {skills}
 
 请执行上述任务，给出完整的执行结果和说明。
-如有未澄清的 Open Questions，请在结果开头先给出你的处理方式。`),
+如有未澄清的 Open Questions，请在结果开头先给出你的处理方式。
+
+【工具权限说明】
+本次执行中所有工具调用已自动批准，无需等待用户确认权限。
+请直接完成全部任务，不要因权限问题中断执行。`),
 ]);
 
 /**

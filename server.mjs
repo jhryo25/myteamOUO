@@ -2046,6 +2046,13 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
       touch(); // 教训1: stderr 也是活跃信号
       stderrText += data.toString();
       if (stderrText.length > 4000) stderrText = stderrText.slice(-4000);
+      // CLI 内部权限请求自动批准（如 WebSearch / bash / file 工具等待确认）
+      // 检测到 stderr 包含 permission 提示时，向 stdin 写入 'allow' 批准
+      if (/permission|批准|allow|approval|waiting|denied/i.test(data.toString())) {
+        try {
+          child.stdin.write('allow\n');
+        } catch (e) { /* stdin 已关闭，忽略 */ }
+      }
     });
 
     child.on('close', (code) => {

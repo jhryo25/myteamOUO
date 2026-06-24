@@ -4111,13 +4111,25 @@ async function handle(req, res) {
           ? `agent:${filterAgent}`
           : 'all_pending';
 
+    // 审批通过后重试时，使用与首次请求相同的 pending 集合，避免
+    // session 切换、task 状态改变等导致第二次请求看到空数组。
+    const approvalPendingIds = body._approvalTaskIds && Array.isArray(body._approvalTaskIds)
+      ? body._approvalTaskIds : null;
+    if (approvalPendingIds) {
+      const idSet = new Set(approvalPendingIds);
+      pending = pending.filter(t => idSet.has(t.id));
+    }
+
+    const payloadForApproval = {
+      selection,
+      pendingCount: pending.length,
+      requestedAgent: agentOverride || 'task_assignment',
+      taskIds: pending.map(t => t.id),
+    };
+
     if (!requireApproval(res, {
       operation: 'agent.dispatch',
-      payload: {
-        selection,
-        pendingCount: pending.length,
-        requestedAgent: agentOverride || 'task_assignment',
-      },
+      payload: payloadForApproval,
       sessionId: dispatchSession?.id || sessionId,
       approvalId: body.approvalId,
     })) return;

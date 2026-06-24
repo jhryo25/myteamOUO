@@ -2117,7 +2117,12 @@ function ssePost(url, body, handlers) {
         const data = await res.json();
         if (res.status === 202 && data.approvalRequired) {
           const accepted = await decideInlineApproval(data.approval);
-          if (accepted) return ssePost(url, { ...body, approvalId: data.approval.id }, handlers).then(resolve);
+          if (accepted) {
+            // 把首次 pending 列表传给下一次请求，确保审批前
+            // 后看到的 pending 集合相同
+            const pendingIds = data.approval.payload?.taskIds || [];
+            return ssePost(url, { ...body, approvalId: data.approval.id, _approvalTaskIds: pendingIds }, handlers).then(resolve);
+          }
           handlers.error?.({ message: '用户拒绝操作' });
           return resolve(null);
         }

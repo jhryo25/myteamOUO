@@ -835,7 +835,8 @@ function renderPlanTaskRow(task, index, agentControl, { open = false } = {}) {
   </details>`;
 }
 
-function addPlanCard(goal, tasks) {
+function addPlanCard(goal, tasks, opts = {}) {
+  const { deferActions = false } = opts;
   hideWelcome();
   // 可用 agent 列表（用于下拉）
   const availableAgents = (window.agentConfigList || mentionAgents)
@@ -863,9 +864,9 @@ function addPlanCard(goal, tasks) {
   const suggestionBtns = Object.entries(agentCounts)
     .filter(([agent]) => availableKeys.has(agent))
     .map(([agent, cnt]) =>
-      `<button class="plan-suggest-btn" data-agent="${esc(agent)}">
-        ▶ 让 ${esc(agent)} 执行 (${cnt} 条)
-      </button>`
+      deferActions
+        ? `<button class="plan-suggest-btn" data-agent="${esc(agent)}" disabled title="任务列表即将加载完成...">▶ 让 ${esc(agent)} 执行 (${cnt} 条)</button>`
+        : `<button class="plan-suggest-btn" data-agent="${esc(agent)}">▶ 让 ${esc(agent)} 执行 (${cnt} 条)</button>`
     ).join('');
 
   const row = document.createElement('div');
@@ -881,7 +882,7 @@ function addPlanCard(goal, tasks) {
       <div class="plan-suggest-row">
         <span class="plan-suggest-label">建议执行方式：</span>
         ${suggestionBtns}
-        <button class="plan-suggest-btn plan-suggest-manual">手动选择任务</button>
+        <button class="plan-suggest-btn plan-suggest-manual" ${deferActions ? 'disabled' : ''}>手动选择任务</button>
       </div>
     </div>`;
 
@@ -1562,7 +1563,24 @@ async function loadTasks() {
     dispatchBtn.classList.add('hidden');
     dispatchBtn.disabled = true;
   }
+  // 统一激活 plan 卡片中的延迟执行按钮
+  activateDeferredPlanActions({ hasClarifications, hasPending, isRunning: isCurrentSessionRunning() });
   return tasks;
+}
+
+function activateDeferredPlanActions({ hasClarifications = false, hasPending = false, isRunning = false } = {}) {
+  const disabled = hasClarifications || isRunning;
+  document.querySelectorAll('.plan-suggest-btn[data-agent][disabled]').forEach(btn => {
+    btn.disabled = disabled;
+    if (disabled) {
+      btn.title = hasClarifications ? '任务需要先确认信息才能执行' : '当前会话正在运行中';
+    } else {
+      btn.removeAttribute('title');
+    }
+  });
+  document.querySelectorAll('.plan-suggest-manual[disabled]').forEach(btn => {
+    btn.disabled = false;
+  });
 }
 
 function filterAndRenderTasks() {
@@ -2575,7 +2593,7 @@ async function doPlan(goal) {
       finishPlanProgress(tasks?.length || written || 0);
       hideRunningPanel();
       if (tasks && tasks.length) {
-        addPlanCard(goal, tasks);
+        addPlanCard(goal, tasks, { deferActions: true });
       } else {
         addSystemMsg(`✓ 拆解完成，共 ${written} 条任务（run_id: ${runId}）`);
       }

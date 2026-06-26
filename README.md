@@ -3,8 +3,9 @@
 > 一个本地优先的多 Agent 协作控制台：把 Codex、Claude Code、Kimi 等本机 CLI 串成可拆解、可执行、可审查、可恢复的任务流水线。
 
 [![Node.js](https://img.shields.io/badge/Node.js-22.5%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
-[![Tests](https://img.shields.io/badge/tests-100%20passed-brightgreen)](#验证)
+[![Tests](https://img.shields.io/badge/tests-CI%2061%2F61-brightgreen)](#验证)
 [![CI](https://img.shields.io/badge/CI-syntax%20%2B%20tsc%20%2B%20test-blue)](#验证)
+[![Branch](https://img.shields.io/badge/main-protected-red)](https://github.com/jhryo25/myteamOUO/settings/branches)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ## 30 秒理解这个项目
@@ -189,12 +190,14 @@ TypeScript 核心模块 (tsc --noEmit 零错误):
 ```bash
 npm run check      # 全栈语法检查 (server + modules + routes)
 npm run typecheck  # TypeScript 类型检查 (tsc --noEmit)
-npm test           # 100/100 通过
+npm test           # 全部测试 (含数据依赖测试，需本地 data/)
 ```
 
-CI/CD: push/PR 到 main 自动触发 syntax-check + typecheck + test ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
+CI/CD: push/PR 到 main 自动触发 syntax-check + typecheck + test (61 核心 case, [`.github/workflows/ci.yml`](.github/workflows/ci.yml))
 
-当前自动化测试覆盖结构化计划、LangGraph 多任务队列与派生任务、受限返工、Reviewer 协议解析与单节点重试、失败后停止队列、人工中断/恢复、工作流卡片与实时活动恢复、SQLite checkpoint、首次使用模板、上下文恢复、Agent 回退、工具事件、路径安全、审批指纹、审计脱敏、调度互斥和中断恢复等关键链路；本地测试结果为 `100/100` 通过。
+**main 分支已保护**：必须 PR + CI 绿 + 至少 1 approve 才能合并，禁止直接 push 和 force push。
+
+当前自动化测试覆盖结构化计划、LangGraph 多任务队列、Reviewer 协议、人工中断/恢复、SQLite checkpoint、Agent 回退、审批指纹与审计脱敏等关键链路。
 
 ## 当前边界与下一步
 

@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  syntax-check:
+    name: Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - name: Node.js syntax check
+        run: |
+          node --check server.mjs
+          node --check dispatch.mjs
+          node --check storage.mjs
+          node --check governance.mjs
+          node --check scheduler.mjs
+          node --check collaboration-context.mjs
+          node --check workflow-state.mjs
+          node --check workflow/checkpointer.mjs
+          node --check workflow/ports.mjs
+          node --check workflow/dispatch-graph.mjs
+          node --check workflow/turn-graph.mjs
+          node --check commandSafety.mjs
+          node --check product-guidance.mjs
+          node --check callbacks.mjs
+          node --check agent-utils.mjs
+          node --check prompts.mjs
+          node --check output-parsers.mjs
+          node --check plan.mjs
+          node --check server/config.mjs
+          node --check server/services/chain-task.mjs
+          node --check server/services/lesson.mjs
+          node --check server/services/skill-registry.mjs
+          node --check server/services/agent-status.mjs
+          node --check server/services/session-store.mjs
+          node --check server/services/logger.mjs
+          node --check server/middleware/cors.mjs
+          node --check server/routes/static-files.mjs
+          node --check server/routes/sessions.mjs
+          node --check server/routes/agents.mjs
+          node --check server/routes/skills.mjs
+
+  typecheck:
+    name: TypeScript Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - name: TypeScript type check
+        run: npx tsc --noEmit --project tsconfig.json
+
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - name: Run test suite
+        run: npm test

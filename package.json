@@ -6,7 +6,8 @@
   "scripts": {
     "plan": "node plan.mjs",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check server.mjs && node --check dispatch.mjs && node --check web/app.js && node --check storage.mjs && node --check governance.mjs && node --check scheduler.mjs && node --check collaboration-context.mjs && node --check workflow-state.mjs && node --check workflow/checkpointer.mjs && node --check workflow/ports.mjs && node --check workflow/dispatch-graph.mjs && node --check workflow/turn-graph.mjs && node --check commandSafety.mjs && node --check product-guidance.mjs"
+    "check": "node --check server.mjs && node --check dispatch.mjs && node --check storage.mjs && node --check governance.mjs && node --check scheduler.mjs && node --check collaboration-context.mjs && node --check workflow-state.mjs && node --check workflow/checkpointer.mjs && node --check workflow/ports.mjs && node --check workflow/dispatch-graph.mjs && node --check workflow/turn-graph.mjs && node --check commandSafety.mjs && node --check product-guidance.mjs",
+    "typecheck": "tsc --noEmit --project tsconfig.json"
   },
   "engines": {
     "node": ">=22.5"
@@ -32,5 +33,9 @@
     "@langchain/langgraph-checkpoint-sqlite": "^1.0.3",
     "cron-parser": "^5.5.0",
     "zod": "^4.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "typescript": "^6.0.3"
   }
 }

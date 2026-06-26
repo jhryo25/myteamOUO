@@ -3,12 +3,24 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="myteam — 本地多 Agent 协作控制台，AI 团队任务规划与执行">
+  <meta name="theme-color" content="#c96a2a" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1a1510" media="(prefers-color-scheme: dark)">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23c96a2a'/><text x='16' y='22' text-anchor='middle' font-size='18' fill='white' font-family='sans-serif'>M</text></svg>">
   <title>myteam · A2A 控制台</title>
+  <link rel="stylesheet" href="css/theme.css">
+  <link rel="stylesheet" href="css/premium.css">
+  <link rel="stylesheet" href="css/drawers.css">
+  <link rel="stylesheet" href="css/task-panel.css">
   <link rel="stylesheet" href="app.css">
   <!-- marked.js：轻量 Markdown 渲染（27KB） -->
   <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
 </head>
 <body>
+
+<a href="#goalInput" class="skip-link">跳到输入区</a>
+<div class="topbar-glow"></div>
 
 <!-- ── topbar (简化) ── -->
 <div class="topbar">
@@ -17,9 +29,9 @@
     <span class="agent-pill"><span class="dot"></span>连接中…</span>
   </div>
   <button class="artifacts-btn" id="artifactsBtn" title="查看当前会话生成的文件" aria-label="查看当前会话生成的文件"><span aria-hidden="true">📁</span><span class="artifacts-btn-label">会话文件</span><span class="artifacts-btn-count hidden" id="artifactsBtnCount">0</span></button>
-  <button class="hub-btn" id="hubBtn" title="打开 Hub">Hub</button>
-  <button class="skills-page-btn" id="skillsPageBtn" title="Skills 管理">Skills</button>
-  <button class="settings-btn" id="settingsBtn" title="Agent 配置">⚙</button>
+  <button class="hub-btn magnetic" id="hubBtn" title="打开 Hub">Hub</button>
+  <button class="skills-page-btn magnetic" id="skillsPageBtn" title="Skills 管理">Skills</button>
+  <button class="settings-btn magnetic" id="settingsBtn" title="Agent 配置">⚙</button>
 </div>
 
 <!-- ── Agent 管理抽屉 ── -->
@@ -117,9 +129,9 @@
       <!-- 模式切换 -->
       <div class="options-row">
         <span class="options-label">模式：</span>
-        <div class="radio-group" id="modeGroup">
-          <div class="radio-btn active" data-value="chat">💬 对话</div>
-          <div class="radio-btn" data-value="plan">📋 拆任务</div>
+        <div class="radio-group" id="modeGroup" role="radiogroup" aria-label="对话模式">
+          <button class="radio-btn active" data-value="chat" role="radio" aria-checked="true">💬 对话</button>
+          <button class="radio-btn" data-value="plan" role="radio" aria-checked="false">📋 拆任务</button>
         </div>
         <!-- plan 模式下显示 agent 选择 -->
         <span class="options-label hidden" id="planAgentLabel" style="margin-left:8px;">Agent：</span>
@@ -309,6 +321,50 @@
   </div>
 </div>
 
-<script src="app.js"></script>
+<script src="js/utils/rich-blocks.js"></script>
+<script src="js/utils/premium-effects.js"></script>
+<script src="js/chat/bubble.js"></script>
+<script src="js/chat/plan-workflow.js"></script>
+<script src="js/components/artifacts.js"></script>
+<script src="js/components/skills.js"></script>
+<script src="js/app-core.js"></script>
+<button class="theme-toggle" id="themeToggle" aria-label="切换主题" title="切换亮色/暗色主题">🌓</button>
+<script>
+// 主题管理 — 亮色 / 暗色 / 跟随系统
+(function() {
+  const KEY = 'myteam.theme';
+  const ROOT = document.documentElement;
+  
+  function getSystemTheme() { return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'; }
+  
+  function loadTheme() {
+    const saved = localStorage.getItem(KEY);
+    if (saved === 'light' || saved === 'dark') { ROOT.className = saved; return; }
+    ROOT.className = getSystemTheme();
+  }
+  
+  function toggleTheme() {
+    const next = ROOT.classList.contains('dark') ? 'light' : 'dark';
+    ROOT.className = next;
+    localStorage.setItem(KEY, next);
+    updateIcon(next);
+  }
+  
+  function updateIcon(theme) {
+    const btn = document.getElementById('themeToggle');
+    if (btn) btn.textContent = theme === 'dark' ? '☀️' : '🌙';
+  }
+  
+  loadTheme();
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if (!localStorage.getItem(KEY)) { ROOT.className = getSystemTheme(); updateIcon(getSystemTheme()); }
+  });
+  
+  document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('themeToggle').addEventListener('click', toggleTheme);
+    updateIcon(ROOT.classList.contains('dark') ? 'dark' : 'light');
+  });
+})();
+</script>
 </body>
 </html>

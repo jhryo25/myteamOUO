@@ -4,6 +4,7 @@
 
 [![Node.js](https://img.shields.io/badge/Node.js-22.5%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Tests](https://img.shields.io/badge/tests-100%20passed-brightgreen)](#验证)
+[![CI](https://img.shields.io/badge/CI-syntax%20%2B%20tsc%20%2B%20test-blue)](#验证)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ## 30 秒理解这个项目
@@ -126,6 +127,7 @@ git clone https://github.com/jhryo25/myteamOUO.git
 cd myteamOUO
 cp .env.example .env
 npm install
+npm run rebuild  # 如 better-sqlite3 版本不匹配
 node server.mjs --port 7878
 ```
 
@@ -147,8 +149,9 @@ Browser UI
   ├─ Skills / Approvals / Schedules / Artifacts
   └─ SSE live events + history replay
              │
-server.mjs ──┼─ Agent adapters / Skill registry / Artifact service
-             ├─ REST API / SSE buses
+server.mjs ──┼─ server/services/   (lesson, session-store, skill-registry, logger…)
+             ├─ server/routes/     (sessions, agents, skills, static-files)
+             ├─ server/middleware/  (CORS)
              └─ LangGraph ports
              │
 workflow/ ───┼─ Dispatch graph / Task subgraph
@@ -164,6 +167,7 @@ Codex CLI / Claude Code / Kimi / custom variants
 
 主要模块：
 
+- `server/` — **NEW**: 服务层拆分 (services + routes + middleware 共 14 模块)
 - `agent-utils.mjs`：CLI 配置、启动、Prompt 与输出解析；
 - `collaboration-context.mjs`：结构化计划、连续上下文、证据检索、子代理协议；
 - `workflow/dispatch-graph.mjs`：多任务队列、Reviewer、返工、人工 Gate 与派生任务图；
@@ -173,14 +177,22 @@ Codex CLI / Claude Code / Kimi / custom variants
 - `storage.mjs`：SQLite、WAL、迁移和旧数据导入；
 - `governance.mjs`：风险策略、审批指纹和脱敏审计；
 - `scheduler.mjs`：Cron、时区、互斥和审批暂停；
-- `web/`：无框架前端与响应式交互。
+- `web/`：拆分后的前端组件 (app-core + 7 子模块) + 亮/暗主题。
+
+TypeScript 核心模块 (tsc --noEmit 零错误):
+- `server/services/logger.ts` — Logger 接口 & LogLevel 类型
+- `server/services/lesson.ts` — LessonPattern & TaskSnapshot 类型
+- `server/services/session-store.ts` — Session & RunState 完整类型
 
 ## 验证
 
 ```bash
-npm run check
-npm test
+npm run check      # 全栈语法检查 (server + modules + routes)
+npm run typecheck  # TypeScript 类型检查 (tsc --noEmit)
+npm test           # 100/100 通过
 ```
+
+CI/CD: push/PR 到 main 自动触发 syntax-check + typecheck + test ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
 
 当前自动化测试覆盖结构化计划、LangGraph 多任务队列与派生任务、受限返工、Reviewer 协议解析与单节点重试、失败后停止队列、人工中断/恢复、工作流卡片与实时活动恢复、SQLite checkpoint、首次使用模板、上下文恢复、Agent 回退、工具事件、路径安全、审批指纹、审计脱敏、调度互斥和中断恢复等关键链路；本地测试结果为 `100/100` 通过。
 
@@ -199,7 +211,11 @@ npm test
 
 ## 更多资料
 
-- [产品与技术交接](HANDOVER.md)
+- [交接文档](HANDOVER.md) — 本次改造全记录
+- [代码审查报告](CODE_REVIEW.md) — Server 端审查 & 修复
+- [前端审查报告](FRONTEND_REVIEW.md) — CSS/JS/HTML 审查 & 修复
+- [改进摘要](REFACTOR_SUMMARY.md) — Phase 1+2 拆分统计
+- [产品与技术交接](docs/product-handover.md)
 - [LangGraph 最终交接](docs/langgraph-final-handover.md)
 - [问题与限制](ISSUES.md)
 - [产品复盘课程](docs/problem-course.md)

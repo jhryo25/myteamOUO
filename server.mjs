@@ -85,81 +85,23 @@ const SKILL_SOURCES = {
   },
 };
 
-// A2A chain task store
-const chainTaskMessages = new Map();
-const chainTaskSSE = new Map();
+// A2A chain task store & shell executor → server/services/chain-task.mjs
+import { pushChainMessage, getChainMessages, chainTaskMessages, chainTaskSSE, executeShell, shellResults } from './server/services/chain-task.mjs';
 
-function pushChainMessage(taskId, msg) {
-  const fullMessage = { ...msg, timestamp: new Date().toISOString() };
-  if (!chainTaskMessages.has(taskId)) chainTaskMessages.set(taskId, []);
-  chainTaskMessages.get(taskId).push(fullMessage);
-  // 双写 SQLite：服务重启后消息不丢失
-  try {
-    repository.insertChainMessage({
-      id: `${taskId}:${chainTaskMessages.get(taskId).length}:${randomUUID().slice(0, 6)}`,
-      taskId,
-      sessionId: '',
-      role: msg.role || (msg.type || 'system'),
-      content: JSON.stringify(msg),
-      agentKey: msg.agent || null,
-    });
-  } catch (e) {
-    // 静默失败：内存缓存仍保留，不影响执行
-  }
-  const listeners = chainTaskSSE.get(taskId);
-  if (listeners) {
-    const sseData = 'data: ' + JSON.stringify(msg) + '\n\n';
-    for (const res of listeners) {
-      try { res.write(sseData); } catch {}
-    }
-  }
-}
+// 结构化日志 → server/services/logger.mjs
+import { logger } from './server/services/logger.mjs';
 
-function getChainMessages(taskId) {
-  // 先从 SQLite 查询（含服务重启恢复的消息），再合并内存中的热缓存
-  const memory = chainTaskMessages.get(taskId) || [];
-  try {
-    const persisted = repository.listChainMessages(taskId);
-    return persisted.map((row) => {
-      try { return JSON.parse(row.content); } catch { return { type: row.role, content: row.content, timestamp: row.createdAt }; }
-    });
-  } catch (e) {
-    return memory.length ? memory : [];
-  }
-}
+// 静态文件路由 → server/routes/static-files.mjs
+import { tryServeStatic } from './server/routes/static-files.mjs';
 
-const shellResults = new Map();
+// Session API 路由 → server/routes/sessions.mjs
+import { tryServeSessions, TRASH_RETENTION_MS } from './server/routes/sessions.mjs';
 
-function executeShell(command, runId, context = {}) {
-  shellResults.set(runId, { stdout: '', stderr: '', exitCode: null, done: false, startedAt: new Date().toISOString() });
-  const isWin = process.platform === 'win32';
-  const child = spawn(isWin ? 'powershell' : 'sh', [isWin ? '-Command' : '-c', command], {
-    stdio: 'pipe',
-    cwd: process.cwd(),
-    timeout: 30000,
-    windowsHide: true,
-  });
-  child.stdout.on('data', (d) => {
-    const text = d.toString();
-    const cur = shellResults.get(runId);
-    if (cur) { cur.stdout += text; shellResults.set(runId, cur); }
-  });
-  child.stderr.on('data', (d) => {
-    const text = d.toString();
-    const cur = shellResults.get(runId);
-    if (cur) { cur.stderr += text; shellResults.set(runId, cur); }
-  });
-  child.on('close', (code) => {
-    const cur = shellResults.get(runId);
-    if (cur) { cur.exitCode = code; cur.done = true; cur.finishedAt = new Date().toISOString(); shellResults.set(runId, cur); }
-    appendAudit({ operation: 'shell.execute', decision: context.approvalId ? 'authorized' : 'safe_policy', result: code === 0 ? 'succeeded' : 'failed', approvalId: context.approvalId, sessionId: context.sessionId, details: { command, runId, exitCode: code } });
-  });
-  child.on('error', (err) => {
-    const cur = shellResults.get(runId);
-    if (cur) { cur.stderr += err.message; cur.exitCode = -1; cur.done = true; cur.finishedAt = new Date().toISOString(); shellResults.set(runId, cur); }
-    appendAudit({ operation: 'shell.execute', decision: context.approvalId ? 'authorized' : 'safe_policy', result: 'failed', approvalId: context.approvalId, sessionId: context.sessionId, details: { command, runId, error: err.message } });
-  });
-}
+// Agent API 路由 → server/routes/agents.mjs
+import { tryServeAgents } from './server/routes/agents.mjs';
+
+// Skills API 路由 → server/routes/skills.mjs
+import { tryServeSkills } from './server/routes/skills.mjs';
 
 function findSkillMdInDir(dir) {
   try {
@@ -424,69 +366,8 @@ async function resolveRunnableAgent(preferredAgent) {
   return { agentKey: chosen?.key || preferred || agentKeys()[0] || 'codex', status: chosen };
 }
 
-function appendLesson(task, error) {
-  // 自动 pattern 分类（对齐 clowder-ai self-evolution Mode B）
-  const errMsg = String(error?.message || error || '');
-  let pattern = 'unknown';
-  if (/missing path|未配置/i.test(errMsg)) pattern = 'agent-not-configured';
-  else if (/exit code/i.test(errMsg)) pattern = 'cli-exit-error';
-  else if (/timeout/i.test(errMsg)) pattern = 'timeout';
-  else if (/ECONNREFUSED|ECONNRESET|stream disconnected/i.test(errMsg)) pattern = 'connection-lost';
-  else if (/context length|token/i.test(errMsg)) pattern = 'context-overflow';
-  else if (/Reconnecting/i.test(errMsg)) pattern = 'stream-disconnect';
-  else if (/EPERM|EACCES/i.test(errMsg)) pattern = 'permission-denied';
-  else if (/parse_failed|JSON/i.test(errMsg)) pattern = 'output-parse-failed';
-
-  const lesson = {
-    id: randomUUID().slice(0, 8),
-    task_id: task.id,
-    task_title: task.title,
-    goal: task.goal,
-    agent: task.agent,
-    session_id: task.session_id || '',
-    run_id: task.run_id || '',
-    error: errMsg.slice(0, 500),
-    pattern,
-    timestamp: new Date().toISOString(),
-    // 保留不可变快照。源任务即使被删除，Lesson 仍能解释“当时发生了什么”。
-    source_task_snapshot: {
-      id: task.id,
-      title: task.title,
-      goal: task.goal,
-      accept: task.accept,
-      steps: task.steps || [],
-      agent: task.agent,
-      session_id: task.session_id || '',
-      run_id: task.run_id || '',
-      status: task.status,
-      result: task.result || null,
-    },
-  };
-  return repository.append('lessons', lesson);
-}
-
-function relevantLessons(text = '', agent = '', limit = 3) {
-  const query = String(text || '').toLowerCase();
-  return repository.list('lessons')
-    .map((lesson) => {
-      const searchable = [lesson.pattern, lesson.error, lesson.task_title, lesson.goal].filter(Boolean).join(' ').toLowerCase();
-      let score = lesson.agent === agent ? 2 : 0;
-      for (const token of query.split(/[\s,，。；;、|]+/).filter((item) => item.length >= 2)) {
-        if (searchable.includes(token)) score += 1;
-      }
-      return { ...lesson, relevance_score: score };
-    })
-    .filter((lesson) => lesson.relevance_score > 0)
-    .sort((a, b) => b.relevance_score - a.relevance_score || String(b.timestamp).localeCompare(String(a.timestamp)))
-    .slice(0, limit);
-}
-
-function buildLessonContext(lessons = []) {
-  if (!lessons.length) return '';
-  return `【历史踩坑（仅作风险提示，不覆盖当前任务要求）】\n${lessons.map((lesson, index) =>
-    `${index + 1}. [${lesson.pattern || 'unknown'}] ${lesson.task_title || lesson.task_id || '历史任务'}：${String(lesson.error || '').slice(0, 240)}`
-  ).join('\n')}`;
-}
+// Lesson & pattern detection → server/services/lesson.mjs
+import { appendLesson, relevantLessons, buildLessonContext } from './server/services/lesson.mjs';
 
 function clarificationQuestionText(value) {
   return String(typeof value === 'string' ? value : value?.question || '').trim();
@@ -499,15 +380,9 @@ function clarificationQuestionOptions(value) {
 }
 
 function publicClarificationQuestion(task, value) {
-  return {
-    taskId: task.id,
-    taskTitle: task.title,
-    question: clarificationQuestionText(value),
-    options: clarificationQuestionOptions(value),
-  };
+  return { taskId: task.id, taskTitle: task.title, question: clarificationQuestionText(value), options: clarificationQuestionOptions(value) };
 }
 
-// 检测重复 pattern（对齐 clowder-ai self-evolution：同类错误 ≥2 次触发改进提案）
 function detectPatterns() {
   const lessons = readJsonl(LESSONS_FILE);
   const byPattern = {};
@@ -516,23 +391,16 @@ function detectPatterns() {
     if (!byPattern[p]) byPattern[p] = [];
     byPattern[p].push(l);
   }
-
   const patterns = Object.entries(byPattern)
     .map(([pattern, items]) => ({
-      pattern,
-      count: items.length,
-      agents: [...new Set(items.map(i => i.agent))],
-      first: items[0]?.timestamp,
-      last: items[items.length - 1]?.timestamp,
-      sample: items[0]?.error?.slice(0, 200) || '',
-      needsProposal: items.length >= 2,
+      pattern, count: items.length, agents: [...new Set(items.map(i => i.agent))],
+      first: items[0]?.timestamp, last: items[items.length - 1]?.timestamp,
+      sample: items[0]?.error?.slice(0, 200) || '', needsProposal: items.length >= 2,
     }))
     .sort((a, b) => b.count - a.count);
-
   return patterns;
 }
 
-// 生成改进提案（对齐 clowder-ai Evolution Proposal 5 槽模板）
 function generateProposal(pattern) {
   const lessons = readJsonl(LESSONS_FILE).filter(l => l.pattern === pattern.pattern);
   return {
@@ -541,15 +409,13 @@ function generateProposal(pattern) {
     evidence: lessons.slice(0, 5).map(l => `${l.timestamp} [${l.agent}] ${l.task_title}: ${l.error?.slice(0, 100)}`),
     root_cause: `pattern=${pattern.pattern}，涉及 agent: ${pattern.agents.join(', ')}`,
     lever: `最小杠杆：检查 ${pattern.agents.join('/')} 的配置和连接稳定性`,
-    verify: `修复后同类错误不再出现`,
-    created_at: new Date().toISOString(),
+    verify: `修复后同类错误不再出现`, created_at: new Date().toISOString(),
   };
 }
 
 function parseScalar(value) {
   const v = String(value || '').trim();
-  if (v === 'true') return true;
-  if (v === 'false') return false;
+  if (v === 'true') return true; if (v === 'false') return false;
   return v.replace(/^["']|["']$/g, '');
 }
 
@@ -1229,30 +1095,29 @@ function summarizeCostLedger(invocations, tasks = []) {
   };
 }
 
-// ── 对话历史 + Session 隔离（持久化到 .myteam/memory.json） ───
-// 数据结构: { sessions: [{ id, name, created_at, history: [...] }], activeId }
-const MEMORY_FILE = '.myteam/memory.json';
-const DEFAULT_SESSION_NAME = '默认对话';
-const DEFAULT_DRAFT_SESSION_NAME = '新对话';
+// ── Session 管理 → server/services/session-store.mjs ──
+import {
+  newSession, getSession, getActiveSession, getActiveSessionId, getAllSessions, getTrashedSessions,
+  loadSessions, saveSessions, setSessionRunState, publicSessionRunState, recordSessionMode,
+  maybeAutoRenameSession, createAndSwitchSession, switchActiveSession,
+  setSessions, setActiveSessionId, setTrashedSessions,
+  sessions, activeSessionId, trashedSessions,
+} from './server/services/session-store.mjs';
 
-// 内存数据：sessions 数组 + 当前激活的 session id
-let sessions = [];
-let activeSessionId = null;
-let trashedSessions = []; // 回收站：{ session, deletedAt }
-const TRASH_RETENTION_MS = 5 * 60 * 1000; // 5 分钟
-
-function newSession(name, { ephemeral = false } = {}) {
-  return {
-    id: randomUUID().slice(0, 8),
-    name: name || DEFAULT_DRAFT_SESSION_NAME,
-    created_at: new Date().toISOString(),
-    history: [],
-    continuity: null,
-    mode: null, // 'chat' | 'plan' | 'mixed'，由首次/最近一次操作决定
-    run_state: { status: 'idle', updatedAt: Date.now() },
-    ephemeral,
-  };
+function refreshSessionContinuity(session, source = 'manual') {
+  if (!session) return null;
+  session.continuity = buildContinuityCapsule({
+    sessionId: session.id, history: session.history,
+    previous: session.continuity, source,
+  });
+  return session.continuity;
 }
+
+// 启动时加载
+loadSessions();
+
+// 工作区文件 artifact 提取（引用当前工作区上下文）
+const _WORKSPACE_ARTIFACT_DENYLIST = ['.myteam', '.claude', 'node_modules', '.git', '__pycache__', '.venv', 'venv', '.workbuddy', 'skills-registry'];
 
 function extractWorkspaceFileArtifacts(text, { sessionId, agent, messageIndex }) {
   if (!text) return [];
@@ -1260,182 +1125,31 @@ function extractWorkspaceFileArtifacts(text, { sessionId, agent, messageIndex })
   const candidates = new Set();
   const likelyFile = /\.(?:html?|md|markdown|json|csv|txt|log|ya?ml|toml|css|[cm]?js|tsx?|jsx|py|sql|svg)$/i;
   const add = value => {
-    let candidate = String(value || '').trim()
-      .replace(/^file:\/\/\//i, '')
-      .replace(/[),.;:，。；：]+$/, '')
-      .replace(/\\/g, '/');
+    let candidate = String(value || '').trim().replace(/^file:\/\/\//i, '').replace(/[),.;:，。；：]+$/, '').replace(/\\/g, '/');
     if (!candidate || /^https?:\/\//i.test(candidate) || !likelyFile.test(candidate)) return;
     candidates.add(candidate);
   };
   for (const match of text.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)) add(match[1]);
   for (const match of text.matchAll(/`([^`\r\n]+)`/g)) add(match[1]);
   for (const match of text.matchAll(/(?:[A-Za-z]:[\\/]|(?:\.{0,2}[\\/])|(?:reports?|outputs?|docs|dist|build|public)[\\/])[^\s<>"'`]+\.(?:html?|md|markdown|json|csv|txt|log|ya?ml|toml|css|[cm]?js|tsx?|jsx|py|sql|svg)/gi)) add(match[0]);
-
   const artifacts = [];
   for (const candidate of candidates) {
     try {
       const abs = realpathSync(resolve(root, candidate));
       if (abs !== root && !abs.startsWith(root + sep)) continue;
       const rel = relative(root, abs);
-      if (WORKSPACE_DENYLIST.some(deny => rel.startsWith(deny) || rel.includes(sep + deny) || basename(abs).includes(deny))) continue;
+      if (_WORKSPACE_ARTIFACT_DENYLIST.some(deny => rel.startsWith(deny) || rel.includes(sep + deny) || basename(abs).includes(deny))) continue;
       const st = statSync(abs);
       if (!st.isFile() || st.size > 1024 * 1024 || !isWorkspaceTextFile(abs)) continue;
       const content = readFileSync(abs, 'utf8');
       const lang = extToLang(abs);
       const type = lang === 'html' ? 'html' : lang === 'json' ? 'json' : (lang === 'md' || lang === 'markdown') ? 'markdown' : 'code';
       const path = rel.replace(/\\/g, '/');
-      artifacts.push({
-        id: artifactId(sessionId, path, content), type, lang, path, content,
-        agent, sessionId, messageIndex, source: 'workspace-reference', createdAt: st.mtimeMs,
-        preview: content.trim().slice(0, 80),
-      });
-    } catch { /* missing or unreadable references are omitted from the file panel */ }
+      artifacts.push({ id: artifactId(sessionId, path, content), type, lang, path, content, agent, sessionId, messageIndex, source: 'workspace-reference', createdAt: st.mtimeMs, preview: content.trim().slice(0, 80) });
+    } catch { /* missing references are omitted */ }
   }
   return artifacts;
 }
-
-function setSessionRunState(session, status, patch = {}) {
-  if (!session) return null;
-  session.run_state = transitionSessionRunState(session.run_state, status, patch);
-  saveSessions();
-  return session.run_state;
-}
-
-function publicSessionRunState(state) {
-  if (!state) return { status: 'idle' };
-  const { input, error, ...safe } = state;
-  return safe;
-}
-
-function recordSessionMode(session, mode) {
-  if (!session) return;
-  if (!session.mode) session.mode = mode;
-  else if (session.mode !== mode) session.mode = 'mixed';
-}
-
-function isAutoSessionName(name) {
-  const text = String(name || '').trim();
-  return (
-    !text ||
-    text === DEFAULT_SESSION_NAME ||
-    text === DEFAULT_DRAFT_SESSION_NAME ||
-    /^对话\s*\d+$/.test(text)
-  );
-}
-
-function summarizeSessionTitle(text) {
-  const clean = String(text || '')
-    .replace(/(?:^|\n)\s*@(claude|codex|kimi)\b/gi, '')
-    .replace(/\s+/g, ' ')
-    .replace(/^[，。！？,.!?;；：:\s]+|[，。！？,.!?;；：:\s]+$/g, '')
-    .trim();
-  const firstSentence = clean.split(/[。！？!?；;\n]/)[0]?.trim() || clean;
-  if (!firstSentence) return DEFAULT_DRAFT_SESSION_NAME;
-  return firstSentence.length > 22 ? `${firstSentence.slice(0, 22)}…` : firstSentence;
-}
-
-function maybeAutoRenameSession(session, message) {
-  // 新手体验：新建对话时不要求先起名，等第一句话发出后自动生成一个短标题。
-  if (!session || session.history.length || !isAutoSessionName(session.name)) return;
-  session.name = summarizeSessionTitle(message);
-}
-
-function getSession(id) {
-  return sessions.find(s => s.id === id) || null;
-}
-
-function getActiveSession() {
-  return getSession(activeSessionId) || sessions[0];
-}
-
-function loadSessions() {
-  const stored = repository.loadSessionState();
-  if (stored.sessions.length) {
-    sessions = stored.sessions.map((session) => ({
-      ...session,
-      history: Array.isArray(session.history) ? session.history.slice(-40) : [],
-      run_state: session.run_state || { status: 'idle', updatedAt: Date.now() },
-    }));
-    activeSessionId = stored.activeId && getSession(stored.activeId) ? stored.activeId : sessions[0].id;
-    const now = Date.now();
-    trashedSessions = stored.trashedSessions
-      .filter((entry) => now - Number(entry.deletedAt || 0) < TRASH_RETENTION_MS);
-    return;
-  }
-  if (!existsSync(MEMORY_FILE)) {
-    sessions = [newSession()];
-    activeSessionId = sessions[0].id;
-    return;
-  }
-  try {
-    const data = JSON.parse(readFileSync(MEMORY_FILE, 'utf8'));
-    // 旧格式：扁平历史数组，迁移到默认 session
-    if (Array.isArray(data)) {
-      const s = newSession();
-      s.history = data.slice(-40);
-      sessions = [s];
-      activeSessionId = s.id;
-      return;
-    }
-    if (Array.isArray(data.sessions) && data.sessions.length) {
-      sessions = data.sessions.map(s => ({
-        id: s.id || randomUUID().slice(0, 8),
-        name: s.name || DEFAULT_SESSION_NAME,
-        created_at: s.created_at || new Date().toISOString(),
-        history: Array.isArray(s.history) ? s.history.slice(-40) : [],
-        continuity: s.continuity && typeof s.continuity === 'object' ? s.continuity : null,
-        mode: s.mode || null,
-        run_state: s.run_state || { status: 'idle', updatedAt: Date.now() },
-      }));
-      activeSessionId = data.activeId && getSession(data.activeId)
-        ? data.activeId : sessions[0].id;
-      if (Array.isArray(data.trashedSessions)) {
-        const now = Date.now();
-        trashedSessions = data.trashedSessions
-          .filter(t => now - t.deletedAt < TRASH_RETENTION_MS)
-          .map(t => ({ session: t.session, deletedAt: t.deletedAt }));
-      }
-      return;
-    }
-  } catch (err) {
-    console.error('Failed to load sessions:', err.message);
-  }
-  sessions = [newSession()];
-  activeSessionId = sessions[0].id;
-}
-
-function saveSessions() {
-  try {
-    const payload = {
-      activeId: activeSessionId,
-      sessions: sessions.map(s => ({
-        ...s,
-        history: s.history.slice(-40),
-      })),
-      trashedSessions: trashedSessions.map(t => ({
-        session: t.session,
-        deletedAt: t.deletedAt,
-      })),
-    };
-    repository.saveSessionState(payload);
-  } catch (err) {
-    console.error('Failed to save sessions:', err.message);
-  }
-}
-
-function refreshSessionContinuity(session, source = 'manual') {
-  if (!session) return null;
-  session.continuity = buildContinuityCapsule({
-    sessionId: session.id,
-    history: session.history,
-    previous: session.continuity,
-    source,
-  });
-  return session.continuity;
-}
-
-// 启动时加载
-loadSessions();
 let recoveredInterruptedSessions = false;
 for (const session of sessions) {
   if (['running', 'interrupting'].includes(session.run_state?.status)) {
@@ -1453,7 +1167,7 @@ if (recoveredInterruptedSessions) saveSessions();
 const taskRecovery = recoverInterruptedTaskRecords(readTasks());
 if (taskRecovery.recovered > 0) {
   writeAllTasks(taskRecovery.tasks);
-  console.warn(`[myteam] recovered ${taskRecovery.recovered} interrupted task(s) after service restart`);
+  logger.warn({ msg: 'recovered interrupted tasks', count: taskRecovery.recovered });
 }
 
 const langGraphCheckpointer = getSharedCheckpointer();
@@ -2223,60 +1937,23 @@ async function handle(req, res) {
     return json(res, 200, { runs: scheduleService.listRuns(scheduleId) });
   }
 
-  // 静态首页
-  if (req.method === 'GET' && (pathname === '/' || pathname === '/app.html')) {
-    const html = readFileSync('web/app.html', 'utf8');
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    return res.end(html);
-  }
+  // 静态文件路由（委托给 server/routes/static-files.mjs）
+  if (tryServeStatic(req, res, { pathname })) return;
 
-  // 静态资源（CSS/JS）
-  if (req.method === 'GET' && (pathname === '/app.css' || pathname === '/app.js')) {
-    const ext = pathname.slice(1); // 'app.css' or 'app.js'
-    const content = readFileSync(`web/${ext}`, 'utf8');
-    const contentType = ext.endsWith('.css') ? 'text/css' : 'application/javascript';
-    res.writeHead(200, { 'Content-Type': `${contentType}; charset=utf-8` });
-    return res.end(content);
-  }
+  // Session API 路由（委托给 server/routes/sessions.mjs）
+  if (await tryServeSessions(req, res, {
+    pathname, url,
+    ctx: {
+      sessions, activeSessionId, trashedSessions,
+      getSession, getActiveSession, getAllSessions,
+      setSessions, setActiveSessionId, setTrashedSessions,
+      newSession, saveSessions, publicSessionRunState,
+      readBody,
+    },
+  })) return;
 
-  // 图片附件缩略图：只允许读取 .myteam/uploads 目录内的文件。
-  if (req.method === 'GET' && pathname.startsWith('/uploads/')) {
-    try {
-      const fileName = basename(decodeURIComponent(pathname.slice('/uploads/'.length)));
-      const filePath = resolve(UPLOADS_DIR, fileName);
-      const uploadRoot = resolve(UPLOADS_DIR);
-      if (!filePath.startsWith(uploadRoot) || !existsSync(filePath)) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: '图片不存在' }));
-      }
-      const type = MIME[extname(filePath).toLowerCase()] || 'application/octet-stream';
-      res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'private, max-age=3600' });
-      return res.end(readFileSync(filePath));
-    } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: '图片路径不正确' }));
-    }
-  }
-
-  // 头像静态文件服务：/avatars/:filename → .myteam/avatars/:filename
-  if (req.method === 'GET' && pathname.startsWith('/avatars/')) {
-    try {
-      const fileName = basename(decodeURIComponent(pathname.slice('/avatars/'.length)));
-      const avatarsDir = '.myteam/avatars';
-      const filePath = resolve(avatarsDir, fileName);
-      const avatarRoot = resolve(avatarsDir);
-      if (!filePath.startsWith(avatarRoot) || !existsSync(filePath)) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: '头像不存在' }));
-      }
-      const type = MIME[extname(filePath).toLowerCase()] || 'application/octet-stream';
-      res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'private, max-age=86400' });
-      return res.end(readFileSync(filePath));
-    } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: '头像路径不正确' }));
-    }
-  }
+  // Agent API 路由（委托给 server/routes/agents.mjs）
+  if (await tryServeAgents(req, res, { pathname, ctx: { readBody, ENV } })) return;
 
   // POST /api/abort — 中断所有正在执行的 agent 子进程
   if (pathname === '/api/settings') {
@@ -2338,147 +2015,6 @@ async function handle(req, res) {
     return res.end(JSON.stringify({ aborted: count, settled, runState: publicSessionRunState(session?.run_state) }));
   }
 
-  // GET /api/sessions — 返回所有 session 列表 + 当前激活
-  if (req.method === 'GET' && pathname === '/api/sessions') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({
-      activeId: activeSessionId,
-      sessions: sessions.filter(s => !s.ephemeral).map(s => ({
-        id: s.id,
-        name: s.name,
-        created_at: s.created_at,
-        mode: s.mode || null,
-        message_count: s.history.length,
-        run_state: publicSessionRunState(s.run_state),
-      })),
-    }));
-  }
-
-  // POST /api/sessions { name?, activeId? } — 新建或切换 session
-  if (req.method === 'POST' && pathname === '/api/sessions') {
-    const body = await readBody(req);
-    if (body.activeId) {
-      const target = getSession(body.activeId);
-      if (!target) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'session 不存在' }));
-      }
-      activeSessionId = target.id;
-      saveSessions();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ ok: true, activeId: activeSessionId }));
-    }
-    // 新建
-    sessions = sessions.filter(existing => !existing.ephemeral);
-    const s = newSession((body.name || '').trim());
-    sessions.push(s);
-    activeSessionId = s.id;
-    saveSessions();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, session: s, activeId: activeSessionId }));
-  }
-
-  // POST /api/sessions/:id/rename — 重命名 session
-  if (req.method === 'POST' && /^\/api\/sessions\/[^/]+\/rename$/.test(pathname)) {
-    const id = pathname.split('/')[3];
-    const s = sessions.find(s => s.id === id);
-    if (!s) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: 'session 不存在' }));
-    }
-    const body = await readBody(req);
-    const name = (body.name || '').trim();
-    if (!name) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: 'name 不能为空' }));
-    }
-    s.name = name;
-    saveSessions();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, session: s }));
-  }
-
-  // DELETE /api/sessions?id=xxx — 删除 session（移入回收站）
-  if (req.method === 'DELETE' && pathname === '/api/sessions') {
-    const id = url.searchParams.get('id');
-    const idx = sessions.findIndex(s => s.id === id);
-    if (idx < 0) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: 'session 不存在' }));
-    }
-    const deleted = sessions.splice(idx, 1)[0];
-    trashedSessions.push({ session: deleted, deletedAt: Date.now() });
-    let replacementId = '';
-    if (!sessions.length) {
-      const replacement = newSession('', { ephemeral: true });
-      sessions.push(replacement);
-      replacementId = replacement.id;
-    }
-    if (activeSessionId === id) activeSessionId = sessions[0].id;
-    saveSessions();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, activeId: activeSessionId, trashed: deleted.id, replacementId }));
-  }
-
-  // GET /api/sessions/trash — 列出回收站中的 session
-  if (req.method === 'GET' && pathname === '/api/sessions/trash') {
-    const now = Date.now();
-    // 清理过期条目
-    trashedSessions = trashedSessions.filter(t => now - t.deletedAt < TRASH_RETENTION_MS);
-    const list = trashedSessions.map(t => ({
-      id: t.session.id,
-      name: t.session.name,
-      deletedAt: t.deletedAt,
-      expiresAt: t.deletedAt + TRASH_RETENTION_MS,
-    }));
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ trash: list }));
-  }
-
-  // POST /api/sessions/restore — 从回收站恢复 session
-  if (req.method === 'POST' && pathname === '/api/sessions/restore') {
-    const body = await readBody(req);
-    const id = body.id;
-    const idx = trashedSessions.findIndex(t => t.session.id === id);
-    if (idx < 0) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: '回收站中不存在该 session' }));
-    }
-    const restored = trashedSessions.splice(idx, 1)[0].session;
-    sessions = sessions.filter(existing => !existing.ephemeral);
-    sessions.push(restored);
-    activeSessionId = restored.id;
-    saveSessions();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, session: restored, activeId: activeSessionId }));
-  }
-
-  // GET /api/history?sessionId=xxx — 返回指定 session 的历史
-  if (req.method === 'GET' && pathname === '/api/history') {
-    const sid = url.searchParams.get('sessionId') || activeSessionId;
-    const s = getSession(sid) || getActiveSession();
-    const allHistory = s?.history || [];
-    const requestedLimit = Number.parseInt(url.searchParams.get('limit') || '40', 10);
-    const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 40, 1), 100);
-    const requestedBefore = Number.parseInt(url.searchParams.get('before') || String(allHistory.length), 10);
-    const before = Math.min(Math.max(Number.isFinite(requestedBefore) ? requestedBefore : allHistory.length, 0), allHistory.length);
-    const start = Math.max(0, before - limit);
-    const history = allHistory.slice(start, before);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({
-      sessionId: s?.id,
-      history,
-      page: {
-        start,
-        end: before,
-        limit,
-        total: allHistory.length,
-        hasMore: start > 0,
-        nextBefore: start > 0 ? start : null,
-      },
-    }));
-  }
-
   // POST /api/chat { message, sessionId? } — SSE 流式对话，支持 @mention 路由
   if (req.method === 'POST' && pathname === '/api/chat') {
     const body = await readBody(req);
@@ -2503,7 +2039,7 @@ async function handle(req, res) {
       return res.end(JSON.stringify({ error: '当前会话没有可继续的中断任务' }));
     }
     // 客户端指定 sessionId 时同步切换激活
-    if (body.sessionId && getSession(body.sessionId)) activeSessionId = body.sessionId;
+    if (body.sessionId && getSession(body.sessionId)) setActiveSessionId(body.sessionId);
 
     // 解析 @mention 路由；如果默认 codex 不可启动，就自动选一个可用 agent。
     const requestedAgent = (resumeRequested ? session.run_state?.agent : parseAtMention(message)) || agentKeys()[0] || 'codex';
@@ -2685,153 +2221,6 @@ async function handle(req, res) {
     return res.end(JSON.stringify({ running, dispatches }));
   }
 
-  // GET /api/agents — 返回当前 agent 路径配置（脱敏显示）
-  if (req.method === 'GET' && pathname === '/api/agents') {
-    const result = (await getAgentStatuses()).map(stripSensitive);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ agents: result, workspace: currentWorkspace() }));
-  }
-
-  // PATCH /api/agents/:key — 更新单个 agent 的角色卡字段
-  const agentPatchMatch = pathname.match(/^\/api\/agents\/([^\/]+)$/);
-  if (req.method === 'PATCH' && agentPatchMatch) {
-    const agentKey = decodeURIComponent(agentPatchMatch[1]);
-    const body = await readBody(req);
-    const current = readAgentRegistry(ENV);
-    const idx = current.findIndex(a => a.key === agentKey);
-    if (idx === -1) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: `agent ${agentKey} 不存在` }));
-    }
-    if (!requireApproval(res, {
-      operation: 'config.write',
-      payload: { target: `agent.${agentKey}`, changes: body },
-      approvalId: body.approvalId,
-    })) return;
-    // 只允许更新角色卡字段和基础展示字段
-    const allowed = ['label', 'emoji', 'desc', 'baseUrl', 'apiKey', 'model', 'roleDescription', 'personality', 'strengths', 'restrictions', 'nickname', 'avatar', 'color'];
-    for (const field of allowed) {
-      if (body[field] !== undefined) current[idx][field] = body[field];
-    }
-    writeAgentRegistry(current);
-    reloadAgentConfig();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, agent: current[idx] }));
-  }
-
-  // POST /api/agents/:key/avatar — 上传头像
-  const avatarUploadMatch = pathname.match(/^\/api\/agents\/([^\/]+)\/avatar$/);
-  if (req.method === 'POST' && avatarUploadMatch) {
-    const agentKey = decodeURIComponent(avatarUploadMatch[1]);
-    const current = readAgentRegistry(ENV);
-    const idx = current.findIndex(a => a.key === agentKey);
-    if (idx === -1) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: `agent ${agentKey} 不存在` }));
-    }
-
-    const body = await readBody(req);
-    const { data, ext } = body;
-    if (!data || typeof data !== 'string') {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: '缺少 data 字段（base64 编码的图片）' }));
-    }
-
-    // 解析 base64
-    const match = data.match(/^data:image\/(png|jpe?g|gif|webp);base64,(.+)$/);
-    if (!match) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: 'data 必须是 data:image/xxx;base64,... 格式' }));
-    }
-    const [, imgType, base64Data] = match;
-    const buffer = Buffer.from(base64Data, 'base64');
-    if (buffer.length > 2 * 1024 * 1024) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: '图片大小不能超过 2MB' }));
-    }
-
-    // 保存到 .myteam/avatars/:key.ext
-    const avatarsDir = '.myteam/avatars';
-    mkdirSync(avatarsDir, { recursive: true });
-    const fileName = `${agentKey}.${imgType === 'jpeg' ? 'jpg' : imgType}`;
-    const filePath = resolve(avatarsDir, fileName);
-    writeFileSync(filePath, buffer);
-
-    // 更新 agent.avatar
-    current[idx].avatar = `/avatars/${fileName}`;
-    writeAgentRegistry(current);
-    reloadAgentConfig();
-
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, avatar: current[idx].avatar, agent: current[idx] }));
-  }
-
-  // POST /api/agents { codex?: string, claude?: string, kimi?: string } — 写回 .env，实时重载
-  if (req.method === 'POST' && pathname === '/api/agents') {
-    const body = await readBody(req);
-    if (!requireApproval(res, {
-      operation: 'config.write',
-      payload: { target: 'agents', agents: body.agents || Object.keys(body).filter((key) => AGENT_KEYS.includes(key)) },
-      approvalId: body.approvalId,
-    })) return;
-    const current = readAgentRegistry(ENV);
-    const currentByKey = new Map(current.map(a => [a.key, a]));
-
-    const nextAgents = Array.isArray(body.agents)
-      ? body.agents.map(incoming => {
-          const prev = currentByKey.get(incoming.key) || {};
-          const inherited = currentByKey.get(incoming.inheritFrom) || {};
-          // apiKey 为空字符串时保留已有值（前端不传明文则不覆盖）
-          const apiKey = (incoming.apiKey !== undefined && String(incoming.apiKey).trim() !== '')
-            ? String(incoming.apiKey).trim()
-            : (prev.apiKey || inherited.apiKey || '');
-          return { ...prev, ...incoming, apiKey };
-        })
-      : current.map(agent => ({
-          ...agent,
-          path: body[agent.key] !== undefined ? String(body[agent.key] || '').trim() : agent.path,
-        }));
-
-    writeAgentRegistry(nextAgents);
-    reloadAgentConfig();
-    const updatedAgents = (await getAgentStatuses({ force: true })).map(stripSensitive);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, agents: updatedAgents, workspace: currentWorkspace() }));
-
-    const updates = {};
-    if (body.codex !== undefined) updates.CODEX_PATH = body.codex.trim();
-    if (body.claude !== undefined) updates.CLAUDE_PATH = body.claude.trim();
-    if (body.kimi !== undefined) updates.KIMI_PATH = body.kimi.trim();
-
-    if (Object.keys(updates).length === 0) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: '没有需要更新的字段' }));
-    }
-
-    // 读取现有 .env，更新对应 key，写回
-    const envPath = '.env';
-    let lines = existsSync(envPath) ? readFileSync(envPath, 'utf8').split('\n') : [];
-    for (const [key, val] of Object.entries(updates)) {
-      const idx = lines.findIndex(l => l.startsWith(`${key}=`));
-      const newLine = `${key}=${val}`;
-      if (idx >= 0) lines[idx] = newLine;
-      else lines.push(newLine);
-    }
-    writeFileSync(envPath, lines.join('\n'), 'utf8');
-
-    // 实时重载 CLI_CONFIG（无需重启服务）
-    const newEnv = loadEnv(envPath);
-    const newCfg = buildCliConfig(newEnv);
-    CLI_CONFIG.codex  = newCfg.codex;
-    CLI_CONFIG.claude = newCfg.claude;
-    CLI_CONFIG.kimi   = newCfg.kimi;
-    clearAgentStatusCache();
-
-    const result = (await getAgentStatuses({ force: true })).map(stripSensitive);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, agents: result }));
-  }
-
   // GET /api/tasks?sessionId=xxx
   if (req.method === 'GET' && pathname === '/api/tasks') {
     const taskSid = url.searchParams.get('sessionId') || '';
@@ -2876,292 +2265,17 @@ async function handle(req, res) {
     }
   }
 
-
-  if (req.method === 'GET' && pathname === '/api/skills') {
-    const skills = readSkills();
-    const text = url.searchParams.get('text') || '';
-    const agent = url.searchParams.get('agent') || '';
-    const phase = url.searchParams.get('phase') || 'run';
-    const currentSkill = url.searchParams.get('current') || '';
-    const selected = selectSkills({ text, agent, phase });
-    
-    // 如果指定了 current skill，返回推荐的下一阶段 skills
-    const nextSkills = currentSkill ? getNextSkills(currentSkill) : [];
-    
-    const summary = {
-      total: skills.length,
-      categories: [...new Set(skills.map(s => s.category).filter(Boolean))],
-      agents: ['controller', 'worker', 'reviewer', ...agentKeys()],
-      selected: selected.length,
-      nextRecommended: nextSkills.length,
-    };
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({
-      skills,
-      selected,
-      nextSkills,
-      summary,
-      contextPreview: buildSkillContext(selected),
-    }));
-  }
-
-  // GET /api/skills/usage?sessionId= — 从真实调用记录反查 Skill 命中来源。
-  if (req.method === 'GET' && pathname === '/api/skills/usage') {
-    const sessionId = url.searchParams.get('sessionId') || '';
-    const usage = readInvocations()
-      .filter((invocation) => !sessionId || invocation.session_id === sessionId)
-      .flatMap((invocation) => (invocation.skills || []).map((skill) => ({
-        id: `${invocation.id}:${skill.name}`,
-        skill: skill.name,
-        loading: skill.loading || 'on_demand',
-        reason: skill.reason || 'matched',
-        invocation_id: invocation.id,
-        session_id: invocation.session_id || '',
-        task_id: invocation.task_id || '',
-        task_title: invocation.task_title || '',
-        run_id: invocation.run_id || '',
-        agent: invocation.agent,
-        mode: invocation.mode || invocation.label,
-        status: invocation.status,
-        timestamp: invocation.started_at,
-      })))
-      .reverse()
-      .slice(0, 100);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ usage, total: usage.length, sessionId }));
-  }
-
-  // POST /api/skills/import — 导入 skill（追加 yaml 或单条 JSON）
-  if (req.method === 'POST' && pathname === '/api/skills/import') {
-    const body = await readBody(req);
-    if (!requireApproval(res, {
-      operation: 'skill.install',
-      payload: { source: 'inline', name: body.skill?.name || 'yaml-import' },
-      approvalId: body.approvalId,
-    })) return;
-    try {
-      const lines = [];
-      if (typeof body.yaml === 'string' && body.yaml.trim()) {
-        // 直接追加 yaml 文本
-        lines.push(body.yaml.trimEnd());
-      } else if (body.skill && typeof body.skill === 'object') {
-        const s = body.skill;
-        if (!s.name) throw new Error('skill.name 必填');
-        lines.push(`- name: ${s.name}`);
-        if (s.category)    lines.push(`  category: ${s.category}`);
-        if (s.trigger)     lines.push(`  trigger: ${s.trigger}`);
-        if (s.description) lines.push(`  description: ${s.description}`);
-        if (s.load)        lines.push(`  load: ${s.load}`);
-        if (s.prompt)      lines.push(`  prompt: ${JSON.stringify(s.prompt)}`);
-        if (s.mounts && typeof s.mounts === 'object') {
-          lines.push('  mounts:');
-          for (const [role, on] of Object.entries(s.mounts)) {
-            lines.push(`    ${role}: ${on ? 'true' : 'false'}`);
-          }
-        }
-      } else {
-        throw new Error('需要 yaml 文本或 skill 对象');
-      }
-      mkdirSync('.myteam', { recursive: true });
-      const header = existsSync(SKILLS_FILE) ? '' : 'skills:\n';
-      const append = (header ? header : '') + lines.join('\n') + '\n';
-      appendFileSync(SKILLS_FILE, append, 'utf8');
-      const skills = readSkills();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ ok: true, total: skills.length, skills }));
-    } catch (err) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: err.message }));
-    }
-  }
-
-  // ── Studio 团队模板 API ────────────────────────────────────────────────────
-
-  // GET /api/studio-templates — 列出所有团队模板
-  if (req.method === 'GET' && pathname === '/api/studio-templates') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ templates: STUDIO_TEMPLATES }));
-  }
-
-  // POST /api/studio-templates/apply { templateId } — 应用模板（只更新角色卡字段，保留路径/apiKey/baseUrl/model）
-  if (req.method === 'POST' && pathname === '/api/studio-templates/apply') {
-    const body = await readBody(req);
-    const { templateId } = body;
-    const tpl = STUDIO_TEMPLATES.find(t => t.id === templateId);
-    if (!tpl) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: `模板不存在: ${templateId}` }));
-    }
-    const current = readAgentRegistry(ENV);
-    const currentByKey = new Map(current.map(a => [a.key, a]));
-
-    // 只覆盖模板中出现的 agent 的角色卡字段，其余 agent 原样保留
-    const merged = current.map(agent => {
-      const tplAgent = tpl.agents.find(t => t.key === agent.key);
-      if (!tplAgent) return agent;
-      return {
-        ...agent,
-        roleDescription: tplAgent.roleDescription || agent.roleDescription,
-        personality:     tplAgent.personality     || agent.personality,
-        strengths:       tplAgent.strengths        ?? agent.strengths,
-        restrictions:    tplAgent.restrictions     ?? agent.restrictions,
-      };
-    });
-
-    writeAgentRegistry(merged);
-    reloadAgentConfig();
-    const updatedAgents = (await getAgentStatuses({ force: true })).map(stripSensitive);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, template: tpl.name, agents: updatedAgents }));
-  }
-
-  // ── Skill 市场 & 生命周期 API ─────────────────────────────────────────────
-
-  // GET /api/skills/registry?source=myteam-official|clowder-ai — 远程市场清单
-  if (req.method === 'GET' && pathname === '/api/skills/registry') {
-    const source = url.searchParams.get('source') || 'myteam-official';
-    const srcCfg = SKILL_SOURCES[source];
-    if (!srcCfg) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: `未知 source: ${source}`, sources: Object.keys(SKILL_SOURCES) }));
-    }
-    try {
-      const registry = await loadSkillRegistry(source, srcCfg);
-      let skills = registry.skills;
-      // 标记本地已安装的
-      const installed = new Set(
-        existsSync(SKILLS_DIR) ? readdirSync(SKILLS_DIR, { withFileTypes: true })
-          .filter(e => e.isDirectory()).map(e => e.name) : []
-      );
-      skills = skills.map(s => ({ ...s, installed: installed.has(s.name) }));
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({
-        source,
-        label: srcCfg.label,
-        skills,
-        sources: Object.keys(SKILL_SOURCES),
-        cached: registry.cached,
-        stale: Boolean(registry.stale),
-      }));
-    } catch (err) {
-      res.writeHead(502, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: `拉取失败: ${err.message}` }));
-    }
-  }
-
-  // POST /api/skills/install { source, name } — 下载并安装 skill
-  if (req.method === 'POST' && pathname === '/api/skills/install') {
-    const body = await readBody(req);
-    const { source = 'myteam-official' } = body;
-    const name = sanitizeSkillName(body.name);
-    if (!name || name === 'unnamed') {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: 'name 必填' }));
-    }
-    if (!requireApproval(res, {
-      operation: 'skill.install',
-      payload: { source, name },
-      approvalId: body.approvalId,
-    })) return;
-    const srcCfg = SKILL_SOURCES[source];
-    if (!srcCfg) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: `未知 source: ${source}` }));
-    }
-    try {
-      let mdContent = '';
-      if (srcCfg.type === 'index') {
-        const raw = await readSkillSourceIndex(srcCfg);
-        const data = JSON.parse(raw);
-        const entry = (data.skills || []).find(s => s.name === name);
-        if (!entry) throw new Error(`市场中找不到 skill: ${name}`);
-        mdContent = await readSkillMarkdownFromEntry(srcCfg, entry);
-      } else if (srcCfg.type === 'manifest') {
-        mdContent = await httpGet(`${srcCfg.rawBase}/${name}/SKILL.md`);
-      }
-
-      // 写到 .myteam/skills/{name}/SKILL.md
-      const destDir = `${SKILLS_DIR}/${name}`;
-      mkdirSync(destDir, { recursive: true });
-      writeFileSync(`${destDir}/SKILL.md`, mdContent, 'utf8');
-
-      // 写 skills-state.json（默认 enabled）
-      const state = readSkillsState();
-      state[name] = { enabled: true, source, installedAt: new Date().toISOString() };
-      writeSkillsState(state);
-
-      const skill = readSkillFromDir(SKILLS_DIR, name);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ ok: true, skill }));
-    } catch (err) {
-      res.writeHead(502, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: `安装失败: ${err.message}` }));
-    }
-  }
-
-  // POST /api/skills/:name/toggle { enabled } — 启用/禁用 skill
-  const skillToggleMatch = pathname.match(/^\/api\/skills\/([^\/]+)\/toggle$/);
-  if (req.method === 'POST' && skillToggleMatch) {
-    const skillName = decodeURIComponent(skillToggleMatch[1]);
-    const body = await readBody(req);
-    const state = readSkillsState();
-    state[skillName] = { ...(state[skillName] || {}), enabled: Boolean(body.enabled) };
-    writeSkillsState(state);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, name: skillName, enabled: state[skillName].enabled }));
-  }
-
-  // PATCH /api/skills/:name/mounts { controller, worker, ... } — 调整挂载
-  const skillMountsMatch = pathname.match(/^\/api\/skills\/([^\/]+)\/mounts$/);
-  if (req.method === 'PATCH' && skillMountsMatch) {
-    const skillName = decodeURIComponent(skillMountsMatch[1]);
-    const body = await readBody(req);
-    const state = readSkillsState();
-    state[skillName] = {
-      ...(state[skillName] || {}),
-      mounts: { ...(state[skillName]?.mounts || {}), ...body },
-    };
-    writeSkillsState(state);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, name: skillName, mounts: state[skillName].mounts }));
-  }
-
-  // PATCH /api/skills/:name/loading { loading: on_demand|always|manual }
-  const skillLoadingMatch = pathname.match(/^\/api\/skills\/([^\/]+)\/loading$/);
-  if (req.method === 'PATCH' && skillLoadingMatch) {
-    const skillName = decodeURIComponent(skillLoadingMatch[1]);
-    const body = await readBody(req);
-    if (!['on_demand', 'always', 'manual'].includes(body.loading)) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: 'loading 仅支持 on_demand / always / manual' }));
-    }
-    const state = readSkillsState();
-    state[skillName] = { ...(state[skillName] || {}), loading: body.loading };
-    writeSkillsState(state);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, name: skillName, loading: body.loading }));
-  }
-
-  // DELETE /api/skills/:name — 卸载 skill
-  const skillDeleteMatch = pathname.match(/^\/api\/skills\/([^\/]+)$/);
-  if (req.method === 'DELETE' && skillDeleteMatch) {
-    const skillName = decodeURIComponent(skillDeleteMatch[1]);
-    const body = await readBody(req);
-    if (!requireApproval(res, {
-      operation: 'skill.delete',
-      payload: { name: skillName },
-      approvalId: body.approvalId,
-    })) return;
-    const skillPath = `${SKILLS_DIR}/${skillName}`;
-    if (existsSync(skillPath)) {
-      rmSync(skillPath, { recursive: true, force: true });
-    }
-    const state = readSkillsState();
-    delete state[skillName];
-    writeSkillsState(state);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, name: skillName }));
-  }
+  // Skills API 路由（委托给 server/routes/skills.mjs）
+  if (await tryServeSkills(req, res, { pathname, url, ctx: {
+    readSkills, selectSkills, buildSkillContext, getNextSkills,
+    readSkillsState, writeSkillsState, readSkillFromDir,
+    requireApproval, readBody, sanitizeSkillName, inferSkillName,
+    cloneAndFindSkillMd, parseGithubUrl, isRemoteUrl, extractZip,
+    findSkillMdInDir, readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync,
+    rmSync, SKILLS_DIR, SKILLS_STATE_FILE, SKILL_SOURCES,
+    readAgentRegistry, writeAgentRegistry, sanitizeAgentKey, buildRoleCard,
+    appendAudit,
+  } })) return;
 
   // GET /api/artifacts?sessionId=&limit=50 — 返回 chat-extracted artifacts
   if (req.method === 'GET' && pathname === '/api/artifacts') {
@@ -3778,7 +2892,7 @@ async function handle(req, res) {
     const runId = createWorkflowRunId();
     const planWorkflowId = `plan:${runId}`;
     session.ephemeral = false;
-    if (body.sessionId && getSession(body.sessionId)) activeSessionId = body.sessionId;
+    if (body.sessionId && getSession(body.sessionId)) setActiveSessionId(body.sessionId);
     recordSessionMode(session, 'plan');
     maybeAutoRenameSession(session, goal || '图片拆任务');
     session.history.push({ role: 'user', text: goal, agent: null, kind: 'plan-goal', attachments });
@@ -3824,8 +2938,7 @@ async function handle(req, res) {
         allowedAgents: agentKeys(),
       });
       if (!parsedPlan.ok) {
-        console.error('[plan] structured plan failed. raw length:', raw.length);
-        console.error('[plan] raw output (first 2000 chars):\n' + raw.slice(0, 2000));
+        logger.error({ msg: 'structured plan failed', rawLength: raw.length, rawPreview: raw.slice(0, 500) });
         const reason = raw.trim() ? parsedPlan.reason : parsedPlan.reason + ' (agent output empty - likely only thinking stream or CLI error)';
         session.history.push({
           role: 'system',
@@ -5152,40 +4265,33 @@ async function handle(req, res) {
 
 const server = createServer((req, res) => {
   var _start = Date.now();
-  console.log('[' + new Date().toISOString() + '] ' + req.method + ' ' + req.url);
   handle(req, res).catch(err => {
-    console.error('handler error:', err);
+    logger.error({ msg: 'handler error', error: err.message, stack: err.stack?.slice(0, 200) });
     if (!res.headersSent) res.writeHead(500);
     res.end(JSON.stringify({ error: err.message }));
   });
-  res.on('close', function() {
-    var _elapsed = Date.now() - _start;
-    console.log('[' + new Date().toISOString() + '] ' + req.method + ' ' + req.url + ' ' + res.statusCode + ' (' + _elapsed + 'ms)');
+  res.on('close', () => {
+    logger.http(req.method, req.url, res.statusCode, Date.now() - _start);
   });
 });
 
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
-    console.error(`\n  ✗ 端口 ${PORT} 已被占用。`);
-    console.error(`  请先关闭占用该端口的进程，或用以下命令强制释放：`);
-    console.error(`\n    Windows: for /f "tokens=5" %a in ('netstat -aon ^| findstr ":${PORT}"') do taskkill /F /PID %a`);
-    console.error(`\n  或指定其他端口：py -3 myteam.py serve --port 7879\n`);
+    logger.error({ msg: `port ${PORT} in use`, port: PORT, code: 'EADDRINUSE' });
   } else {
-    console.error('server error:', err);
+    logger.error({ msg: 'server error', error: err.message, code: err.code });
   }
   process.exit(1);
 });
 
 server.listen(PORT, async () => {
-  console.log(`\n  myteam server running on http://localhost:${PORT}\n`);
+  logger.info({ msg: 'server started', port: PORT });
 
   // ── 服务启动时执行 workflow 清理 ───────────────────────────────────
   try {
     const cleanupResult = await runWorkflowCleanup(langGraphCheckpointer, repository);
     if (cleanupResult.deleted > 0 || cleanupResult.errors.length > 0) {
-      console.warn(
-        `[myteam] startup workflow cleanup: ${cleanupResult.deleted} deleted, ${cleanupResult.skipped} skipped, ${cleanupResult.errors.length} errors`
-      );
+      logger.warn({ msg: 'startup workflow cleanup', deleted: cleanupResult.deleted, skipped: cleanupResult.skipped, errors: cleanupResult.errors.length });
       for (const err of cleanupResult.errors) {
         console.warn(`[myteam:cleanup] ${err}`);
       }
@@ -5200,7 +4306,7 @@ server.listen(PORT, async () => {
     try {
       const result = await runWorkflowCleanup(langGraphCheckpointer, repository);
       if (result.deleted > 0) {
-        console.warn(`[myteam] periodic cleanup: ${result.deleted} expired workflows deleted`);
+        logger.warn({ msg: 'periodic workflow cleanup', deleted: result.deleted });
       }
     } catch (e) {
       // 静默

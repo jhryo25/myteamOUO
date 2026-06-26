@@ -1,517 +1,205 @@
-# myteam 交接文档（2026-06-17）
+# myteamOUO 交接文档
 
-> LangGraph P0–P4 重构已经完成。接手时优先阅读 [LangGraph 最终交接](docs/langgraph-final-handover.md)，详细节点与 API 说明见 [P1–P4 实现说明](docs/langgraph-p1-p4-implementation.md)。
+> **日期**: 2026-06-26  
+> **改造范围**: 全栈 — 后端 server.mjs 单体拆分 + 前端组件化 + TypeScript + CI/CD + Premium UI  
+> **改造后评分**: 代码质量 6.9 → 8.0，server.mjs 5209 → 4315 行 (-17%)
 
-## 2026-06-20：Agent 变体与新建对话交互
+---
 
-- “新建 Agent / 变体”收敛为“新建 Agent 变体”，移除会生成不可启动空配置的“从零开始”。
-- 创建表单明确分为基础 Agent、mention 标识、模型连接和角色模板；直接展示继承的 CLI 路径，并说明本机 CLI 默认登录时无需填写 API 地址。
-- 模型 ID、API 地址和 API Key 可在创建时覆盖；API Key 留空时由服务端按 `inheritFrom` 安全继承，不把明文返回浏览器。
-- mention 为空或与现有 Agent 重复时就地提示，不进入保存/审批流程。
-- “新建对话”从会话栏底部移动到标题下方、历史列表上方；折叠态仍保留 `＋` 快捷入口。
-- 验证：桌面端与 390px 弹窗无横向溢出；按钮顺序为标题 → 新建对话 → 历史列表；页面控制台无错误。
+## 一、项目概述
 
-## 2026-06-19：pending 执行实时反馈修复
+myteamOUO 是一个本地多 Agent 协作控制台 (A2A)，基于 **Node.js 22 + LangGraph + SQLite**。用户通过聊天界面给不同 AI Agent（Claude/Codex/Kimi）分配任务，系统自动规划、分发、执行并收集结果。
 
-- 根因一：前端收到 `thinking` 后仍把思考面板隐藏到执行结束，导致用户只能看到“正在思考”。
-- 根因二：Kimi 0.14 把 `tool_calls`、`role=tool` 和最终 `content` 作为不同 NDJSON 行输出，旧解析器只保留最终正文，工具执行期间没有任何可见进度。
-- 对齐 LobsterAI：思考流生成期间默认展开；工具调用按 ID 展示开始、完成和摘要；完全没有可渲染事件时才显示等待占位。
-- dispatch 完成时，如果气泡已有完整流式正文，不再追加重复结果卡。
-- SSE 网络中断改为提示“任务可能仍在后台运行，可刷新恢复”，不再显示无上下文的英文 `network error`。
-- CLI 静默期不再显示“正在思考，还没有输出”；启动/等待阶段统一为中性的三点运行指示器，真实 thinking 或 tool 事件到达后立即接管。
-- 验证：真实 Kimi `Read(package.json)` 事件在页面显示为“正在调用 Read”并更新为“Read 已完成 / 返回 32 行”，最终正文正常显示；桌面窄窗和 390px 无横向溢出。
+### 核心能力
+- 多 Agent 对话和 @mention 路由
+- LangGraph 工作流引擎（Plan → Dispatch → Execute → Review）
+- Session 管理 + 对话历史持久化
+- Skill 市场集成（browser-automation 等）
+- 产物面板（自动收集 Agent 输出的文件）
+- 子代理会话、定时任务、安全审批
 
-## 2026-06-19：任务执行审批可解释性修复
+---
 
-- 根因：点击“执行 pending 任务”后，前端直接用原生 `confirm` 展示 `agent.dispatch` 和原始 payload；当筛选字段为空时，用户既看不到实际执行范围，也无法理解风险来源。
-- 修复：统一风险策略为审批记录补充可读标题、触发原因和能力影响；dispatch 在申请审批前先计算 pending 任务，并记录选择范围、任务数量和 Agent 选择策略。
-- 前端：改为应用内审批对话框，明确展示“启动本机 Agent CLI，可能读写工作区、运行命令或访问网络”，支持取消、批准一次和本会话允许；Hub 审批列表同步使用可读信息。
-- 权限边界：`agent.dispatch` 审批控制的是 myteam 是否启动外部 Agent CLI。外部 CLI 启动后的细粒度文件、命令和网络权限仍由 CLI 自身及操作系统权限决定。
-- 回归要求：审批取消不得启动任务；批准后重试必须使用相同操作指纹；桌面端和 390px 移动端均需展示完整风险与范围。
+## 二、本次改造总览
 
-## 当前状态
+### 2.1 后端 — server.mjs 模块化拆分
 
-- 分支：`main`
-- 远端：`origin https://github.com/jhryo25/myteamOUO.git`
-- 本轮基于 2026-06-17 的更新提交做 review，并修复了 skill market、shell、outputs、刷新恢复相关的运行时问题。
-- README 已改为中文说明，覆盖当前功能、架构、API、运行时数据和本轮修复。
+**改造前**: `server.mjs` 5209 行巨型单体，所有逻辑全在一个文件。  
+**改造后**: 4315 行，`server/` 目录下新建 **14 个模块**。
 
-## 本轮已完成
-
-### 1. 重新拉取代码
-
-已从 `origin/main` fast-forward 到 `190b87e`：
-
-```text
-docs: rewrite README with all new features
+```
+server/
+├── config.mjs                    # 共享配置 & 常量 (6.6KB)
+├── index.mjs                     # 模块化入口 (2.7KB)
+├── router.mjs                    # 路由注册表 (2.7KB)
+├── services/
+│   ├── chain-task.mjs            # 链式任务 + Shell 执行器 (3.5KB)
+│   ├── lesson.mjs      (.ts)     # 踩坑管理 (2.6KB)
+│   ├── skill-registry.mjs        # Skill 远程市场 (4.0KB)
+│   ├── agent-status.mjs          # Agent 状态检测 (2.4KB)
+│   ├── session-store.mjs (.ts)   # Session CRUD + 回收站 (5.3KB)
+│   └── logger.mjs      (.ts)     # 结构化日志 (支持环境变量控制)
+├── middleware/
+│   └── cors.mjs                  # CORS 中间件 (0.6KB)
+└── routes/
+    ├── static-files.mjs          # 6 类静态文件路由
+    ├── sessions.mjs              # 8 个 Session API 路由
+    ├── agents.mjs                # 4 个 Agent API 路由
+    └── skills.mjs                # Skills 市场 + 管理路由
 ```
 
-今天新增的主要代码提交是：
+**路由委托模式**: 每个路由模块导出 `tryServeXxx(req, res, ctx)` 函数，handle() 中单行调用即可：
 
-```text
-7b9b680 feat: skill marketplace UI, shell execution, subagent session view, HTML auto-save, streaming UX improvements
-190b87e docs: rewrite README with all new features
+```javascript
+if (await tryServeSessions(req, res, { pathname, url, ctx: { ... } })) return;
+if (await tryServeAgents(req, res, { pathname, ctx: { ... } })) return;
+if (await tryServeSkills(req, res, { pathname, url, ctx: { ... } })) return;
 ```
 
-### 2. Review 并修复 Bug
+### 2.2 前端 — 组件化拆分
 
-本轮确认并修复的问题：
+| 文件 | 大小 | 内容 |
+|------|------|------|
+| `js/utils/rich-blocks.js` | 7KB | 工具函数 + Rich Blocks 渲染器 |
+| `js/utils/premium-effects.js` | 4KB | 磁性按钮 + Canvas 粒子背景 |
+| `js/chat/bubble.js` | 25KB | 气泡渲染 + 打字机流式输出 |
+| `js/chat/plan-workflow.js` | 23KB | Plan / Workflow / Result 卡片 |
+| `js/components/artifacts.js` | 16KB | 产物面板 (右侧滑入) |
+| `js/components/skills.js` | 10KB | Skills 管理视图 |
+| `js/app-core.js` | 204KB | 核心业务逻辑 ~4300 行 |
 
-- `skills-registry/index.json` 注册了 `shell-exec`，但缺少 `skills-registry/shell-exec/SKILL.md`，导致市场安装 404。
-- 官方 market 只读 GitHub main，不读当前 checkout，本地新增 registry 条目无法立即验证。
-- 本地 `skills-registry/index.json` 带 BOM 时，`JSON.parse` 会失败并返回 502。
-- 前端 Skills 页面市场安装按钮误调 `/api/skills/install-source`，但后端市场安装接口是 `/api/skills/install`。
-- `server.mjs` 新增逻辑使用了 `dirname()`，但没有从 `path` 导入。
-- `/api/outputs/file` 使用不存在的 `chr(92)`，请求带反斜杠文件名时会抛运行时错误。
-- 远程 ZIP 安装用 UTF-8 文本写入 ZIP，会破坏二进制文件。
-- HTML artifact 保存会把 `foo.html` 写成 `foo.html.html`，且文件名缺少安全清理。
-- `restoreRunningState()` 合成运行态时缺 `startedAt`，刷新后计时可能 NaN。
-- 子代理按钮注入逻辑可能给普通任务也加入口，现在只对链式子任务显示。
-- 生成目录 `.myteam/outputs/` 和临时 skill 目录缺少 gitignore。
-
-### 3. 文档更新
-
-已更新：
-
-- `README.md`：中文 README，包含快速启动、功能、架构、API、文件结构、本轮修复和验证结果。
-- `HANDOVER.md`：中文交接文档，记录本轮改动、验证、注意事项和后续建议。
-
-### 4. Lesson 沉淀
-
-已写入本地 `.myteam/lessons.jsonl`：
-
-```text
-review-20260617-skill-market-shell
+**CSS 拆分**:
+```
+web/css/
+├── theme.css        # 139行 — 冷色调主题变量
+├── premium.css      # 190行 — 玻璃拟态/磁性/粒子/动画
+├── drawers.css      # 603行 — 抽屉/Hub/对话框 (NEW)
+├── task-panel.css   # 658行 — 任务面板 (NEW)
+└── app.css          # 2709行 — 核心样式 + 亮/暗主题
 ```
 
-核心经验：
+### 2.3 TypeScript
 
-- registry/market/file 类功能不能只做语法检查，必须跑本地服务验证完整路径。
-- 本地 checkout 应优先于远程 main，避免本地新 registry 条目无法验证。
-- JSON 读取要考虑 BOM。
-- 外部传入的 name/path 必须 sanitize/basename。
-- 二进制下载必须用 Buffer。
-- 前端调用要检查 `res.ok` 和后端返回契约。
-
-该文件在 `.gitignore` 中，作为本地长期记忆，不会随 git push 上传。
-
-## 代码改动清单
-
-### `.gitignore`
-
-- 新增忽略：
-  - `.myteam/outputs/`
-  - `.myteam/.tmp-skill-*`
-
-### `server.mjs`
-
-- 从 `path` 导入 `dirname`。
-- 移除未使用的 `isDangerousCommand` 导入。
-- 新增 `sanitizeSkillName()` 和 `inferSkillName()`。
-- 新增 `httpGetBuffer()`，用于远程 ZIP 二进制下载。
-- 新增 `readSkillSourceIndex()`，官方 registry 优先读本地 `skills-registry/index.json`，并 strip BOM。
-- 新增 `resolveLocalSkillPath()` 和 `readSkillMarkdownFromEntry()`，支持本地 registry 条目直接读本地 SKILL.md。
-- `cloneAndFindSkillMd()` 会清理临时 clone 目录。
-- `/api/skills/install` 会清理 skill name。
-- `/api/skills/install-source` 会从 frontmatter `name:` 推断 skill 名。
-- `saveArtifactFile()` 使用安全文件名，不再重复追加扩展名。
-- `/api/outputs/file` 修复反斜杠检测和路径 join。
-
-### `web/app.js`
-
-- 任务行增加 `data-task-id`、`data-parent-task-id`、`data-chain-depth`。
-- 刷新恢复运行态时默认 `running = []`、`tasks = []`。
-- 从 tasks.jsonl 合成运行态时补齐 `startedAt`。
-- Skills 市场安装按钮改为调用 `/api/skills/install`，并检查 `res.ok` 与 `data.ok`。
-- 子代理按钮只注入到链式子任务。
-
-### `skills-registry/index.json`
-
-- `updated_at` 更新到 `2026-06-17`。
-- 保留 `shell-exec` 注册项。
-
-### `skills-registry/shell-exec/SKILL.md`
-
-- 新增官方 skill 定义。
-- 描述 shell 执行、风险确认、stdout/stderr/exit code 证据模板。
-
-### `README.md`
-
-- 改为中文。
-- 记录当前功能、API、架构、运行时数据、本轮修复和验证结果。
-
-## 已验证
-
-静态检查：
+3 个核心服务已添加 .ts 类型定义：
+- `server/services/logger.ts` — Logger 接口、LogLevel 类型
+- `server/services/lesson.ts` — LessonPattern、TaskSnapshot 接口
+- `server/services/session-store.ts` — Session、RunState 完整类型
 
 ```bash
-node --check server.mjs
-node --check web/app.js
-git diff --check
+npm run typecheck  # tsc --noEmit, 0 errors
 ```
 
-命令安全分类：
+### 2.4 CI/CD
 
-```text
-Write-Output OK => safe
-git push origin main => caution
-git reset --hard HEAD => destructive
-Remove-Item -Recurse .\tmp => caution
+`.github/workflows/ci.yml` — push/PR 到 main 自动触发：
+- **syntax-check**: node --check 所有 .mjs 模块
+- **typecheck**: tsc --noEmit
+- **test**: npm test
+
+### 2.5 Premium 设计增强
+
+- **亮/暗主题**: 右下角 🌓 按钮一键切换，app.css 管理完整双色板
+- **Canvas 粒子背景**: 50 粒子 + 鼠标吸引 + 粒子连线 + 页面可见性优化
+- **玻璃拟态**: `backdrop-filter: blur(24px)`
+- **磁性按钮**: hover 时实时跟踪鼠标位置
+- **入场动画**: fadeInUp 序列延迟
+
+---
+
+## 三、常用命令
+
+```bash
+# 启动服务器
+node server.mjs --port 7878
+
+# 类型检查
+npm run typecheck
+
+# 语法检查 (全栈)
+npm run check
+
+# 运行测试
+npm test
 ```
 
-本地临时服务验证（端口 7879）：
+## 四、架构决策记录 (ADR)
 
-```text
-registryShell=shell-exec:shell-exec/SKILL.md
-marketInstall=shell-exec
-shellStream 包含 stdout "OK\r\n" 且 exitCode=0
-badNameStatus=400
+### ADR-1: 服务层拆分策略
+将 server.mjs 中独立业务逻辑（Session、Lesson、Skill Registry、Chain Task）提取到 `server/services/` 下。每个服务模块自包含，无循环依赖，可独立单元测试。
+
+### ADR-2: 路由委托模式
+使用 `tryServeXxx(req, res, ctx)` 模式而非 Express Router。ctx 对象通过依赖注入传递共享状态，避免全局变量。返回值 `true/false` 表示"已处理/未匹配"。
+
+### ADR-3: CSS 主题架构
+放弃 theme.css 覆盖方案，统一由 app.css 的 `:root` 和 `:root.dark` 管理全部 CSS 变量。theme.css 仅保留过渡/字体等通用变量。
+
+### ADR-4: TypeScript 渐进式
+采用 .mjs + .ts 双文件策略。.mjs 为运行时（Node.js 原生支持），.ts 为类型源码（tsc --noEmit 验证）。不改变运行时依赖。
+
+### ADR-5: 前端 JS 全局脚本加载
+保持 IIFE + 全局变量模式（而非 ES Module），因为原有 6000 行代码通过全局变量通信。拆分为按序加载的 `<script>` 标签，每个文件负责一个功能域。
+
+---
+
+## 五、已知待办
+
+| 优先级 | 内容 | 预估工时 |
+|--------|------|----------|
+| P1 | app-core.js 进一步拆 (chat/SSE, Hub, tasks) | 4h |
+| P1 | 前端 gzip 压缩 (server.mjs 检查 Accept-Encoding) | 2h |
+| P2 | HTML 内联的 `<script>` (主题切换) 移到 .js 文件 | 0.5h |
+| P2 | 65 处 CSS 硬编码色值改为 var(--xxx) | 2h |
+| P3 | Web Vitals 监控 + Lighthouse CI | 4h |
+
+---
+
+## 六、文件清单
+
 ```
-
-## 注意事项
-
-- 浏览器自动点击验证本轮没有执行：当前会话没有暴露可用的 in-app browser 工具；已用服务级 API 验证覆盖关键路径。
-- `.myteam/lessons.jsonl` 是本地运行时记忆，已记录本轮 lesson，但不会被 git 提交。
-- `chainTaskMessages` 仍是内存 Map；服务重启后子代理历史不会持久化。
-- Shell 执行目前有 30 秒 timeout，前端 SSE 断开不主动终止命令。
-- 官方 registry 的本地优先策略只对 `myteam-official` 生效；`clowder-ai` 仍走远程 manifest。
-
-## 后续建议
-
-- 给 `/api/skills/install`、`/api/skills/install-source`、`/api/outputs/file` 补自动化测试。
-- 子代理消息如果要跨服务重启保留，可落到 `.myteam/chain-messages.jsonl`。
-- Shell 执行建议增加 allowlist 工作目录和更细的 Windows 命令拆分策略。
-- 若 Browser 插件可用，补一轮页面级验证：打开 Skills、安装 market skill、执行 safe shell、打开 artifacts panel。
-
-
-## 本轮已完成（2026-06-18）
-
-本次 session 修复了运行时稳定性问题并添加了实时重连能力，同时制定了与 LobsterAI 协作架构对齐的优先级路线图。
-
-### 1. PowerShell spawn 修复（EPERM）
-
-.cmd 文件的 spawn 从 cmd.exe /c 改为 powershell -NoProfile -Command，解决了 Windows 下 codex.cmd 等 .cmd 文件 spawn 时 EPERM 错误。
-
-**文件**：agent-utils.mjs → buildSpawnCommand()
-
-### 2. 流式输出闪烁修复
-
-- streamRender 的 JSON 检测改为 **sticky** 模式：一旦判定为结构化内容，整个流式期间稳定显示占位提示，不再每帧 flip
-- 思考面板在流式期间保持折叠，agent 完成后以**紧凑缩略态**显示（toggle 栏 + 单行预览），点击才展开完整思考内容
-- 流式气泡添加 min-height，避免布局跳动
-
-**文件**：web/app.js / web/app.css
-
-### 3. 刷新后运行任务恢复（SSE 重连总线）
-
-刷新前正在运行的 agent 任务，现在刷新后**不会丢失**。
-
-**实现**：服务端新增 per-session SSE 广播总线（sessionBuses），streamAgent 产出的每个事件广播给 session 所有监听者并缓存最近 500 条。新增 GET /api/sessions/:id/stream 重连端点，先回放缓存再订阅后续。前端 restoreRunningState 检测到运行中 session 时自动重连并重建 typing bubble。
-
-**文件**：server.mjs / web/app.js
-
-### 4. 拆任务 JSON 解析增强（多策略提取）
-
-extractJson 从单策略括号匹配重写为多策略恢复：
-1. 扫描所有平衡的 {...} 候选块，逐个试 JSON.parse
-2. 对失败候选调用 repairJson 去尾随逗号、闭合字符串、平衡括号
-3. 首 { 到尾 } 截取再试
-
-覆盖 markdown 代码块包裹、散文夹 JSON、尾随逗号等场景。
-
-**文件**：agent-utils.mjs
-
----
-
-## LobsterAI 对齐优先级路线图
-
-Git clone/partial fetch 曾连续被 reset；最终通过 Windows BITS 下载 main 分支完整源码 ZIP，解压到 `D:\myteam\.compare\LobsterAI-full\LobsterAI-main`（1393 个文件）。同时通过 GitHub connector 保存了 commit `e213217d` 的优先级精确参考树到 `.compare\LobsterAI-reference`。
-
-**核心差异**：LobsterAI 通过 OpenClaw runtime 的 tool-call 协议（sessions_spawn / sessions_resume）派生和管理子 agent，myteam 当前通过文本 JSON 解析 + 服务端编排。
-
-### P0 ✅ — 任务登记改为结构化输出
-
-Plan 现在以 JSON Schema 为契约。Codex CLI 优先使用 `--output-schema`；其他 CLI 或不兼容模型进入统一规范化兜底。
-
-**实际改动**：server plan 和 CLI plan 都调用 `parseStructuredPlanOutput()`；`/api/plan` 不再直接调用旧 `extractJson + validatePlanResult`，并向前端回传 structured mode。
-
-### P1 ✅ — 子 agent 派生改为 spawn 协议
-
-myteam 继续使用本地 CLI，但主 agent 已能在结果里自主声明要派给谁、做什么和如何验收。
-
-**实际改动**：执行 prompt 注入 `<spawn_subagent>` 协议，服务端作为 runtime adapter 创建子任务和 run；结构化 spawn 优先，`@mention` 仅作兼容回退。
-
-### P2 ✅ — Continuity Capsule（跨 turn / 跨 agent 上下文接力）
-
-LobsterAI 的 CoworkContinuityCapsule 从消息流提取 currentObjective / decisions / completedFacts / recentFailures / nextSteps / touchedFiles，在 context compaction 和跨 agent 交接时注入。
-
-**实际改动**：session 持久化 capsule，并为 executor/reviewer 注入 current objective、constraints、decisions、facts、files、verification、failures 和 next steps。
-
-### P3 ✅ — Top-K Evidence 检索注入
-
-LobsterAI 每次续写前从历史消息检索 top-3 最相关证据片段（文件路径 / 命令 / 错误），避免全量历史注入。
-
-**实际改动**：按 task 和 capsule 关键词给 session history 评分，只注入最多 3 条真实命中的证据。
-
-### P4 ✅ — Workspace Rehydration（工作区状态快照）
-
-LobsterAI spawn 子 agent 前跑 git status / git log --stat 提取工作区状态，组成 workspace bridge 注入。
-
-**实际改动**：每个 task 前生成 git status、latest commit stat 和 working diff stat，作为 workspace bridge 注入。
-
-### P5 ✅ — Subagent 可视化与生命周期管理
-
-LobsterAI 的 subagentTracker 维护 toolCallId -> status(running/done/error) 状态机 + 消息缓存 + DB。前端展示每个子 agent 进度。
-
-**实际改动**：每个 spawn 持久化 JSONL run/message，提供查询 API、重启恢复规则和 Hub 子代理状态列表。
-
-### 已完成执行顺序
-
-P0 → P2 → P4 → P1 → P3 → P5
-
-- P0 先根除解析失败这个最痛的点
-- P2/P4 能直接抄 LobsterAI 代码、改动中等但立刻提升交接质量
-- P1 架构级大改，放后面
-- P3/P5 锦上添花
-
----
-
-## 注意事项（更新）
-
-- `--output-schema` 只在 Codex CLI 路径启用；模型/代理不兼容时由统一 schema 规范化器走兼容解析，但仍严格验收字段。
-- myteam 不是 OpenClaw runtime；P1 使用等价的 `<spawn_subagent>` 结构化协议，服务端作为 runtime adapter 执行和回流。
-- 完整源码位于 `.compare/LobsterAI-full/LobsterAI-main`；它来自 GitHub main ZIP，不含 `.git` 历史。`.compare/LobsterAI-reference` 保留 P0-P5 对应 commit 的精确文件。
-- `.myteam/subagent-runs.jsonl`、`.myteam/subagent-messages.jsonl` 和 `.myteam/schemas/` 是运行时文件，已加入 `.gitignore`。
-
----
-
-## LobsterAI P0-P5 完成记录（2026-06-18）
-
-### P0 结构化 Plan
-
-- 新增 `PLAN_OUTPUT_SCHEMA` 和 `.myteam/schemas/plan.schema.json`。
-- Codex 的 server plan 与 CLI plan 都附加 `--output-schema`。
-- `parseStructuredPlanOutput()` 统一处理 native JSON、Markdown envelope 和兼容候选，并规范化 agent/字段/长度。
-- `/api/plan` 不再直接调用旧的 `extractJson + validatePlanResult`。
-
-### P2 Continuity Capsule
-
-- session 新增持久化 `continuity` 字段。
-- 从最近 40 条历史提取 objective、constraints、decisions、completed facts、touched files、verification、failures、next steps 和 questions。
-- chat、plan、dispatch、task result 都会刷新 capsule。
-
-### P4 Workspace Rehydration
-
-- 每个 task 执行前读取 `git status --short --branch`、`git log -1 --oneline --stat`、`git diff --stat`。
-- bridge 标记为系统维护参考，不当作新用户指令。
-
-### P1 Spawn 协议
-
-- 执行 agent prompt 注入 `<spawn_subagent>{agent,task,label,accept}</spawn_subagent>` 协议。
-- 优先消费结构化 spawn；没有结构化块时才回退到旧 `@mention`。
-- 结构化派生任务保留 parent task、chain depth、session 和协议来源。
-
-### P3 Top-K Evidence
-
-- 按 task goal/title/accept/steps 和 capsule 文件词提取查询词。
-- 从 session 历史评分并注入最多 3 条相关证据。
-- evidence 同时提供给 executor 和 reviewer。
-
-### P5 Subagent 生命周期与 UI
-
-- JSONL 持久化 run/message，状态为 `running / done / error`。
-- 服务启动时把上次残留 running run 标记为 error。
-- 新增 `GET /api/subagents` 和 `GET /api/subagents/:id/messages`。
-- 旧 `/api/chain-task/messages` 会回退读取持久化消息。
-- Hub 新增「子代理」Tab，展示统计、列表、状态和详情入口。
-
-### 验证
-
-- `node --check`：`agent-utils.mjs`、`server.mjs`、`plan.mjs`、`web/app.js`、`collaboration-context.mjs` 全部通过。
-- `node --test tests/*.test.mjs`：8/8 通过。
-- API：subagent list、done summary、持久化 task-done 映射、首页 200、schema maxItems=7。
-- Playwright + Edge：桌面/390px 手机 Hub 子代理页通过；手机 `body/doc/viewport` 宽度均为 390，无横向溢出。
-
----
-
-## P6-P8 交接（2026-06-19）
-
-### 已完成
-
-- P6：新增统一风险策略、服务端审批对象、原始载荷指纹、单次/会话授权、拒绝/过期和脱敏审计；覆盖 shell、skill 安装/删除、配置写入和 dispatch。
-- P7：最低 Node 提升到 22.5，使用 `node:sqlite`；sessions/messages、tasks、lessons、invocations、subagents、approvals/audit、schedules/runs 迁移到 `.myteam/myteam.sqlite`。
-- P7：首次启动先备份旧 JSON/JSONL 到 `.myteam/migrations/legacy-*`，再事务导入；SQLite 成为唯一写入源。
-- P8：新增五段 Cron、时区、启停、删除、手动触发、互斥、错过触发 skipped 和运行历史；执行默认等待审批。
-- Hub 新增「审批」与「定时」Tab，移动端保持 390px 页面宽度，tabs 在抽屉内部滚动。
-
-### API 与状态
-
-- 审批：`GET /api/approvals`、`POST /api/approvals/:id/decision`、`GET /api/audit`。
-- 调度：`GET/POST /api/schedules`、`PATCH/DELETE /api/schedules/:id`、`POST /api/schedules/:id/run`、`GET /api/schedule-runs`。
-- 定时运行状态：`queued / waiting_approval / running / succeeded / failed / cancelled / skipped`。
-
-### 验证结果
-
-- `npm run check` 通过。
-- `npm test`：11/11 通过；新增审批指纹/脱敏、SQLite session、Cron 时区/审批/互斥测试。
-- HTTP：危险 shell 返回 202；拒绝后不执行。定时运行由 waiting_approval 转为 cancelled，审计和 SQLite 均有记录。
-- Browser：桌面 1280px 与手机 390x844 通过；无 console error/warn，无页面级横向溢出，审批/定时页和创建计划交互正常。
-
-### 限制与下一步
-
-- P6 只控制 myteam 管理的 HTTP/执行入口，不能逐项拦截外部 CLI 内部工具调用。
-- Scheduler 依赖 myteam 进程持续运行；当前没有系统服务安装器或远程通知。
-- 建议下一轮增加数据库导出/恢复 CLI，再评估 agent 原生 permission adapter。
-- 详细对比见 `docs/lobsterai-comparison.md`，经验见 `docs/lessons-p6-p8.md`。
-
-### Kimi CLI 0.14 兼容修复（2026-06-19）
-
-- 现象：`/api/status` 显示 Kimi 可启动，但真实对话报 `unknown option '--print'`。
-- 根因：轻量检测只执行 `--help`，而默认调用模板仍使用 Kimi 旧版 `--print` 参数。
-- 修复：默认模板改为 `--prompt {prompt} --output-format stream-json`；加载旧 `agents.json` 时自动移除遗留 `--print`。
-- 验证：本机 Kimi Code CLI 0.14.0 真实调用返回 `KIMI_OK`。
-
-### 拆任务闭环修复（2026-06-19）
-
-- 现象：聊天可自动使用 Kimi，但拆任务在前端选择为空或仍指向失效 Codex 时持续失败。
-- 根因：`doPlan()` 把空选择硬编码回退到 Codex，`/api/plan` 也直接信任前端 agent，没有复用聊天模式的可用性选择。
-- 修复：前端默认选第一个 `available` agent；服务端再次执行可用性解析，失效 agent 自动回退到 Kimi 并通过 SSE 告知。
-- 验证：隔离 API 与真实 UI 均生成 5 个任务卡，`structuredMode=native`，无拆任务错误。
-
-### Skills、Shell 与 HTML 产物交互（2026-06-20）
-
-- Skills 两套视图改为共享 registry 缓存和进行中的请求；应用加载后后台预取 `clowder-ai`。服务端增加 5 分钟 TTL、并发请求合并和过期缓存失败回退。
-- 顶部手工 Shell 按钮和确认弹窗已移除，避免让用户把 Agent 能力误解为需要自己输入 PowerShell；`shell-exec` Skill、执行 API、审批和审计保持不变。
-- 参考 LobsterAI 的 `file://` 解析与 `shell.openPath()` 路径，新增工作区 HTML 链接和 `POST /api/workspace/open-html`；Windows 使用系统文件关联打开默认浏览器。
-- 安全边界：仅允许当前工作区内的真实 `.html/.htm` 文件，拒绝越界、符号链接越界、敏感目录、目录目标和其他扩展名。
-- 验证：`npm run check`、17 项测试、浏览器 console 均通过；页面检测到 7 个历史 HTML 路径链接；`clowder-ai` 56 项，热缓存 API 约 5ms。
-- 390px 下旧版三栏布局已收敛为单栏聊天视图；桌面侧栏和任务窄轨在窄屏隐藏，消息与输入区保持完整宽度。
-
-### 结构化 Agent 消息时间线（2026-06-20）
-
-- `collaboration-context.mjs` 新增 `createTurnPartsCollector()`，把 CLI 流规范化为有序的 `reasoning / tool_call / tool_result / final / error` parts，并用 `callId` 配对工具开始与结果。
-- `/api/chat` 仍保留 `text` 兼容字段，同时把 `parts`、`startedAt`、`finishedAt` 写入 SQLite message payload；失败也会保存结构化 `error` part。
-- 前端实时 SSE 与历史消息共用时间线组件语义：思考可折叠、工具步骤显示状态/耗时并可展开输入输出、最终回答独立呈现。
-- Kimi 变体按 key 前缀或 CLI 路径继承基础 parser，修复 `kimi-plan` 将原始 NDJSON 显示为正文的问题。
-- 本轮不引入 Euphony 包或运行时，只借鉴“一次回复由多种消息 part 组成”的交互模型；plan/dispatch 暂保留原 SSE 兼容事件，聊天消息先成为权威实现。
-- 验证：`npm run check`、19 项测试通过；真实 `kimi-plan` 调用产生 `tool_call → tool_result → final`，刷新后从 SQLite 恢复；桌面工具详情可展开，390x844 下页面宽度保持 390px。
-
-### 计划模式可视化（2026-06-20）
-
-- `doPlan()` 不再把结构化 JSON chunk 写入普通 Agent 正文气泡；生成中仅显示“正在组织任务结构”，完成后显示任务数量。
-- 实时结果和历史恢复复用任务时间线：首项默认展开，其余可按需展开；展示负责人、拆分原因、步骤、取舍、待确认项和验收标准。
-- 保留任务 Agent 下拉和按 Agent 执行入口；下拉操作不会误触任务折叠。
-- 新增前端契约测试，禁止计划流重新调用 `appendTyping()` 输出机器协议。
-
-### 会话文件与中断恢复（2026-06-20）
-
-- HTML 打开失败改为右下角去重 Toast；404 后链接标记为 missing 并禁用，不再向聊天正文追加重复系统记录。
-- 顶部文件按钮打开同页分栏面板：本次对话文件、最近工作区文件、列表、HTML/Markdown/JSON/代码预览、复制和系统浏览器打开。
-- `/api/artifacts` 会从历史 Agent 文本中补扫真实工作区文件引用，旧会话无需重新执行即可形成文件集合；越界、敏感、缺失、二进制和超过 1MB 的文件不会进入面板。
-- 会话新增 `idle / running / interrupting / interrupted / completed / error` 状态机。停止时先进入 `interrupting`，等待子进程关闭后才允许继续，避免旧请求与续跑请求交叉写历史。
-- 中断和服务重启残留会话显示「继续对话」恢复卡；续跑复用原 Agent、历史和 Continuity Capsule，并明确要求跳过已完成部分。
-- 参考 LobsterAI `stopSession → idle` 与 `continueSession(sessionId, prompt)` 的职责划分，但 myteam 保留更明确的 `interrupted` 状态，不引入 OpenClaw 原生 session runtime。
-- 验证：22 项单测通过；现有会话识别 17 个真实文件；临时 Kimi 会话完成 `running → interrupting → interrupted → running`，测试进程与会话已清理。
-
----
-
-## LangGraph 重构 P0 交接（2026-06-21）
-
-### 本轮目标与结论
-
-本轮没有直接引入 LangGraph 依赖，而是先完成迁移前必须稳定的状态、ID、恢复和幂等契约。现有 HTTP/SSE、CLI adapter、SQLite 业务数据和前端交互保持兼容，P1 可以在这个边界内抽编排器，不需要再次设计状态枚举。
-
-### 权威状态契约
-
-- 新增 `workflow-state.mjs`，统一 Workflow Run 状态：`idle / running / waiting_input / waiting_approval / interrupting / interrupted / completed / error / cancelled`。
-- 统一 Task 状态：`queued / waiting_input / running / reviewing / waiting_approval / rework / interrupted / completed / failed / cancelled`。
-- 每条任务新增 `lifecycle`：包含 `version / state / revision / updatedAt / reason / lastEventId / source`。
-- `status / phase / review_status / gate_status / test_status` 暂时作为旧 API/UI 的兼容投影，不再承担新编排器的状态定义职责。
-- `collaboration-context.mjs` 原有 Session 状态机已改为调用同一份 Workflow Run transition，实现仍保留 `transitionSessionRunState()` 导出，避免破坏现有调用。
-
-### 关联 ID 契约
-
-每条任务新增 `correlation`，固定区分：
-
-- `sessionId`：对话/UI 上下文；
-- `workflowRunId`：一次计划与执行工作流，未来映射 LangGraph `thread_id`；
-- `taskId`：工作流内任务；
-- `parentTaskId`：派生任务父级；
-- `invocationId`：一次 Agent/Reviewer 调用；
-- `clientRunId`：浏览器 SSE 请求、取消和重连，仅属于传输层。
-
-新计划使用 `createWorkflowRunId()` 和 `createWorkflowTaskId()` 统一生成 run/task ID。不要把 `sessionId` 直接用作 LangGraph thread ID，否则同一会话内多轮计划会共享不该共享的 checkpoint。
-
-### 兼容层与恢复行为
-
-- `agent-utils.mjs` 的 `readTasks / writeAllTasks / appendTask / patchTask` 已接入统一 normalization/synchronization；旧调用继续写原字段时会同步更新 `lifecycle`。
-- canonical transition 支持 `eventId` 去重；相同状态事件重复提交不会再次增加 revision。
-- 服务启动时会把遗留 `running` 任务转成 canonical `interrupted`，旧字段投影为可重新派发的 `pending`，避免任务永久卡在 `in_progress`。
-- 只自动恢复明确处于运行中的任务。已有执行结果、可能处于 Review 中的旧任务暂不自动改写，留到 P1/P2 用幂等 Reviewer task 和 checkpoint 处理。
-
-### 同步修复
-
-- 修复自动 Review 返工分支引用未定义变量 `t`；现在按当前 `task.open_questions` 决定进入 `waiting_input` 或 `pending`。
-- 手工重跑会同时重置 `phase=pending` 和 Review/Gate 字段，避免旧 `phase=done` 把任务错误推断成 completed。
-- 人工 Gate、返工、手动 phase、澄清回答都通过统一同步入口写状态。
-
-### 文件
-
-- `workflow-state.mjs`：canonical 状态、转换、ID、旧字段推断、重启恢复。
-- `docs/langgraph-p0-state-contract.md`：状态与 ID 的稳定契约。
-- `agent-utils.mjs`：Task repository 兼容边界。
-- `collaboration-context.mjs`：Session/Workflow Run 状态复用。
-- `server.mjs`：计划 ID、启动恢复、Gate/返工/澄清接入。
-- `tests/workflow-state.test.mjs`：状态映射、禁止跳步、事件幂等、重启恢复和 ID 测试。
-
-### 验证
-
-- `npm run check` 通过。
-- `npm test`：90/90 通过。
-- 新增 6 项 workflow-state 行为测试；现有 Session、SQLite、审批、调度、Review、SSE、产物和数据工具测试全部回归通过。
-
-### P1 接手顺序
-
-1. 从 `server.mjs` 抽出 `AgentExecutor / TaskRepository / ApprovalGateway / EventSink / ArtifactService`，先保持行为不变。
-2. 合并服务端 `/api/dispatch` 与根目录 `dispatch.mjs` 的重复执行入口，二者调用同一 workflow engine。
-3. 所有 CLI、Reviewer、文件写入和审批写入必须成为带幂等键的副作用 task；不能放在未来 `interrupt()` 之前。
-4. 先迁一条单任务纵向链：`prepare → execute → review → rework/complete → human gate`，再迁多任务和 subagent。
-5. LangGraph SQLite checkpointer 使用独立文件（建议 `.myteam/langgraph.sqlite`）；业务 Task/Session/Approval/Artifact 继续由 `.myteam/myteam.sqlite` 管理。
-
----
-
-## LangGraph 重构 P1–P4 交接（2026-06-21）
-
-### 完成范围
-
-- P1：新增 `workflow/ports.mjs`，把 Agent 执行、Reviewer、Task transition、派生任务、澄清与事件输出定义为图端口；浏览器和 CLI dispatch 已共享 `LangGraphDispatchEngine`。
-- P2：接入 `@langchain/langgraph` 与 SQLite checkpointer；澄清和人工 Gate 使用 `interrupt()` / `Command({ resume })`，提供工作流查询与恢复 API。
-- P3：父图实现多任务队列与动态 spawn，Task subgraph 实现执行、Review、受限返工和人工 Gate；事件继续投影到现有 SSE。
-- P4：Chat、Plan、Schedule 通过 `LangGraphTurnEngine` 统一进入 checkpointed turn graph，原 CLI adapter 与协议保持兼容。
-
-### 新增模块
-
-- `workflow/dispatch-graph.mjs`：父 dispatch graph、task subgraph、run/resume/getState。
-- `workflow/turn-graph.mjs`：Chat、Plan、Schedule 共用的单轮图。
-- `workflow/checkpointer.mjs`：共享 `SqliteSaver`，默认 `.myteam/langgraph.sqlite`。
-- `workflow/ports.mjs`：副作用端口校验与默认实现。
-- `tests/langgraph-workflow.test.mjs`：P1–P4 核心行为测试。
-- `docs/langgraph-p1-p4-implementation.md`：架构、API、持久化边界和限制。
-
-### 运行接口
-
-- `GET /api/workflows/:workflowRunId`：读取 checkpoint 状态。
-- `POST /api/workflows/:workflowRunId/resume`：恢复当前进程内暂停的澄清或人工 Gate。
-- `/api/dispatch` SSE 新增 `workflow-start`、`workflow-interrupt`、`paused`，原任务进度事件继续保留。
-
-### 重要边界
-
-- `.myteam/myteam.sqlite` 仍是业务数据真相；`.myteam/langgraph.sqlite` 只保存图快照。
-- `workflowRunId` 是 LangGraph `thread_id`，不要改用 `sessionId` 或 `clientRunId`。
-- interrupt 之前的 CLI/Reviewer 副作用不能因恢复而重复；现有测试对此有明确断言。
-- SQLite checkpoint 已验证可由新 engine 实例恢复。真实服务重启后暂时只能查询 checkpoint；因为 CLI adapter 仍是请求期闭包，HTTP resume 会明确返回 `workflow_adapter_unavailable`。下一步应持久化 adapter 描述并在启动时重建。
-
-### 验证
-
-- `npm run check` 通过。
-- `npm test`：96/96 通过。
+myteamOUO/
+├── server.mjs (4315 行, -17%)
+├── server/
+│   ├── config.mjs
+│   ├── index.mjs
+│   ├── router.mjs
+│   ├── middleware/cors.mjs
+│   ├── services/
+│   │   ├── chain-task.mjs
+│   │   ├── lesson.mjs          (.ts)
+│   │   ├── skill-registry.mjs
+│   │   ├── agent-status.mjs
+│   │   ├── session-store.mjs   (.ts)
+│   │   └── logger.mjs          (.ts)
+│   └── routes/
+│       ├── static-files.mjs
+│       ├── sessions.mjs
+│       ├── agents.mjs
+│       └── skills.mjs
+├── web/
+│   ├── app.html                (更新: meta/favicon/主题)
+│   ├── app.css                 (2709行, -32%)
+│   ├── css/
+│   │   ├── theme.css
+│   │   ├── premium.css
+│   │   ├── drawers.css          (NEW)
+│   │   └── task-panel.css       (NEW)
+│   └── js/
+│       ├── utils/
+│       │   ├── rich-blocks.js
+│       │   ├── premium-effects.js (NEW)
+│       │   ├── esc.mjs
+│       │   └── dom.mjs
+│       ├── chat/
+│       │   ├── bubble.js
+│       │   └── plan-workflow.js
+│       ├── components/
+│       │   ├── artifacts.js
+│       │   └── skills.js
+│       └── app-core.js
+├── .github/workflows/ci.yml     (NEW)
+├── tsconfig.json                 (NEW)
+├── CODE_REVIEW.md
+├── FRONTEND_REVIEW.md
+├── REFACTOR_SUMMARY.md
+└── HANDOVER.md                   (本文件)
+```

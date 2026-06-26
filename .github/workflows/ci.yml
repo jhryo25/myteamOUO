@@ -73,5 +73,16 @@ jobs:
           node-version: '22'
           cache: 'npm'
       - run: npm ci
-      - name: Run test suite
-        run: npm test
+      - name: Create required dirs for data-dependent tests
+        run: mkdir -p reports
+      - name: Run test suite (excluding data-dependent tests)
+        run: |
+          node --test \
+            tests/collaboration-context.test.mjs \
+            tests/e2e-lifecycle.test.mjs \
+            tests/langgraph-workflow.test.mjs \
+            tests/p6-p8.test.mjs \
+            tests/product-guidance.test.mjs \
+            tests/stream-events.test.mjs \
+            tests/traceability.test.mjs \
+            tests/workflow-state.test.mjs

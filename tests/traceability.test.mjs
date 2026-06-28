@@ -77,6 +77,10 @@ test('plan agent changes update the shared task list and reject failed HTTP save
   assert.match(appModules, /cachedTask\.agent = data\.task\.agent/);
   assert.match(appModules, /filterAndRenderTasks\(\)/);
   assert.match(appModules, /sel\.value = previousAgent/);
+  assert.match(appModules, /plan-suggest-all/);
+  assert.match(appModules, /runDispatch\(\)/);
+  assert.match(appModules, /button\.textContent = `仅执行/);
+  assert.match(appModules, /button\.classList\.toggle\('hidden', count === 0\)/);
 });
 
 test('refreshed dispatch state stays linked to the conversation session', () => {
@@ -102,6 +106,11 @@ test('running task card exposes live phase, activity, and output progress', () =
   assert.match(appModules, /session-running-status/);
   assert.match(appModules, /session-running-metrics/);
   assert.match(appModules, /bumpSessionRunningTaskMetric/);
+  assert.match(appModules, /const task = allTasks\.find\(item => item\.id === id\)/);
+  assert.match(appModules, /task\.status = status/);
+  assert.match(appModules, /filterAndRenderTasks\(\);\s*return;/);
+  assert.match(appModules, /task\.failure_stage === 'review'/);
+  assert.match(appModules, /返工次数已用尽/);
 });
 
 test('dispatch is mutually exclusive, session-scoped, and persists task activity parts', () => {

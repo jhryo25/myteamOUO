@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { normalizeAgentFailure, parseReviewResult, parsedAgentOutputText, PARSERS, resolveAgentParser } from '../agent-utils.mjs';
+import { isTransientKimiSessionFailure, normalizeAgentFailure, parseReviewResult, parsedAgentOutputText, PARSERS, resolveAgentParser } from '../agent-utils.mjs';
 
 test('Kimi parser exposes tool start and completion as live activities', () => {
   const started = PARSERS.kimi(JSON.stringify({
@@ -50,6 +50,13 @@ test('Kimi 429 errors are normalized into a retryable user-facing failure', () =
     detail: 'APIError: status 429, rate_limit_exceeded',
     exitCode: 1,
   });
+});
+
+test('Kimi session mkdir EPERM is the only startup filesystem failure eligible for retry', () => {
+  const cfg = { path: 'C:\\Users\\Administrator\\.kimi-code\\bin\\kimi.exe' };
+  assert.equal(isTransientKimiSessionFailure('kimi', "EPERM: operation not permitted, mkdir 'C:\\Users\\Administrator\\.kimi-code\\sessions\\wd_myteam\\session_1'", cfg), true);
+  assert.equal(isTransientKimiSessionFailure('kimi', 'EPERM: operation not permitted, unlink report.json', cfg), false);
+  assert.equal(isTransientKimiSessionFailure('claude', "EPERM: operation not permitted, mkdir 'C:\\Users\\Administrator\\.kimi-code\\sessions\\session_1'", { path: 'claude.exe' }), false);
 });
 
 test('agent variants inherit the parser for their base CLI', () => {

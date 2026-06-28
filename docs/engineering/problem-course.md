@@ -192,8 +192,8 @@
 
 解法：
 - Hub 保留当前可操作状态：Agent、Skills、Lessons、调用、Gate、任务。
-- 差距对比迁移到 `docs/clowder-html-gap.md`。
-- LangChain / LangGraph / RAG 评估迁移到 `docs/architecture-evaluation.md`。
+- 差距对比迁移到 `docs/architecture/clowder-html-gap.md`。
+- LangChain / LangGraph / RAG 评估迁移到 `docs/architecture/architecture-evaluation.md`。
 
 验证：
 - Hub 页面不再展示“对比”tab。

@@ -30,7 +30,7 @@ myteam 的核心编排已经从手写循环迁移到 LangGraph：
 | `dispatch.mjs` | CLI dispatch adapter |
 | `tests/langgraph-workflow.test.mjs` | LangGraph 核心行为验收 |
 
-更细的节点流、API 示例与状态边界见 `docs/langgraph-p1-p4-implementation.md`。
+更细的节点流、API 示例与状态边界见 `../architecture/langgraph-p1-p4-implementation.md`。
 
 ## 工作流结构
 

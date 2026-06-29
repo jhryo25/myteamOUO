@@ -49,17 +49,18 @@ function addPlanCard(goal, tasks, opts = {}) {
     return renderPlanTaskRow(t, i, selectHtml, { open: i === 0 });
   }).join('');
 
-  // 统计各 agent 的 pending 任务数，只生成可用 agent 的建议按钮
+  // 统计各 agent 的 pending 任务数。始终提供全量入口；按 agent 的按钮只是筛选，不会改写任务归属。
   const agentCounts = {};
   tasks.forEach(t => { agentCounts[t.agent] = (agentCounts[t.agent] || 0) + 1; });
-  const availableKeys = new Set(availableAgents.map(a => a.key));
-  const suggestionBtns = Object.entries(agentCounts)
-    .filter(([agent]) => availableKeys.has(agent))
-    .map(([agent, cnt]) =>
+  const suggestionBtns = availableAgents
+    .map(({ key: agent }) => {
+      const cnt = agentCounts[agent] || 0;
+      return (
       deferActions
-        ? `<button class="plan-suggest-btn" data-agent="${esc(agent)}" disabled title="任务列表即将加载完成...">▶ 让 ${esc(agent)} 执行 (${cnt} 条)</button>`
-        : `<button class="plan-suggest-btn" data-agent="${esc(agent)}">▶ 让 ${esc(agent)} 执行 (${cnt} 条)</button>`
-    ).join('');
+        ? `<button class="plan-suggest-btn ${cnt ? '' : 'hidden'}" data-agent="${esc(agent)}" disabled title="任务列表即将加载完成...">仅执行 ${esc(agent)} (${cnt} 条)</button>`
+        : `<button class="plan-suggest-btn ${cnt ? '' : 'hidden'}" data-agent="${esc(agent)}">仅执行 ${esc(agent)} (${cnt} 条)</button>`
+      );
+    }).join('');
 
   const row = document.createElement('div');
   row.className = 'bubble-row';
@@ -73,6 +74,7 @@ function addPlanCard(goal, tasks, opts = {}) {
       ${rows}
       <div class="plan-suggest-row">
         <span class="plan-suggest-label">建议执行方式：</span>
+        <button class="plan-suggest-btn plan-suggest-all" ${deferActions ? 'disabled title="任务列表即将加载完成..."' : ''}>▶ 执行全部 (${tasks.length} 条)</button>
         ${suggestionBtns}
         <button class="plan-suggest-btn plan-suggest-manual" ${deferActions ? 'disabled' : ''}>手动选择任务</button>
       </div>
@@ -108,6 +110,13 @@ function addPlanCard(goal, tasks, opts = {}) {
         const cachedTask = allTasks.find(task => task.id === taskId);
         if (cachedTask) cachedTask.agent = data.task.agent;
         if (taskRow) taskRow.dataset.agent = data.task.agent;
+        const updatedCounts = {};
+        tasks.forEach(task => { updatedCounts[task.agent] = (updatedCounts[task.agent] || 0) + 1; });
+        row.querySelectorAll('.plan-suggest-btn[data-agent]').forEach(button => {
+          const count = updatedCounts[button.dataset.agent] || 0;
+          button.textContent = `仅执行 ${button.dataset.agent} (${count} 条)`;
+          button.classList.toggle('hidden', count === 0);
+        });
         filterAndRenderTasks();
       } catch (e) {
         sel.value = previousAgent;
@@ -124,6 +133,9 @@ function addPlanCard(goal, tasks, opts = {}) {
       runDispatch({ agentOnly: btn.dataset.agent });
     };
   });
+  row.querySelector('.plan-suggest-all').onclick = () => {
+    runDispatch();
+  };
   // 手动：展开任务面板
   row.querySelector('.plan-suggest-manual').onclick = () => {
     document.getElementById('tasksExpandBtn').click();
@@ -242,6 +254,14 @@ function workflowCheckpointMeta(view) {
   return { node, step, saved };
 }
 
+function workflowFailureStateText(task, actionable, reviewOnly) {
+  if (!actionable) return '已重置，等待执行';
+  if (reviewOnly || task.failure_stage === 'review') return 'Agent 结果已保留，仅 Reviewer 失败';
+  if (task.failure_stage === 'rework' || /rework limit exceeded/i.test(task.error || '')) return '返工次数已达到上限';
+  if (task.failure_stage === 'execute') return 'Agent 执行失败';
+  return '任务执行失败';
+}
+
 function renderWorkflowCard(input = {}) {
   const view = normalizeWorkflowView(input);
   if (!view.workflowRunId || (currentSessionId && input.sessionId && input.sessionId !== currentSessionId)) return null;
@@ -292,7 +312,7 @@ function renderWorkflowCard(input = {}) {
     const scope = reviewOnly ? 'review' : 'execute';
     const actionable = task.status === 'failed' || ['failed', 'agent_repair_pending'].includes(task.review_status);
     const canRetry = actionable && task.retryable !== false;
-    const stateText = !actionable ? '已重置，等待执行' : reviewOnly ? 'Agent 结果已保留' : 'Agent 执行失败';
+    const stateText = workflowFailureStateText(task, actionable, reviewOnly);
     return `<div class="workflow-failure-row">
       <div><strong>${esc(task.title || task.id)}</strong><span>${esc(stateText)}${task.error ? ` · ${task.error}` : ''}</span></div>
       ${canRetry ? `<button class="workflow-action danger" data-workflow-action="retry" data-retry-scope="${scope}" data-task-ids="${esc(String(task.id))}">${reviewOnly ? '只重试 Reviewer' : '重试 Agent'}</button>` : `<em>${actionable ? '不可自动重试' : '无需重试'}</em>`}

@@ -332,7 +332,7 @@ async function loadTasks() {
 
 function activateDeferredPlanActions({ hasClarifications = false, hasPending = false, isRunning = false } = {}) {
   const disabled = hasClarifications || isRunning;
-  document.querySelectorAll('.plan-suggest-btn[data-agent][disabled]').forEach(btn => {
+  document.querySelectorAll('.plan-suggest-btn[data-agent][disabled], .plan-suggest-all[disabled]').forEach(btn => {
     btn.disabled = disabled;
     if (disabled) {
       btn.title = hasClarifications ? '任务需要先确认信息才能执行' : '当前会话正在运行中';
@@ -450,10 +450,15 @@ const STATUS_DOT = {
 
 function taskLifecycleMeta(task) {
   if (task.status === 'waiting_input' || task.open_questions?.length) return { tone: 'review', label: '等待用户确认' };
+  if (task.status === 'failed') {
+    if (task.failure_stage === 'review') return { tone: 'blocked', label: 'Reviewer 异常待处理' };
+    if (task.failure_stage === 'rework' || /rework limit exceeded/i.test(task.error || '')) return { tone: 'blocked', label: '返工次数已用尽' };
+    if (task.failure_stage === 'execute') return { tone: 'blocked', label: 'Agent 执行失败' };
+    return { tone: 'blocked', label: '失败阻塞' };
+  }
   if (task.review_status === 'agent_repair_pending') return { tone: 'blocked', label: 'Reviewer 异常待处理' };
   if (task.gate_status === 'passed') return { tone: 'accepted', label: task.reviewer === 'human' ? '人工已验收' : 'Agent 已验收' };
   if (task.gate_status === 'rework') return { tone: 'rework', label: task.reviewer === 'human' ? '人工要求返工' : 'Agent 要求返工' };
-  if (task.status === 'failed') return { tone: 'blocked', label: '失败阻塞' };
   if (['failed', 'parse_failed', 'skipped'].includes(task.review_status)) return { tone: 'blocked', label: '验收异常' };
   if (task.status === 'done') return { tone: 'review', label: 'Agent 验收中' };
   if (task.status === 'in_progress') return { tone: 'running', label: '执行中' };
@@ -619,6 +624,15 @@ function renderTasks(tasks) {
 }
 
 function updateTaskDot(id, status) {
+  const task = allTasks.find(item => item.id === id);
+  if (task) {
+    task.status = status;
+    if (status === 'in_progress' && !task.started_at) task.started_at = new Date().toISOString();
+    filterAndRenderTasks();
+    return;
+  }
+
+  // 极少数情况下事件先于任务列表到达，仍尽量更新当前已渲染节点。
   const item = document.querySelector(`.task-item[data-id="${id}"]`);
   if (!item) return;
   const dot = item.querySelector('.task-status-dot');

@@ -39,7 +39,7 @@
 5. 新增 `.myteam/skills.yaml`，先用静态文件保存 Skills 看板数据。
 6. 新增 `.myteam/invocations.jsonl`，记录 agent 调用耗时、状态、退出码和失败原因。
 7. 新增人工 Reviewer Gate：`POST /api/tasks/:id/gate` + Hub Gate tab，通过/返工都写回 `tasks.jsonl`。
-8. 移除 Hub 里的“对比”tab，差距对比只保留在 `docs/clowder-html-gap.md`。
+8. 移除 Hub 里的“对比”tab，差距对比只保留在 `docs/architecture/clowder-html-gap.md`。
 9. 新增 Skills 按需加载：`GET /api/skills?text=&agent=&phase=` 返回命中技能，plan/dispatch 时只注入命中的 skill 摘要。
 
 ## 下一步建议

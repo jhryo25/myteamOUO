@@ -2540,7 +2540,7 @@ body.artifacts-resizing { cursor: col-resize; user-select: none; }
 .workflow-current span { color: var(--muted); }
 .workflow-current b { padding: 2px 5px; border-radius: 4px; background: var(--surface2); color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .workflow-current em { overflow: hidden; color: var(--text); font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
-.workflow-error { margin-top: 8px; padding: 7px 9px; border-radius: 6px; background: var(--red-soft); color: var(--red); font-size: 10px; line-height: 1.45; }
+.workflow-error { max-width: 100%; margin-top: 8px; padding: 7px 9px; overflow: auto; border-radius: 6px; background: var(--red-soft); color: var(--red); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; white-space: pre-wrap; word-break: break-word; }
 .workflow-live { display: flex; align-items: center; gap: 8px; margin-top: 9px; padding: 8px 9px; border-radius: 7px; background: var(--surface); }
 .workflow-live-dot { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 15%, transparent); animation: pulse 1.4s infinite; }
 .workflow-live div { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
@@ -2552,10 +2552,10 @@ body.artifacts-resizing { cursor: col-resize; user-select: none; }
 .workflow-failures { display: grid; gap: 6px; margin-top: 10px; padding: 9px; border: 1px solid color-mix(in srgb, var(--red) 25%, var(--border)); border-radius: 8px; background: var(--surface); }
 .workflow-failures-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-bottom: 3px; color: var(--text); font-size: 10px; font-weight: 800; }
 .workflow-failures-title span { color: var(--muted); font-size: 9px; font-weight: 400; }
-.workflow-failure-row { display: flex; align-items: center; gap: 10px; padding-top: 6px; border-top: 1px solid var(--border); }
+.workflow-failure-row { display: flex; min-width: 0; max-width: 100%; align-items: center; gap: 10px; padding-top: 6px; overflow: hidden; border-top: 1px solid var(--border); }
 .workflow-failure-row > div { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }
 .workflow-failure-row strong { overflow: hidden; color: var(--text); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.workflow-failure-row span { overflow: hidden; color: var(--muted); font-size: 9px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.workflow-failure-row span { display: -webkit-box; max-width: 100%; overflow: hidden; color: var(--muted); font-size: 9px; line-height: 1.35; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; word-break: break-word; }
 .workflow-failure-row em { flex: 0 0 auto; color: var(--muted); font-size: 9px; font-style: normal; }
 .workflow-review { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; margin-top: 10px; padding: 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); font-size: 10px; }
 .workflow-review span { color: var(--muted); }

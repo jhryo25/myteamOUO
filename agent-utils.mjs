@@ -587,7 +587,7 @@ export function checkAgentLaunchable(agentKey, cfg, timeoutMs = 3000) {
 // 教训1 (02-cli-engineering): readline 接管 stdout 后 child.stdout.on('data') 不再触发。
 //   watchdog 必须在 rl.on('line') 和 stderr.on('data') 里刷新，不能只靠 stdout 流。
 // 教训1: 超时时间 30min，匹配复杂任务（代码分析/长篇写作）实际需要。
-export function invokeAgent(CLI_CONFIG, agentKey, prompt, {
+function invokeAgentOnce(CLI_CONFIG, agentKey, prompt, {
   silent = false,
   timeoutMs = 30 * 60 * 1000,
   outputSchemaPath = '',
@@ -682,6 +682,39 @@ export function invokeAgent(CLI_CONFIG, agentKey, prompt, {
       else resolve(fullText);
     });
   });
+}
+
+export function isTransientKimiSessionFailure(agentKey, rawError, cfg = {}) {
+  const usesKimi = String(agentKey || '').toLowerCase().startsWith('kimi')
+    || String(cfg?.path || '').toLowerCase().includes('kimi');
+  const detail = String(rawError?.message || rawError || '');
+  return usesKimi
+    && /EPERM/i.test(detail)
+    && /mkdir/i.test(detail)
+    && /\.kimi-code[\\/]sessions/i.test(detail);
+}
+
+// Kimi 在 Windows 上偶尔会被文件系统过滤器短暂拦截新建会话目录。
+// 只对“尚未开始执行”的特定 mkdir EPERM 重试一次；不会重放已有输出或普通 Agent 失败。
+export async function invokeAgent(CLI_CONFIG, agentKey, prompt, options = {}) {
+  const cfg = CLI_CONFIG[agentKey];
+  try {
+    return await invokeAgentOnce(CLI_CONFIG, agentKey, prompt, options);
+  } catch (error) {
+    if (!isTransientKimiSessionFailure(agentKey, error, cfg)) throw error;
+    await new Promise(resolve => setTimeout(resolve, 300));
+    try {
+      return await invokeAgentOnce(CLI_CONFIG, agentKey, prompt, options);
+    } catch (retryError) {
+      if (!isTransientKimiSessionFailure(agentKey, retryError, cfg)) throw retryError;
+      const detail = String(retryError?.message || retryError || '').slice(0, 1200);
+      throw Object.assign(new Error('Kimi 本地会话目录初始化失败，已自动重试一次；请稍后重试该 Reviewer。'), {
+        code: 'agent_session_init_failed',
+        retryable: true,
+        detail,
+      });
+    }
+  }
 }
 
 // ── Output Parsers 重导出（从 output-parsers.mjs） ───────────

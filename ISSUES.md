@@ -2,7 +2,7 @@
 
 > 问题、解法、教训统一管理。每条记录对应一次 git commit。
 
-课程化检索版见：`docs/problem-course.md`。后续遇到新问题时，建议先写入本文件作为原始记录，再把可复用经验整理到课程文档。
+课程化检索版见：`docs/engineering/problem-course.md`。后续遇到新问题时，建议先写入本文件作为原始记录，再把可复用经验整理到课程文档。
 
 ---
 
@@ -209,7 +209,7 @@
 
 ### IMP-012: 对齐 clowder-ai 的 Hub 指挥中心雏形 [ux]
 
-- **位置**: `web/app.html`, `web/app.css`, `web/app.js`, `docs/clowder-html-gap.md`
+- **位置**: `web/app.html`, `web/app.css`, `web/app.js`, `docs/architecture/clowder-html-gap.md`
 - **问题**: myteam 的 HTML 已有聊天、任务栏和 Agent 配置，但缺少 clowder-ai 那种集中查看能力、任务、成本和治理方向的 Hub 入口；用户需要在多个位置猜系统状态。
 - **解法**: 顶部新增 `Hub` 按钮和 `myteam Hub` 抽屉，提供总览、Agent、任务、对比四个 tab；Hub 从现有 `/api/status` 和 `/api/tasks` 读取数据，不引入新依赖。
 - **教训**: 轻量 MVP 也需要一个“状态集中点”。先做只读 Hub，可以在不增加系统复杂度的前提下提升可理解性，并为后续 Skills / Quota / Reviewer Gate 留入口。
@@ -241,7 +241,7 @@
 
 ### IMP-016: Skills 按需加载与页面去对比化 [skills]
 
-- **位置**: `.myteam/skills.yaml`, `server.mjs`, `agent-utils.mjs`, `web/app.html`, `web/app.css`, `web/app.js`, `docs/architecture-evaluation.md`
+- **位置**: `.myteam/skills.yaml`, `server.mjs`, `agent-utils.mjs`, `web/app.html`, `web/app.css`, `web/app.js`, `docs/architecture/architecture-evaluation.md`
 - **问题**: Hub 里展示“差距对比”会把开发决策塞进产品界面；Skills 也只是静态表，没有真正影响 plan/dispatch。
 - **解法**: 移除 Hub `对比` tab 和页面内差距说明；差距只保留在 docs。`GET /api/skills` 支持 `text/agent/phase` 参数，返回命中的 skill 和 prompt preview；plan/dispatch 时只注入命中的 skill 摘要。
 - **教训**: 产品界面只放可操作状态，架构差距和技术评估放文档；Skills 先做轻量按需注入，再升级成完整文件级渐进加载。

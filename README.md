@@ -1,229 +1,252 @@
 # myteamOUO
 
-> 一个本地优先的多 Agent 协作控制台：把 Codex、Claude Code、Kimi 等本机 CLI 串成可拆解、可执行、可审查、可恢复的任务流水线。
+> 一个本地优先、可观察、可恢复的多 Agent 协作控制台。
 
+[![CI](https://github.com/jhryo25/myteamOUO/actions/workflows/ci.yml/badge.svg)](https://github.com/jhryo25/myteamOUO/actions/workflows/ci.yml)
 [![Node.js](https://img.shields.io/badge/Node.js-22.5%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
-[![Tests](https://img.shields.io/badge/tests-CI%2061%2F61-brightgreen)](#验证)
-[![CI](https://img.shields.io/badge/CI-syntax%20%2B%20tsc%20%2B%20test-blue)](#验证)
-[![Branch](https://img.shields.io/badge/main-protected-red)](https://github.com/jhryo25/myteamOUO/settings/branches)
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## 30 秒理解这个项目
+myteamOUO 把 Codex、Claude Code、Kimi 等本机 Agent CLI 串成一条可管理的任务流水线。用户负责目标和关键决策，系统负责拆解任务、分配 Agent、注入上下文、跟踪执行、跨 Agent 审查、返工和恢复。
 
-同时使用多个 AI Agent 时，真正消耗人的往往不是提问，而是管理：手工复制上下文、判断该找谁、追踪谁做到了哪一步、检查结果，以及在中断后重新解释一遍。
+它不是新的模型，也不是通用桌面 Agent 运行时。它更像本机 Agent 之上的协作控制面：保留现有 CLI 的能力，同时让执行过程有状态、有证据、可暂停、可审计。
 
-myteamOUO 在模型和用户之间增加了一层轻量协作控制面：
+## 为什么做这个项目
 
-- 用户只描述目标，系统把目标拆成带负责人和验收标准的任务；
-- 不同 Agent 按能力协作，执行结果自动进入 Reviewer Gate；
-- 会话、任务、审批和产物保存在本地 SQLite，刷新或中断后可以继续；
-- Shell、Skill 安装和任务执行经过风险分级、审批和脱敏审计；
-- 全程使用本机 Agent CLI，不要求把项目数据交给额外的云端数据库。
+同时使用多个 Agent 时，真正昂贵的往往不是提问，而是人工管理：
 
-它解决的不是“让模型回答得更多”，而是让多 Agent 工作过程更少依赖人工搬运，并且更可控。
+- 在多个终端之间复制目标、文件路径和历史结论；
+- 决定任务应该交给哪个 Agent；
+- 判断任务是否真的完成，而不是只给出了一段回答；
+- 处理审批、失败、返工和服务重启后的恢复；
+- 找回散落在聊天、日志和工作区里的交付物。
 
-## 一条任务如何完成
+myteamOUO 把这些动作变成统一的会话、任务、工作流、审批和产物对象。
+
+## 核心流程
 
 ```mermaid
 flowchart LR
     A[用户目标] --> B[结构化拆解]
-    B --> C[按能力分配 Agent]
-    C --> D[执行与流式进度]
-    D --> E[LangGraph Reviewer Gate]
+    B --> C[按任务分配 Agent]
+    C --> D[执行与流式事件]
+    D --> E[Reviewer Gate]
     E -->|通过| F[产物与经验沉淀]
     E -->|返工| C
-    D -->|中断| G[保存上下文与状态]
+    D -->|中断或失败| G[保存状态与检查点]
     G --> C
 ```
 
-例如，用户提出“分析一个仓库并修复问题”后，myteamOUO 可以：
+一条典型任务会经历：
 
-1. 生成 3–7 个带验收标准的子任务；
-2. 将调研、实现、审查分配给不同 Agent；
-3. 在执行前注入当前工作区状态和相关历史证据；
-4. 展示 reasoning、工具调用、结果和错误组成的时间线；
-5. 对高风险操作暂停并请求批准；
-6. 将未通过的任务连同返工意见重新放回待执行队列。
+1. 将目标拆成 3–7 个带负责人、步骤和验收标准的任务；
+2. 根据每条任务选择的 Agent 逐项执行；
+3. 注入 Continuity Capsule、相关历史证据和 Git 工作区快照；
+4. 把 reasoning、tool call、tool result、final 和 error 统一成时间线事件；
+5. 由 Reviewer 对照验收标准审查，失败时保留 Agent 结果并支持只重试 Reviewer；
+6. 将任务、检查点、审批、产物和经验保存到本地 SQLite。
 
-## 用户痛点与产品价值
+## 主要能力
 
-| 常见痛点 | myteamOUO 的处理 | 用户价值 |
-|---|---|---|
-| 多个 AI 窗口之间反复复制上下文 | Mention 路由、结构化派生任务、Continuity Capsule | 减少人工充当“消息路由器” |
-| 复杂目标容易漏步骤、难验收 | 结构化 Plan、负责人、取舍与验收标准 | 从聊天答案升级为可管理任务 |
-| 单模型既执行又自审，容易有盲区 | 跨 Agent Reviewer Gate 和返工闭环 | 提高结果可信度 |
-| 刷新、停止或服务重启后进度丢失 | SQLite 状态、运行状态机、继续对话 | 降低长任务中断成本 |
-| 本地 Agent 能执行命令，但风险不透明 | 风险分级、操作指纹、单次/会话审批、脱敏审计 | 保留执行力，同时让权限可控 |
-| Agent 产物散落在对话和目录中 | 会话文件面板、预览、安全路径校验 | 更快找到和复用交付物 |
+### 多 Agent 编排
 
-## 核心能力
+- 支持 Codex、Claude Code、Kimi 及基于它们创建的 Agent 变体；
+- 支持对话模式、拆任务模式和 `@mention` 路由；
+- 每条任务可以单独修改执行 Agent，也可以执行全部待处理任务；
+- LangGraph 管理执行、审查、返工、人工 Gate 和 checkpoint 恢复。
 
-### 1. 场景化首次使用与人工验收
+### 连续上下文
 
-- 首页自动展示可启动 Agent 和当前工作区，未配置时直接进入 Agent 设置。
-- 内置仓库诊断、竞品研究、数据报告、需求审查四个场景模板；选择模板只填入目标，不会自动执行。
-- 任务面板用“待执行 / 执行中 / 待验收 / 返工 / 已验收 / 阻塞”表达用户可理解的生命周期。
-- Reviewer Gate 同时展示自动审查结果和人工评分卡；正确性、完整性、证据与安全全部确认后才能通过，返工必须给出说明。
+- Continuity Capsule 保存目标、约束、决策、完成事实和下一步；
+- Top-K Evidence 只检索当前任务最相关的历史；
+- Workspace Bridge 在执行前读取 Git 状态、最近提交和工作区变更；
+- 执行 Agent 与 Reviewer 使用同一份任务上下文。
 
-### 2. 多 Agent 编排
+### 安全与治理
 
-- 接入 Codex、Claude Code、Kimi 等本机 CLI，并支持自定义 Agent 变体。
-- 支持 `@mention` 路由，以及结构化 `<spawn_subagent>` 派生协议。
-- 将目标拆成 3–7 个可验收任务，按 Agent 执行并进入 Reviewer Gate。
-- 不可用 Agent 会回退到可启动实例，避免计划只停留在纸面。
+- 敏感操作经过服务端审批、操作指纹和有效期校验；
+- 支持单次批准、会话批准、拒绝和超时；
+- 审计记录自动脱敏 Token、Secret、API Key 和 Cookie；
+- 工作区文件读取与打开经过 realpath 边界检查；
+- 自动化任务遇到需要审批的操作时默认暂停。
 
-### 3. 连续上下文
+### 可观察与可恢复
 
-- Continuity Capsule 保存目标、约束、决策、已完成事实、失败和下一步。
-- Top-K Evidence 只检索最相关的历史证据，避免把全部历史塞进上下文。
-- Workspace Bridge 在执行前读取 Git 状态、最新提交和工作区改动。
-- 执行 Agent 与 Reviewer 使用同一份任务上下文，减少交接失真。
+- SSE 实时流与 SQLite 历史回放共享同一套事件语义；
+- 右侧任务面板实时展示待执行、执行中、验收、返工和失败状态；
+- 支持停止、恢复、失败节点重试和 Reviewer-only 重试；
+- 服务重启后可从持久化 checkpoint 和 adapter descriptor 恢复工作流。
 
-### 4. 安全与治理
+### 产物与自动化
 
-- Shell、Skill 安装/卸载、配置写入和任务执行共用风险策略层。
-- 敏感操作生成服务端审批对象；批准后的载荷必须与原始操作指纹一致。
-- 支持批准一次、会话批准、拒绝和超时，不提供永久授权。
-- 审计记录自动脱敏 Token、Secret、API Key、Cookie 和环境变量。
+- 会话文件面板集中展示 Markdown、JSON、HTML 和工作区文件；
+- Skills 支持按需、常驻和手动加载；
+- Cron 任务支持时区、互斥、审批暂停和运行历史；
+- 仓库附带美股日报工具链，演示“采集 → 清洗 → 指标 → 异常 → 报告 → 校验”。
 
-> 安全边界：myteamOUO 只控制自己管理的 REST/SSE 与执行入口，不声称拦截外部 CLI 内部的每一次工具调用。
+## 快速开始
 
-### 5. 可观察、可恢复的执行
+### 环境要求
 
-- 将 Agent 输出统一为 `reasoning / tool_call / tool_result / final / error` 有序事件。
-- 实时 SSE 与 SQLite 历史回放使用同一套时间线语义。
-- 会话状态覆盖 `running / interrupting / interrupted / completed / error`。
-- 用户停止任务后等待旧子进程收口，再允许继续，避免新旧回复交叉写入。
-- LangGraph 工作流卡片展示当前节点与 checkpoint；暂停时可直接通过、返工或补充澄清，失败节点可按原任务集合重新派发。
+- Node.js `22.5+`；
+- 至少一个受支持的本机 Agent CLI；
+- Windows、macOS 或 Linux。
 
-### 6. 扩展与自动化
-
-- Skills 支持按需加载、启停、卸载，以及从 registry、GitHub、ZIP 或本地目录导入。
-- Cron 任务支持时区、启停、互斥、运行历史，并默认暂停等待审批。
-- Agent 输出中的 Markdown、JSON、HTML 和本地文件引用可进入产物面板。
-- 项目附带美股日报工具链，作为“数据抓取 → 统计 → 报告 → 校验”的自动化案例。
-
-## 关键产品取舍
-
-myteamOUO 参考了 [Clowder AI](https://github.com/zts212653/clowder-ai) 的多 Agent 协作、身份与 Skills 思路，也吸收了 [LobsterAI](https://github.com/netease-youdao/LobsterAI) 的本地执行、权限、持久化和子代理追踪设计，但没有直接复制它们的技术体量。
-
-| 选择 | 原因 |
-|---|---|
-| 单 Node 服务 + 原生 Web UI | 降低安装和调试成本，先验证协作闭环 |
-| 本机 CLI Adapter | 复用用户已有的模型账号、工具链和执行能力 |
-| SQLite 本地持久化 | 不引入云数据库，同时获得事务、迁移和可恢复状态 |
-| 显式人工 Gate | 在自动化成熟前，让关键决策仍由人掌握 |
-| 按需 Skills 与 Top-K Evidence | 控制上下文噪声和调用成本 |
-| LangGraph 只负责工作流编排 | CLI、业务任务和审批仍由现有边界负责，避免框架侵入业务数据 |
-| 暂不引入 Electron/OpenClaw | 保持轻量定位，避免 MVP 过早承担完整桌面运行时复杂度 |
-
-更完整的取舍记录见 [LobsterAI 对比](docs/lobsterai-comparison.md)、[Clowder AI 差距](docs/clowder-html-gap.md) 和 [架构评估](docs/architecture-evaluation.md)。
-
-## 快速启动
-
-要求：Node.js `22.5+`，并至少安装一个受支持的 Agent CLI。
+### 安装
 
 ```bash
 git clone https://github.com/jhryo25/myteamOUO.git
 cd myteamOUO
-cp .env.example .env
 npm install
-npm run rebuild  # 如 better-sqlite3 版本不匹配
-node server.mjs --port 7878
 ```
 
-打开 `http://localhost:7878`，并在 `.env` 中配置本机 CLI 路径：
+复制环境变量示例：
+
+```bash
+# macOS / Linux
+cp .env.example .env
+
+# Windows PowerShell
+Copy-Item .env.example .env
+```
+
+在 `.env` 中填写本机 CLI 路径：
 
 ```env
-CODEX_PATH=C:\path\to\codex.exe
-CLAUDE_PATH=C:\path\to\claude.exe
 KIMI_PATH=C:\path\to\kimi.exe
+CLAUDE_PATH=C:\path\to\claude.cmd
+CODEX_PATH=C:\path\to\codex.cmd
 ```
 
 Kimi Code CLI 0.14+ 使用 `--prompt ... --output-format stream-json`；旧配置中的 `--print` 会在加载时自动移除。
 
-## 架构概览
+### 启动
+
+```bash
+node server.mjs --port 7878
+```
+
+打开 [http://localhost:7878](http://localhost:7878)。首次进入时，状态栏会检查 Agent 路径与可启动性；也可以在设置页修改工作区和 Agent 配置。
+
+## 使用方式
+
+### 直接对话
+
+在对话模式输入问题，或使用 `@codex`、`@claude`、`@kimi` 指定 Agent。
+
+### 拆任务执行
+
+1. 切换到“拆任务”；
+2. 输入目标并选择规划 Agent；
+3. 检查任务步骤、验收标准和待确认问题；
+4. 按需修改每条任务的执行 Agent；
+5. 点击“执行全部”，或只执行某个 Agent 的任务；
+6. 在工作流卡片和右侧任务面板查看执行、审查和返工状态。
+
+### 处理失败
+
+- Agent 执行失败：重试该任务；
+- Reviewer 失败：保留 Agent 结果，只重试 Reviewer；
+- Reviewer 要求返工：任务返回执行阶段，达到上限后明确标记；
+- 服务或页面重启：从 checkpoint 和当前运行状态恢复。
+
+## 架构
 
 ```text
 Browser UI
-  ├─ Chat / Plan / Task Timeline / Hub
+  ├─ Chat / Plan / Task panel / Hub
   ├─ Skills / Approvals / Schedules / Artifacts
-  └─ SSE live events + history replay
-             │
-server.mjs ──┼─ server/services/   (lesson, session-store, skill-registry, logger…)
-             ├─ server/routes/     (sessions, agents, skills, static-files)
-             ├─ server/middleware/  (CORS)
-             └─ LangGraph ports
-             │
-workflow/ ───┼─ Dispatch graph / Task subgraph
-             ├─ Chat / Plan / Schedule turn graph
-             └─ SQLite checkpointer / interrupt + resume
-             │
-  ┌──────────┼───────────────┐
-storage.mjs  governance.mjs  scheduler.mjs
-business DB  policy/audit    Cron/run history
-             │
-Codex CLI / Claude Code / Kimi / custom variants
+  └─ REST + SSE
+          │
+server.mjs
+  ├─ Agent CLI adapters and stream parsers
+  ├─ Approval, audit, artifacts and scheduler
+  ├─ Session/task services under server/
+  └─ LangGraph workflow ports
+          │
+workflow/
+  ├─ Dispatch graph and task subgraph
+  ├─ Turn graph
+  └─ SQLite checkpointer
+          │
+storage.mjs / governance.mjs / scheduler.mjs
 ```
 
-主要模块：
+当前生产入口仍是 `server.mjs`。`server/` 保存已拆出的配置、路由和领域服务，项目采用渐进式模块化，避免一次性重写破坏现有工作流。
 
-- `server/` — **NEW**: 服务层拆分 (services + routes + middleware 共 14 模块)
-- `agent-utils.mjs`：CLI 配置、启动、Prompt 与输出解析；
-- `collaboration-context.mjs`：结构化计划、连续上下文、证据检索、子代理协议；
-- `workflow/dispatch-graph.mjs`：多任务队列、Reviewer、返工、人工 Gate 与派生任务图；
-- `workflow/turn-graph.mjs`：Chat、Plan、Schedule 共用的 checkpointed turn graph；
-- `workflow/checkpointer.mjs`：独立的 `.myteam/langgraph.sqlite` checkpoint 存储；
-- `workflow/ports.mjs`：LangGraph 与 CLI、Task、审批、事件等副作用之间的端口；
-- `storage.mjs`：SQLite、WAL、迁移和旧数据导入；
-- `governance.mjs`：风险策略、审批指纹和脱敏审计；
-- `scheduler.mjs`：Cron、时区、互斥和审批暂停；
-- `web/`：拆分后的前端组件 (app-core + 7 子模块) + 亮/暗主题。
+## 目录结构
 
-TypeScript 核心模块 (tsc --noEmit 零错误):
-- `server/services/logger.ts` — Logger 接口 & LogLevel 类型
-- `server/services/lesson.ts` — LessonPattern & TaskSnapshot 类型
-- `server/services/session-store.ts` — Session & RunState 完整类型
+```text
+myteamOUO/
+├─ server.mjs                 # 当前 HTTP/SSE 主入口
+├─ agent-utils.mjs            # CLI 配置、启动、流解析与任务仓储适配
+├─ storage.mjs                # SQLite 仓储与迁移
+├─ governance.mjs             # 审批、指纹和审计
+├─ scheduler.mjs              # Cron 调度与运行历史
+├─ collaboration-context.mjs  # Capsule、Evidence、Workspace Bridge
+├─ server/                    # 渐进拆分的配置、路由和领域服务
+├─ workflow/                  # LangGraph 图、端口、检查点和清理
+├─ web/                       # 原生 Web UI、样式和模块化前端脚本
+├─ tests/                     # Node 测试与端到端生命周期测试
+├─ tools/                     # 数据处理和报告工具链
+├─ docs/                      # 分类后的架构、产品与工程文档
+├─ skills-registry/           # 本地 Skill registry
+├─ reports/                   # 本地报告输出，默认不作为核心源码
+├─ HANDOVER.md                # 当前交接状态
+└─ ISSUES.md                  # 原始问题与修复记录
+```
 
-## 验证
+完整文档索引见 [docs/README.md](docs/README.md)。根目录中的 `index.html` 和 `myteam.py` 是早期原型/兼容入口，主应用不依赖它们启动。
+
+## 本地数据
+
+默认运行数据位于 `.myteam/`：
+
+- `myteam.sqlite`：会话、任务、工作流、审批、调度和经验；
+- `agents.json`：Agent 定义与变体；
+- `skills.yaml`：Skill 加载策略；
+- `runs/`：本地运行日志与临时状态。
+
+`.env`、`.myteam/`、运行日志和本地产物不应提交到公开仓库。
+
+## 开发与验证
 
 ```bash
-npm run check      # 全栈语法检查 (server + modules + routes)
-npm run typecheck  # TypeScript 类型检查 (tsc --noEmit)
-npm test           # 全部测试 (含数据依赖测试，需本地 data/)
+# 语法检查
+npm run check
+
+# TypeScript 检查
+npm run typecheck
+
+# 完整测试
+npm test
 ```
 
-CI/CD: push/PR 到 main 自动触发 syntax-check + typecheck + test (61 核心 case, [`.github/workflows/ci.yml`](.github/workflows/ci.yml))
+CI 会在 push 和 pull request 时执行语法检查、TypeScript 检查和不依赖本地数据的核心测试集。
 
-**main 分支已保护**：必须 PR + CI 绿 + 至少 1 approve 才能合并，禁止直接 push 和 force push。
+## 产品边界
 
-当前自动化测试覆盖结构化计划、LangGraph 多任务队列、Reviewer 协议、人工中断/恢复、SQLite checkpoint、Agent 回退、审批指纹与审计脱敏等关键链路。
+myteamOUO 借鉴了 [LobsterAI](https://github.com/netease-youdao/LobsterAI) 的本地执行、权限和产物体验，也参考了 [Clowder AI](https://github.com/zts212653/clowder-ai) 的多 Agent 协作与治理思路，但不复制它们的完整技术体量。
 
-## 当前边界与下一步
+当前坚持：
 
-当前版本已经跑通本地多 Agent 协作闭环，但仍是个人项目阶段：
+- 单 Node 服务 + 原生 Web UI；
+- 复用用户已有的 Agent CLI；
+- SQLite 本地持久化；
+- 显式 Reviewer 与人工 Gate；
+- LangGraph 只负责编排，不取代业务数据和权限边界。
 
-- 需要一键安装、CLI 健康检查和新手示例任务，缩短首次成功时间；
-- 需要真实的任务成功率、人工介入次数、恢复成功率和 Token/成本指标；
-- 需要带来源引用和生命周期管理的本地知识检索，而不只是轻量关键词证据；
-- 需要统一 Adapter/MCP 扩展协议，并逐步覆盖 Agent 内部工具权限；
-- 服务重启后可以读取 LangGraph checkpoint；当前 HTTP 恢复执行仍要求原进程保留对应副作用 adapter，后续需把 adapter 配置持久化为可重建描述；
-- 需要用 2–3 个高频场景验证用户价值，而不是继续横向堆功能。
+近期优先级是稳定多 Agent 协作闭环、安装体验和真实用户指标，而不是追求更多模型、Skills 数量或完整桌面运行时。
 
-详细路线见 [竞品对比与迭代路线](docs/myteam-roadmap-vs-lobsterai-clowder.md)。
+## 文档
 
-## 更多资料
-
-- [交接文档](HANDOVER.md) — 本次改造全记录
-- [代码审查报告](CODE_REVIEW.md) — Server 端审查 & 修复
-- [前端审查报告](FRONTEND_REVIEW.md) — CSS/JS/HTML 审查 & 修复
-- [改进摘要](REFACTOR_SUMMARY.md) — Phase 1+2 拆分统计
-- [产品与技术交接](docs/product-handover.md)
-- [LangGraph 最终交接](docs/langgraph-final-handover.md)
-- [问题与限制](ISSUES.md)
-- [产品复盘课程](docs/problem-course.md)
-- [LangGraph P1–P4 实现说明](docs/langgraph-p1-p4-implementation.md)
-- [美股日报数据源说明](docs/data-source-us-stock.md)
+- [文档中心](docs/README.md)
+- [当前交接](HANDOVER.md)
+- [Issue Tracker](ISSUES.md)
+- [架构评估](docs/architecture/architecture-evaluation.md)
+- [LangGraph 实现说明](docs/architecture/langgraph-p1-p4-implementation.md)
+- [竞品对比与迭代路线](docs/architecture/roadmap-vs-lobsterai-clowder.md)
+- [代码审查报告](docs/reviews/code-review.md)
+- [前端审查报告](docs/reviews/frontend-review.md)
 
 ## License
 

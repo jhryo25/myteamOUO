@@ -1621,6 +1621,18 @@ body.artifacts-open .layout { margin-right: var(--files-panel-width); }
   margin-left: 6px;
 }
 .settings-btn:hover { border-color: var(--accent); color: var(--accent); }
+.log-btn {
+  background: none;
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 4px 8px;
+  font-size: 16px;
+  transition: all .15s;
+  margin-left: 4px;
+}
+.log-btn:hover { border-color: var(--accent); color: var(--accent); }
 .artifacts-btn {
   position: relative;
   width: auto;

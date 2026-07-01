@@ -902,6 +902,28 @@ function ssePost(url, body, handlers) {
           handlers.error?.({ message: '用户拒绝操作' });
           return resolve(null);
         }
+        if (res.status === 409 && data.code === 'unfinished_plan') {
+          if (typeof hideRunningPanel === 'function') hideRunningPanel();
+          addSystemMsg(data.error || '上次拆任务尚未完成，请先了结后再拆新任务。');
+          document.getElementById('tasksExpandBtn')?.click();
+          return resolve(null);
+        }
+        if (res.status === 409 && data.code === 'clarification_required') {
+          // 任务有待确认信息但托盘未显示——通常是 session 错配或任务列表未刷新。
+          // 重新同步当前 session 并刷新任务，让澄清托盘渲染出来。
+          try {
+            if (typeof loadSessions === 'function') await loadSessions();
+            if (typeof loadTasks === 'function') await loadTasks();
+            const tray = document.getElementById('clarificationTray');
+            if (tray && !tray.classList.contains('hidden')) {
+              tray.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            } else if (data.questions?.length) {
+              showToast('部分任务需要确认，请刷新页面或在对应会话中查看确认区。', 'warn');
+            }
+          } catch (e) { /* ignore refresh failure */ }
+          handlers.error?.({ ...data, message: data.error || `请求失败 (${res.status})` });
+          return resolve(null);
+        }
         handlers.error?.({ ...data, message: data.error || `请求失败 (${res.status})` });
         return resolve(null);
       }
@@ -1335,6 +1357,16 @@ async function doChat(message, sessionId = currentSessionId, options = {}) {
 
 // ── plan 模式 ─────────────────────────────────────────────────
 async function doPlan(goal) {
+  // 护栏预检：同会话有未完成任务则拒绝新拆任务（服务端 /api/plan 会再兜底）
+  const unfinished = allTasks.filter(t =>
+    t.session_id === currentSessionId && ['pending', 'waiting_input', 'in_progress', 'failed'].includes(t.status)
+  );
+  if (unfinished.length) {
+    addSystemMsg(`上次拆任务还有 ${unfinished.length} 条未完成，请先执行、删除或放弃后再拆新任务。`);
+    document.getElementById('tasksExpandBtn')?.click();
+    return;
+  }
+
   const agent = getRadio('planAgentGroup')
     || mentionAgents.find((item) => item.available)?.key
     || mentionAgents[0]?.key
@@ -1374,7 +1406,7 @@ async function doPlan(goal) {
       finishPlanProgress(tasks?.length || written || 0);
       hideRunningPanel();
       if (tasks && tasks.length) {
-        addPlanCard(goal, tasks, { deferActions: true });
+        addPlanCard(goal, tasks, { deferActions: true, runId });
       } else {
         addSystemMsg(`✓ 拆解完成，共 ${written} 条任务（run_id: ${runId}）`);
       }
@@ -1407,7 +1439,19 @@ async function runDispatch(options = {}) {
 
   const showWorkflowLive = (statusText, phase = 'working', extra = {}) => {
     if (!activeWorkflowId) return;
-    const previousTask = workflowViewState.get(activeWorkflowId)?.currentTask || null;
+    // 任务未切 + 卡片已含 .workflow-live：只更新 live 文本/agent，不全量重建，
+    // 避免 .workflow-live-dot 动画点每次重建重启导致闪烁。
+    const prevView = workflowViewState.get(activeWorkflowId);
+    const taskChanged = extra.currentTask && extra.currentTask.id && extra.currentTask.id !== prevView?.currentTask?.id;
+    const row = chatEl.querySelector(`.workflow-card[data-workflow-id="${CSS.escape(activeWorkflowId)}"]`);
+    if (!taskChanged && row && row.querySelector('.workflow-live')) {
+      const strong = row.querySelector('.workflow-live strong');
+      const small = row.querySelector('.workflow-live small');
+      if (strong) strong.textContent = statusText || '工作流正在运行';
+      if (small) small.textContent = extra.agent ? `${extra.agent} · ${phase || 'working'}` : (phase || 'LangGraph 正在切换节点');
+      return;
+    }
+    const previousTask = prevView?.currentTask || null;
     const currentTask = extra.currentTask ? { ...(previousTask || {}), ...extra.currentTask } : previousTask;
     renderWorkflowCard({
       workflowRunId: activeWorkflowId,
@@ -1511,6 +1555,15 @@ async function runDispatch(options = {}) {
         // P2: 验收阶段开始时在聊天区插入明确的验收进度卡片
         const existReview = document.getElementById(`trc-${CSS.escape(id)}`);
         if (!existReview) addTaskReviewCard({ id: `trc-${id}`, title, reviewer: reviewer || 'Reviewer', verdict: 'reviewing', strategy, reason: `${reviewer || 'Reviewer'} 正在${strategy === 'self_review' ? '自验收' : '跨 Agent 验收'}「${title || id}」` });
+      },
+      'task-review-progress': ({ id, text }) => {
+        const live = document.querySelector(`#trc-${CSS.escape(id)} .task-review-live`);
+        if (live && text) {
+          live.textContent += text;
+          live.classList.add('has-output');
+          live.scrollTop = live.scrollHeight;
+          scrollChat();
+        }
       },
       'task-review-done': review => {
         // P2 修复：验收完成时统一用 trc- 前缀 id，确保替换掉验收中卡片
@@ -1713,6 +1766,7 @@ function openDrawer() {
   drawerMask.classList.remove('hidden');
   loadAgentConfig();
   initStudioTemplates();
+  loadAutoApproveToggle();
 }
 function closeDrawer() {
   settingsDrawer.classList.add('hidden');
@@ -3406,6 +3460,27 @@ workspaceSaveBtn.onclick = async () => {
   }
   workspaceSaveBtn.disabled = false;
 };
+
+async function loadAutoApproveToggle() {
+  try {
+    const { settings } = await fetch('/api/settings').then(r => r.json());
+    const toggle = document.getElementById('autoApproveToolsToggle');
+    if (toggle) toggle.checked = settings.autoApproveTools !== false;
+  } catch { /* ignore */ }
+}
+const autoApproveToggle = document.getElementById('autoApproveToolsToggle');
+autoApproveToggle?.addEventListener('change', async () => {
+  try {
+    await fetchWithApproval('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ autoApproveTools: autoApproveToggle.checked }),
+    });
+    addSystemMsg(`自主执行模式已${autoApproveToggle.checked ? '开启' : '关闭'}`);
+  } catch (err) {
+    addSystemMsg(`自主执行模式保存失败：${err.message}`);
+  }
+});
 
 drawerSaveBtn.onclick = async () => {
   // 从 UI 收集每个 agent 的完整字段（path + baseUrl + apiKey + model + 角色卡）

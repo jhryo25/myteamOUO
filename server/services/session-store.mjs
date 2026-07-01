@@ -31,11 +31,19 @@ export function getSession(id) {
   return sessions.find(s => s.id === id) || null;
 }
 
-export function getActiveSession() {
-  return getSession(activeSessionId) || sessions[0];
+// 读时自愈：activeSessionId 可能因删除/ephemeral 剥离而变成孤儿，
+// 这里在每次读取时校验并重置为 sessions[0]，避免前后端会话错配。
+function sanitizeActiveSessionId() {
+  if (getSession(activeSessionId)) return activeSessionId;
+  activeSessionId = sessions[0]?.id || null;
+  return activeSessionId;
 }
 
-export function getActiveSessionId() { return activeSessionId; }
+export function getActiveSession() {
+  return getSession(sanitizeActiveSessionId()) || sessions[0] || null;
+}
+
+export function getActiveSessionId() { return sanitizeActiveSessionId(); }
 export function getAllSessions() { return sessions; }
 export function getTrashedSessions() { return trashedSessions; }
 
@@ -128,6 +136,7 @@ export function loadSessions() {
 }
 
 export function saveSessions() {
+  sanitizeActiveSessionId();
   const data = { sessions, activeId: activeSessionId, trashedSessions };
   repository.saveSessionState(data);
 }

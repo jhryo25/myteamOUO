@@ -28,7 +28,7 @@ function renderPlanTaskRow(task, index, agentControl, { open = false } = {}) {
 }
 
 function addPlanCard(goal, tasks, opts = {}) {
-  const { deferActions = false } = opts;
+  const { deferActions = false, runId = '' } = opts;
   hideWelcome();
   // 可用 agent 列表（用于下拉）
   const availableAgents = (window.agentConfigList || mentionAgents)
@@ -127,14 +127,14 @@ function addPlanCard(goal, tasks, opts = {}) {
     };
   });
 
-  // 按 agent 执行：dispatch 时只跑对应 agent 的 pending
+  // 按 agent 执行：dispatch 时只跑对应 agent 的 pending（限定本 run，避免跨 run 污染）
   row.querySelectorAll('.plan-suggest-btn[data-agent]').forEach(btn => {
     btn.onclick = () => {
-      runDispatch({ agentOnly: btn.dataset.agent });
+      runDispatch({ agentOnly: btn.dataset.agent, runId });
     };
   });
   row.querySelector('.plan-suggest-all').onclick = () => {
-    runDispatch();
+    runDispatch({ runId });
   };
   // 手动：展开任务面板
   row.querySelector('.plan-suggest-manual').onclick = () => {
@@ -425,14 +425,15 @@ async function retryWorkflowTasks(view, taskIds = [], retryScope = 'execute') {
   });
 }
 
-function createTaskReviewCard({ id = '', title = '', reviewer = '', verdict = '', strategy = '', score = null, findings = [], suggestion = '', reason = '' } = {}) {
+function createTaskReviewCard({ id = '', title = '', reviewer = '', verdict = '', strategy = '', score = null, findings = [], suggestion = '', reason = '', needsHumanGate = false } = {}) {
   const passed = verdict === 'pass';
+  const lowScoreGate = passed && needsHumanGate; // 低分 pass 转人工 gate：不再显"验收通过"
   const rework = verdict === 'rework';
   const repairing = verdict === 'agent_repair_pending'; // 兼容旧历史数据
   const reviewing = verdict === 'reviewing'; // P2: 验收进行中的交互反馈
   const card = document.createElement('div');
   if (id) card.id = id;
-  card.className = `task-review-chat-card ${passed ? 'passed' : rework || repairing ? 'rework' : reviewing ? 'reviewing' : 'fallback'}`;
+  card.className = `task-review-chat-card ${lowScoreGate ? 'fallback' : passed ? 'passed' : rework || repairing ? 'rework' : reviewing ? 'reviewing' : 'fallback'}`;
   const strategyLabel = strategy === 'self_review' ? 'Agent 自验收' : strategy === 'cross_agent' ? '跨 Agent 验收' : '验收兜底';
   card.innerHTML = reviewing
     ? `<div class="task-review-chat-icon">⟳</div>
@@ -440,16 +441,17 @@ function createTaskReviewCard({ id = '', title = '', reviewer = '', verdict = ''
          <div class="task-review-chat-title">${esc(title || id || '任务')} · 正在验收中</div>
          <div class="task-review-chat-meta">${esc([reviewer, strategyLabel].filter(Boolean).join(' · '))}</div>
          ${reason ? `<div class="task-review-chat-note">${esc(reason)}</div>` : ''}
+         <div class="task-review-live"></div>
          <div class="task-review-spinner"></div>
        </div>`
-    : `<div class="task-review-chat-icon">${passed ? '✓' : rework ? '↻' : '!'}</div>
+    : `<div class="task-review-chat-icon">${lowScoreGate ? '!' : passed ? '✓' : rework ? '↻' : '!'}</div>
       <div class="task-review-chat-main">
-        <div class="task-review-chat-title">${esc(title || id || '任务')} · ${passed ? '验收通过' : rework ? '要求返工' : repairing ? 'Reviewer 协议异常（执行结果已保留）' : '自动验收未完成'}</div>
+        <div class="task-review-chat-title">${esc(title || id || '任务')} · ${lowScoreGate ? '待人工验收（低分，需你确认）' : passed ? '验收通过' : rework ? '要求返工' : repairing ? 'Reviewer 协议异常（执行结果已保留）' : '自动验收未完成'}</div>
         <div class="task-review-chat-meta">${esc([reviewer, strategyLabel, score !== null ? `${score} 分` : ''].filter(Boolean).join(' · '))}</div>
         ${suggestion || reason ? `<div class="task-review-chat-note">${esc(suggestion || reason)}</div>` : ''}
         ${findings?.length ? `<ul>${findings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}
       </div>
-      ${!passed && !rework && !repairing ? '<button class="task-review-fallback-btn">打开验收 Gate</button>' : ''}`;
+      ${(!passed && !rework && !repairing) || lowScoreGate ? '<button class="task-review-fallback-btn">打开验收 Gate</button>' : ''}`;
   card.querySelector('.task-review-fallback-btn')?.addEventListener('click', () => {
     hubActiveTab = 'gate';
     openHub();

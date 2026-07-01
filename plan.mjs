@@ -64,7 +64,7 @@ console.log(`正在调用 ${agentKey} 拆分任务，请稍候...\n目标：${go
 let rawOutput;
 try {
   rawOutput = await invokeAgent(CLI_CONFIG, agentKey, `${PLAN_PROMPT}\n\n用户目标：${goal}`, {
-    outputSchemaPath: agentKey === 'codex' ? PLAN_SCHEMA_FILE : '',
+    outputSchemaPath: (agentKey === 'codex' || agentKey.startsWith('codex-')) ? PLAN_SCHEMA_FILE : '',
   });
 } catch (err) {
   console.error(`\n调用失败：${err.message}`);

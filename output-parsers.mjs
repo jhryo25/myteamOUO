@@ -33,7 +33,7 @@ export const planOutputSchema = z.object({
 export const reviewOutputSchema = z.object({
   verdict: z.enum(['pass', 'rework']),
   severity: z.enum(['none', 'P1', 'P2', 'P3']).default('none'),
-  score: z.number().int().min(0).max(10).nullable().default(null),
+  score: z.number().int().min(0).max(100).nullable().default(null),
   findings: z.array(z.string()).default([]),
   suggestion: z.string().max(500).default(''),
 });
@@ -129,6 +129,22 @@ export function parsePlanOutput(raw) {
   return { ok: true, data: result.data };
 }
 
+// 保守关键词裁决（参考 clowder-ai）：reviewer 没输出合法 JSON 时，
+// 从原文关键词推断 verdict，避免 review_protocol_failed 卡死。rework 信号优先（更保守）。
+function detectVerdictByKeyword(text) {
+  const t = String(text || '');
+  if (!t.trim()) return null;
+  if (/拒绝|不通过|返工|打回|重做|rework|reject|不合格|需修复|阻塞合入|有问题需|未达标/i.test(t)) {
+    return { verdict: 'rework', severity: 'P2', score: null, findings: [],
+      suggestion: t.slice(0, 200).replace(/\s+/g, ' ').trim(), _source: 'keyword_rework' };
+  }
+  if (/通过|放行|LGTM|approve|验收通过|合格|达标|已完成|完整|没问题|高质量/i.test(t)) {
+    return { verdict: 'pass', severity: 'none', score: null, findings: [],
+      suggestion: t.slice(0, 200).replace(/\s+/g, ' ').trim(), _source: 'keyword_pass' };
+  }
+  return null;
+}
+
 export function parseReviewOutput(raw) {
   const text = typeof raw === 'string' ? raw : '';
   const parsed = extractJson(text);
@@ -145,7 +161,7 @@ export function parseReviewOutput(raw) {
         _source: 'text_fallback',
       };
     }
-    return null;
+    return detectVerdictByKeyword(text);
   }
   // 支持嵌套结构（旧版兼容）: parsed.review / parsed.result
   const candidate = parsed?.review && typeof parsed.review === 'object'
@@ -159,10 +175,10 @@ export function parseReviewOutput(raw) {
   const explicit = String(candidate?.verdict || '').trim().toLowerCase();
   const fallback = text.match(/\bverdict\s*["']?\s*[:=：]\s*["']?\s*(pass|rework)\b/i)?.[1]?.toLowerCase() || '';
   const verdict = ['pass', 'rework'].includes(explicit) ? explicit : fallback;
-  if (!verdict) return null;
+  if (!verdict) return detectVerdictByKeyword(text);
   const rawScore = Number(candidate?.score);
   const score = Number.isFinite(rawScore)
-    ? Math.max(0, Math.min(10, rawScore > 10 && rawScore <= 100 ? rawScore / 10 : rawScore))
+    ? Math.max(0, Math.min(100, Math.round(rawScore)))
     : null;
   return {
     ...(candidate && typeof candidate === 'object' ? candidate : {}),

@@ -41,7 +41,7 @@ const DEFAULT_AGENT_DEFS = [
     desc: '总控 / 审查 / 自迭代',
     envKey: 'CODEX_PATH',
     inputMode: 'stdin',
-    argsTemplate: 'exec - --json --skip-git-repo-check --approval-mode auto',
+    argsTemplate: 'exec - --json --skip-git-repo-check',
     checkTemplate: '--help',
     roleDescription: '任务规划、代码审查、自迭代协调者',
     personality: '严谨、务实、追求代码质量，习惯先问清楚需求再动手',
@@ -59,7 +59,7 @@ const DEFAULT_AGENT_DEFS = [
     desc: '主架构 / 深度实现',
     envKey: 'CLAUDE_PATH',
     inputMode: 'stdin',
-    argsTemplate: '-p - --output-format stream-json --verbose --approval-mode auto',
+    argsTemplate: '-p - --output-format stream-json --verbose',
     checkTemplate: '--help',
     roleDescription: '深度分析、系统架构设计、复杂代码生成',
     personality: '善于推理、思维发散、喜欢先理解全局再落地细节',
@@ -591,6 +591,8 @@ function invokeAgentOnce(CLI_CONFIG, agentKey, prompt, {
   silent = false,
   timeoutMs = 30 * 60 * 1000,
   outputSchemaPath = '',
+  onChunk = null,
+  extraArgs = [],
 } = {}) {
   const cfg = CLI_CONFIG[agentKey];
   if (!cfg?.path) throw new Error(`${agentKey} 路径未在 .env 中配置（${agentKey.toUpperCase()}_PATH）`);
@@ -598,8 +600,12 @@ function invokeAgentOnce(CLI_CONFIG, agentKey, prompt, {
   const parser = resolveAgentParser(agentKey, cfg);
 
   const args = cfg.args(prompt);
-  if (outputSchemaPath && agentKey === 'codex' && !args.includes('--output-schema')) {
+  if (outputSchemaPath && (agentKey === 'codex' || agentKey.startsWith('codex-')) && !args.includes('--output-schema')) {
     args.push('--output-schema', outputSchemaPath);
+  }
+  // per-call 追加参数（如 reviewer 注入 --permission-mode plan），不动全局 argsTemplate
+  for (const a of extraArgs) {
+    if (a && !args.includes(a)) args.push(a);
   }
   const { spawnPath, spawnArgs } = buildSpawnCommand(cfg, args);
 
@@ -658,6 +664,7 @@ function invokeAgentOnce(CLI_CONFIG, agentKey, prompt, {
       if (text) {
         if (!silent) process.stdout.write(text);
         fullText += text;
+        if (onChunk) { try { onChunk(text); } catch { /* 回调失败不影响主流程 */ } }
       }
     });
 

@@ -20,7 +20,7 @@ function json(res, status, body) {
 export async function tryServeSessions(req, res, { pathname, url, ctx }) {
   const {
     sessions, activeSessionId, trashedSessions,
-    getSession, getActiveSession, getAllSessions,
+    getSession, getActiveSession, getActiveSessionId, getAllSessions,
     setSessions, setActiveSessionId, setTrashedSessions,
     newSession, saveSessions, publicSessionRunState,
     readBody,
@@ -29,7 +29,7 @@ export async function tryServeSessions(req, res, { pathname, url, ctx }) {
   // GET /api/sessions — 返回所有 session 列表 + 当前激活
   if (req.method === 'GET' && pathname === '/api/sessions') {
     return json(res, 200, {
-      activeId: activeSessionId,
+      activeId: getActiveSessionId(),
       sessions: sessions.filter(s => !s.ephemeral).map(s => ({
         id: s.id, name: s.name, created_at: s.created_at,
         mode: s.mode || null, message_count: s.history.length,
@@ -46,14 +46,14 @@ export async function tryServeSessions(req, res, { pathname, url, ctx }) {
       if (!target) return json(res, 404, { error: 'session 不存在' });
       setActiveSessionId(target.id);
       saveSessions();
-      return json(res, 200, { ok: true, activeId: activeSessionId });
+      return json(res, 200, { ok: true, activeId: getActiveSessionId() });
     }
     setSessions(getAllSessions().filter(existing => !existing.ephemeral));
     const s = newSession((body.name || '').trim());
-    sessions.push(s);
+    getAllSessions().push(s);
     setActiveSessionId(s.id);
     saveSessions();
-    return json(res, 200, { ok: true, session: s, activeId: activeSessionId });
+    return json(res, 200, { ok: true, session: s, activeId: getActiveSessionId() });
   }
 
   // POST /api/sessions/:id/rename
@@ -84,14 +84,16 @@ export async function tryServeSessions(req, res, { pathname, url, ctx }) {
     }
     if (activeSessionId === id) setActiveSessionId(getAllSessions()[0].id);
     saveSessions();
-    return json(res, 200, { ok: true, activeId: activeSessionId, trashed: deleted.id, replacementId });
+    return json(res, 200, { ok: true, activeId: getActiveSessionId(), trashed: deleted.id, replacementId });
   }
 
   // GET /api/sessions/trash
   if (req.method === 'GET' && pathname === '/api/sessions/trash') {
     const now = Date.now();
-    setTrashedSessions(trashedSessions.filter(t => now - t.deletedAt < TRASH_RETENTION_MS));
-    const list = trashedSessions.map(t => ({
+    const fresh = trashedSessions.filter(t => now - t.deletedAt < TRASH_RETENTION_MS);
+    setTrashedSessions(fresh);
+    saveSessions();
+    const list = fresh.map(t => ({
       id: t.session.id, name: t.session.name,
       deletedAt: t.deletedAt, expiresAt: t.deletedAt + TRASH_RETENTION_MS,
     }));
@@ -106,10 +108,10 @@ export async function tryServeSessions(req, res, { pathname, url, ctx }) {
     if (idx < 0) return json(res, 404, { error: '回收站中不存在该 session' });
     const restored = trashedSessions.splice(idx, 1)[0].session;
     setSessions(getAllSessions().filter(existing => !existing.ephemeral));
-    sessions.push(restored);
+    getAllSessions().push(restored);
     setActiveSessionId(restored.id);
     saveSessions();
-    return json(res, 200, { ok: true, session: restored, activeId: activeSessionId });
+    return json(res, 200, { ok: true, session: restored, activeId: getActiveSessionId() });
   }
 
   // GET /api/history?sessionId=xxx

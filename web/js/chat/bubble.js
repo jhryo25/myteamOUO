@@ -346,6 +346,14 @@ function startAgentBubble(agentKey, sessionId = currentSessionId) {
         <div class="thinking-body hidden" id="body-${uid}"></div>
       </div>
       <div class="agent-activity-feed hidden" aria-live="polite"></div>
+      <div class="live-output-panel hidden" id="live-${uid}">
+        <button class="live-output-toggle" type="button" aria-expanded="false">
+          <span class="live-output-chevron">›</span>
+          <span class="live-output-label">实时输出</span>
+          <span class="live-output-count" id="livecnt-${uid}"></span>
+        </button>
+        <div class="live-output-body hidden" id="livebody-${uid}"></div>
+      </div>
       <div class="turn-final-label hidden">最终输出</div>
       <div class="bubble agent-bubble typing-cursor" id="${uid}">
         <div class="agent-waiting" aria-label="正在启动 ${esc(displayName)}">
@@ -371,6 +379,16 @@ function startAgentBubble(agentKey, sessionId = currentSessionId) {
     toggleBtn.querySelector('.thinking-chevron').textContent = isExpanded ? '›' : '⌄';
     body?.classList.toggle('hidden', isExpanded);
     if (preview) preview.style.display = isExpanded ? '' : 'none';
+  });
+
+  // 绑定 实时输出 折叠按钮
+  const liveToggle = row.querySelector('.live-output-toggle');
+  liveToggle?.addEventListener('click', () => {
+    const liveBody = row.querySelector(`#livebody-${uid}`);
+    const isExpanded = liveToggle.getAttribute('aria-expanded') === 'true';
+    liveToggle.setAttribute('aria-expanded', String(!isExpanded));
+    liveToggle.querySelector('.live-output-chevron').textContent = isExpanded ? '›' : '⌄';
+    liveBody?.classList.toggle('hidden', isExpanded);
   });
 
   // 复制按钮
@@ -437,15 +455,27 @@ function _flushTyper(bubble) {
 
 function appendTyping(text) {
   if (!agentTypingBubble || !text) return;
-  agentTypingBubble.classList.remove('hidden');
-  agentTypingBubble.closest('.agent-turn')?.querySelector('.turn-final-label')?.classList.remove('hidden');
-  let st = typerStates.get(agentTypingBubble);
-  if (!st) {
-    st = { pending: '', displayed: '', rafId: null };
-    typerStates.set(agentTypingBubble, st);
+  const wrap = agentTypingBubble.closest('.bubble-content-wrap');
+  const liveBody = wrap?.querySelector('.live-output-body');
+  // 无面板时回退到旧行为（直接写主气泡），保证不退步
+  if (!liveBody) {
+    agentTypingBubble.classList.remove('hidden');
+    let st = typerStates.get(agentTypingBubble);
+    if (!st) { st = { pending: '', displayed: '', rafId: null }; typerStates.set(agentTypingBubble, st); }
+    st.pending += text;
+    if (!st.rafId) st.rafId = setTimeout(() => _flushTyper(agentTypingBubble), TYPER_TICK_MS);
+    return;
   }
+  // 主气泡保留三点（不覆盖）；流式文本进可折叠"实时输出"面板（默认收起）
+  agentTypingBubble.dataset.raw = (agentTypingBubble.dataset.raw || '') + text;
+  const panel = wrap.querySelector('.live-output-panel');
+  panel?.classList.remove('hidden');
+  const cnt = wrap.querySelector('[id^="livecnt-"]');
+  if (cnt) cnt.textContent = `${agentTypingBubble.dataset.raw.length} 字`;
+  let st = typerStates.get(liveBody);
+  if (!st) { st = { pending: '', displayed: '', rafId: null }; typerStates.set(liveBody, st); }
   st.pending += text;
-  if (!st.rafId) st.rafId = setTimeout(() => _flushTyper(agentTypingBubble), TYPER_TICK_MS);
+  if (!st.rafId) st.rafId = setTimeout(() => _flushTyper(liveBody), TYPER_TICK_MS);
 }
 
 function appendThinking(text) {
@@ -486,17 +516,19 @@ function appendThinking(text) {
 }
 
 function updateAgentStatus(text, phase = '') {
-  if (!agentTypingBubble || agentTypingBubble.dataset.raw) return;
-  if (phase === 'waiting' || phase === 'starting') {
-    agentTypingBubble.classList.remove('hidden');
-    agentTypingBubble.innerHTML = `<div class="agent-waiting" aria-label="${esc(text || 'Agent 运行中')}">
-      <span class="agent-waiting-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-      <span>${esc(text || 'Agent 运行中')}</span>
-    </div>`;
-    scrollChat();
+  if (!agentTypingBubble) return;
+  // 已有三点指示器：仅更新文案 span，保留 .agent-waiting-dots 动画结构，避免重建闪烁
+  const waiting = agentTypingBubble.querySelector('.agent-waiting');
+  if (waiting) {
+    const label = waiting.querySelector('span:last-child');
+    if (label && text) label.textContent = text;
     return;
   }
-  agentTypingBubble.innerHTML = `<div class="thinking-line"><span class="thinking-dot"></span><span>${esc(text || 'agent 正在处理...')}</span></div>`;
+  agentTypingBubble.classList.remove('hidden');
+  const indicator = (phase === 'waiting' || phase === 'starting')
+    ? `<span class="agent-waiting-dots" aria-hidden="true"><i></i><i></i><i></i></span>`
+    : `<span class="thinking-dot"></span>`;
+  agentTypingBubble.innerHTML = `<div class="agent-waiting" aria-label="${esc(text || 'Agent 运行中')}">${indicator}<span>${esc(text || 'Agent 运行中')}</span></div>`;
   scrollChat();
 }
 
@@ -512,21 +544,23 @@ function collectFinishStats() {
 
 function finishTyping(stats = null) {
   if (!agentTypingBubble) return false;
-  // 强制 flush 打字机：把剩余字符全部填入
-  const st = typerStates.get(agentTypingBubble);
-  let raw = agentTypingBubble.dataset.raw || '';
-  if (st) {
-    if (st.rafId) clearTimeout(st.rafId);
-    st.displayed = st.pending;
-    raw = st.pending;
-    agentTypingBubble.dataset.raw = raw;
-    typerStates.delete(agentTypingBubble);
+  const wrap = agentTypingBubble.closest('.bubble-content-wrap');
+  // 清理实时输出面板的 typer（回退路径下主气泡 typer 也清掉）
+  const liveBody = wrap?.querySelector('.live-output-body');
+  if (liveBody) {
+    const liveSt = typerStates.get(liveBody);
+    if (liveSt) { if (liveSt.rafId) clearTimeout(liveSt.rafId); typerStates.delete(liveBody); }
   }
+  const mainSt = typerStates.get(agentTypingBubble);
+  if (mainSt) { if (mainSt.rafId) clearTimeout(mainSt.rafId); typerStates.delete(agentTypingBubble); }
+  let raw = agentTypingBubble.dataset.raw || '';
   agentTypingBubble.classList.remove('typing-cursor');
   if (raw) {
     try { agentTypingBubble.innerHTML = renderRichText(raw); } catch (err) { console.error('renderRichText failed:', err); }
   }
-  const wrap = agentTypingBubble.closest('.bubble-content-wrap');
+  // 全文已进主气泡：隐藏实时输出面板，显示"最终输出"标签
+  wrap?.querySelector('.live-output-panel')?.classList.add('hidden');
+  wrap?.querySelector('.turn-final-label')?.classList.remove('hidden');
   const timeEl = wrap?.querySelector('[id^="time-"]');
   if (timeEl) timeEl.textContent = formatTime();
   // 在气泡下方追加 token / 耗时摘要

@@ -1,3 +1,4 @@
+
 // myteam HTTP server — REST API + SSE
 // 用法：node server.mjs [--port 7878]
 
@@ -35,6 +36,7 @@ import {
 import { ScheduleService } from './scheduler.mjs';
 import {
   ensurePlanSchemaFile,
+  ensureReviewSchemaFile,
   parseStructuredPlanOutput,
   buildContinuityCapsule,
   formatContinuityBridge,
@@ -66,6 +68,7 @@ const SETTINGS_FILE = '.myteam/settings.json';
 const UPLOADS_DIR = '.myteam/uploads';
 const OUTPUTS_DIR = '.myteam/outputs';
 const PLAN_SCHEMA_FILE = ensurePlanSchemaFile();
+const REVIEW_SCHEMA_FILE = ensureReviewSchemaFile();
 recoverStaleSubagentRuns();
 
 // skill 市场远程源配置
@@ -301,7 +304,7 @@ function agentKeys() {
 }
 
 function loadSettings() {
-  const fallback = { workspace: resolve('.') };
+  const fallback = { workspace: resolve('.'), autoApproveTools: true };
   if (!existsSync(SETTINGS_FILE)) return fallback;
   try {
     const data = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'));
@@ -1547,8 +1550,19 @@ function streamAgent(agentKey, prompt, res, label = 'chunk', {
 
   const parser = resolveAgentParser(agentKey, cfg);
   const args = cfg.args(fullPrompt);
-  if (outputSchemaPath && agentKey === 'codex' && !args.includes('--output-schema')) {
+  if (outputSchemaPath && (agentKey === 'codex' || agentKey.startsWith('codex-')) && !args.includes('--output-schema')) {
     args.push('--output-schema', resolve(outputSchemaPath));
+  }
+  // myteam 统一工具权限：autoApproveTools 开启时，按 CLI 类型注入 bypass flag，
+  // 让 WebSearch/shell/文件等工具在非交互 exec 模式下自动放行，无需浏览器审批。
+  if (loadSettings().autoApproveTools !== false) {
+    const AUTO_APPROVE_FLAGS = {
+      codex: ['--dangerously-bypass-approvals-and-sandbox'],
+      claude: ['--dangerously-skip-permissions'],
+    };
+    const baseKey = agentKey.replace(/-.*$/, '');
+    const bypass = AUTO_APPROVE_FLAGS[agentKey] || AUTO_APPROVE_FLAGS[baseKey];
+    if (bypass) for (const f of bypass) if (!args.includes(f)) args.push(f);
   }
 
   const emitTurnPart = (part) => {
@@ -1945,7 +1959,7 @@ async function handle(req, res) {
     pathname, url,
     ctx: {
       sessions, activeSessionId, trashedSessions,
-      getSession, getActiveSession, getAllSessions,
+      getSession, getActiveSession, getActiveSessionId, getAllSessions,
       setSessions, setActiveSessionId, setTrashedSessions,
       newSession, saveSessions, publicSessionRunState,
       readBody,
@@ -1974,6 +1988,7 @@ async function handle(req, res) {
         approvalId: body.approvalId,
       })) return;
       const settings = { ...loadSettings(), workspace };
+      if (typeof body.autoApproveTools === 'boolean') settings.autoApproveTools = body.autoApproveTools;
       saveSettings(settings);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ ok: true, settings, workspace }));
@@ -2889,6 +2904,22 @@ async function handle(req, res) {
     }
 
     const session = (body.sessionId && getSession(body.sessionId)) || getActiveSession();
+
+    // 护栏：同会话必须先了结上一轮拆任务，避免多 run 并存导致执行污染
+    const unfinishedTasks = readTasks().filter(t =>
+      t.session_id === session.id && ['pending', 'waiting_input', 'in_progress', 'failed'].includes(t.status)
+    );
+    if (unfinishedTasks.length) {
+      const unfinishedRunIds = [...new Set(unfinishedTasks.map(t => t.run_id).filter(Boolean))];
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({
+        error: `上次拆任务还有 ${unfinishedTasks.length} 条未完成，请先执行、删除或放弃后再发起拆任务。`,
+        code: 'unfinished_plan',
+        unfinishedCount: unfinishedTasks.length,
+        runIds: unfinishedRunIds,
+      }));
+    }
+
     const runId = createWorkflowRunId();
     const planWorkflowId = `plan:${runId}`;
     session.ephemeral = false;
@@ -2929,7 +2960,7 @@ async function handle(req, res) {
           runId,
           mode: 'plan',
           skills: selectedPlanSkills,
-          outputSchemaPath: agentKey === 'codex' ? PLAN_SCHEMA_FILE : '',
+          outputSchemaPath: (agentKey === 'codex' || agentKey.startsWith('codex-')) ? PLAN_SCHEMA_FILE : '',
         }));
       const raw = String(turn.output || '');
       const parsedPlan = parseStructuredPlanOutput(raw, {
@@ -3365,8 +3396,10 @@ async function handle(req, res) {
         const executor = executorAgent || task.executed_by || task.agent;
         let reviewer = null;
         if (statuses.filter(a => a.available && a.key !== executor).length > 1) {
-          // 有多个非 executor 的 agent 时，优先选 claude，其次非 codex 的
-          reviewer = statuses.find(a => a.available && a.key !== executor && a.key !== 'codex')
+          // 有多个非 executor 的 agent 时：优先 claude 变体（plan-mode 可靠），其次非 codex 变体，最后兜底
+          // 排除所有 codex 变体当 reviewer（codex 是总控角色 + 无 CLI 禁 tool 解，易跑偏）
+          reviewer = statuses.find(a => a.available && a.key !== executor && (a.key === 'claude' || a.key.startsWith('claude-')))
+            || statuses.find(a => a.available && a.key !== executor && a.key !== 'codex' && !a.key.startsWith('codex-'))
             || statuses.find(a => a.available && a.key !== executor);
         } else {
           reviewer = statuses.find(a => a.available && a.key !== executor)
@@ -3398,14 +3431,24 @@ async function handle(req, res) {
         // 静默调用：reviewer 不流式发到前端，避免和 executor 输出混在一起
         let raw = '';
         let data = null;
-        for (let attempt = 1; attempt <= 2; attempt++) {
+        for (let attempt = 1; attempt <= 1; attempt++) {
           const repairInstruction = attempt === 1 ? '' : `\n\n上一次输出不符合协议。第 ${attempt} 次尝试：只能输出一个 JSON 对象，禁止 Markdown、解释、代码围栏。verdict 只能是 pass 或 rework。`;
-          raw = await invokeAgent(CLI_CONFIG, reviewer.key, reviewPrompt + repairInstruction, { silent: true, timeoutMs: 5 * 60 * 1000 });
+          raw = await invokeAgent(CLI_CONFIG, reviewer.key, reviewPrompt + repairInstruction, {
+            silent: true,
+            timeoutMs: 5 * 60 * 1000,
+            onChunk: (text) => sseSend(workflowRes, 'task-review-progress', { id: task.id, text }),
+            outputSchemaPath: (reviewer.key === 'codex' || reviewer.key.startsWith('codex-')) ? REVIEW_SCHEMA_FILE : '',
+            // reviewer 才禁工具：claude 用 --disallowedTools 禁工具但保持默认模式（能真评审）；
+            // 不用 --permission-mode plan（plan 模式 claude 不评审、只输出默认 0 分）。codex 无禁 tool flag 靠强 prompt+证据
+            extraArgs: (reviewer.key === 'claude' || reviewer.key.startsWith('claude-'))
+              ? ['--disallowedTools', 'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Task', 'NotebookEdit', 'MultiEdit']
+              : [],
+          });
           data = parseReviewResult(raw || '');
           if (data) break;
-          if (attempt < 2) {
+          if (attempt < 1) {
             updateDispatchActivity({ phase: 'review_repair', statusText: `${reviewer.key} 输出格式异常，正在进行最后一次格式修复` });
-            sseSend(workflowRes, 'task-review-retrying', { id: task.id, reviewer: reviewer.key, attempt, maxAttempts: 2 });
+            sseSend(workflowRes, 'task-review-retrying', { id: task.id, reviewer: reviewer.key, attempt, maxAttempts: 1 });
           }
         }
         if (!data) {
@@ -3436,27 +3479,34 @@ async function handle(req, res) {
           return outcome;
         }
         const findings = Array.isArray(data.findings) ? data.findings.map(String).filter(Boolean) : [];
+        const scoreNum = Number.isFinite(Number(data.score)) ? Number(data.score) : null;
+        // 低分护栏：verdict=pass 但 score<60 不自动放行，转人工验收（用户决定 pass/rework，不自动打回）
+        const lowScorePass = data.verdict === 'pass' && scoreNum != null && scoreNum < 60;
         const outcome = {
           verdict: data.verdict,
           reviewer: reviewer.key,
           strategy: reviewStrategy,
           severity: data.severity || 'none',
-          score: Number.isFinite(Number(data.score)) ? Number(data.score) : null,
+          score: scoreNum,
           findings,
           suggestion: String(data.suggestion || '').slice(0, 500),
         };
+        if (lowScorePass) {
+          findings.push(`评分 ${outcome.score}/100 低于 60，已转人工验收，请确认是否通过。`);
+        }
+        const needsHumanGate = lowScorePass || deferGate;
         const reviewPatch = {
           review_status: data.verdict,        // 'pass' | 'rework'
           review_severity: outcome.severity,
           review_score: outcome.score,
           review_findings: findings,
-          review_note: outcome.suggestion,
+          review_note: lowScorePass ? `评分 ${outcome.score}/100 偏低，已转人工验收。${outcome.suggestion}` : outcome.suggestion,
           reviewer: reviewer.key,
           review_strategy: reviewStrategy,
           reviewed_at: new Date().toISOString(),
-          gate_status: data.verdict === 'pass' ? (deferGate ? 'waiting' : 'passed') : 'rework',
-          test_status: data.verdict === 'pass' ? 'agent_passed' : 'agent_rework',
-          phase: data.verdict === 'pass' ? (deferGate ? 'gate' : 'done') : 'impl',
+          gate_status: data.verdict === 'pass' ? (needsHumanGate ? 'waiting' : 'passed') : 'rework',
+          test_status: data.verdict === 'pass' ? (lowScorePass ? 'agent_low_score' : 'agent_passed') : 'agent_rework',
+          phase: data.verdict === 'pass' ? (needsHumanGate ? 'gate' : 'done') : 'impl',
           review_only_pending: false,
         };
         if (data.verdict === 'rework') Object.assign(reviewPatch, {
@@ -3475,6 +3525,7 @@ async function handle(req, res) {
         sseSend(workflowRes, 'task-review-done', {
           id: task.id,
           title: task.title,
+          needsHumanGate: !!lowScorePass,
           ...outcome,
         });
         recordReviewHistory(outcome);

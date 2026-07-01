@@ -92,6 +92,30 @@ export function ensurePlanSchemaFile(file = '.myteam/schemas/plan.schema.json') 
   return resolve(file);
 }
 
+// Review 输出 JSON Schema —— 供 codex --output-schema 强制结构化输出，杜绝 parse 失败。
+// 字段对齐 output-parsers.mjs 的 reviewOutputSchema（zod）。
+export const REVIEW_OUTPUT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['verdict', 'severity', 'score', 'findings', 'suggestion'],
+  properties: {
+    verdict: { type: 'string', enum: ['pass', 'rework'] },
+    severity: { type: 'string', enum: ['none', 'P1', 'P2', 'P3'] },
+    score: { type: 'integer', minimum: 0, maximum: 100 },
+    findings: { type: 'array', items: { type: 'string' } },
+    suggestion: { type: 'string', maxLength: 500 },
+  },
+};
+
+export function ensureReviewSchemaFile(file = '.myteam/schemas/review.schema.json') {
+  mkdirSync(dirname(file), { recursive: true });
+  const serialized = JSON.stringify(REVIEW_OUTPUT_SCHEMA, null, 2) + '\n';
+  if (!existsSync(file) || readFileSync(file, 'utf8') !== serialized) {
+    writeFileSync(file, serialized, 'utf8');
+  }
+  return resolve(file);
+}
+
 function jsonCandidates(raw) {
   const text = String(raw || '').replace(/\`\`\`(?:json)?/gi, '').replace(/\`\`\`/g, '').trim();
   const candidates = [text];

@@ -70,7 +70,7 @@ test('silent Agent calls collect structured parser text instead of coercing obje
   assert.notEqual(parsedAgentOutputText(parsed), '[object Object]');
   assert.equal(parseReviewResult('```json\n{"verdict":"PASS","findings":[]}\n```').verdict, 'pass');
   assert.equal(parseReviewResult('verdict: rework\nsuggestion: fix it').verdict, 'rework');
-  assert.equal(parseReviewResult('{"verdict":"pass","score":95}').score, 9.5);
+  assert.equal(parseReviewResult('{"verdict":"pass","score":95}').score, 95);
 });
 
 test('plan UI keeps structured JSON out of the assistant text bubble', () => {

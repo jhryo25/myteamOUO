@@ -91,8 +91,8 @@ test('refreshed dispatch state stays linked to the conversation session', () => 
 });
 
 test('automatic reviewer advances the gate and writes a visible review result', () => {
-  assert.match(serverModules, /gate_status: data\.verdict === 'pass' \? \(deferGate \? 'waiting' : 'passed'\) : 'rework'/);
-  assert.match(serverModules, /test_status: data\.verdict === 'pass' \? 'agent_passed' : 'agent_rework'/);
+  assert.match(serverModules, /gate_status: data\.verdict === 'pass' \? \(needsHumanGate \? 'waiting' : 'passed'\) : 'rework'/);
+  assert.match(serverModules, /test_status: data\.verdict === 'pass' \? \(lowScorePass \? 'agent_low_score' : 'agent_passed'\) : 'agent_rework'/);
   assert.match(serverModules, /kind: 'task-review'/);
   assert.match(appModules, /function createTaskReviewCard\(/);
   assert.match(appModules, /Agent 已验收/);
@@ -168,7 +168,7 @@ test('bulk task selection is reconciled with the currently visible task set', ()
 });
 
 test('review protocol failures preserve Agent output, halt the workflow, and retry only Reviewer', () => {
-  assert.match(serverModules, /attempt <= 2/);
+  assert.match(serverModules, /attempt <= 1/);
   assert.match(serverModules, /task-review-retrying/);
   assert.match(serverModules, /verdict: 'review_error'/);
   assert.match(serverModules, /review_status: 'failed'/);

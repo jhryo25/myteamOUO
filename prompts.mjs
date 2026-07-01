@@ -204,13 +204,16 @@ export async function buildExecPrompt(task = {}, skillContext = '') {
 }
 
 // ── Review Prompt 模板 ─────────────────────────────────────────
-export const REVIEW_PROMPT_RULES = `你是 myteam 的 Reviewer agent。
-你正在 review 另一个 agent 的任务执行结果。
+export const REVIEW_PROMPT_RULES = `你是 myteam 的 Reviewer agent。你正在 review 另一个 agent 的任务执行结果。
+
+【评审边界 — 最高优先级，必须遵守】
+- 你只能基于下方提供的【执行结果】和【产物证据】做评审，禁止访问文件系统/网络/shell，禁止调用任何工具，禁止尝试执行或独立核实任务。
+- 你拥有的全部信息就是下方文本；信息不足时基于现有信息判断并在 findings 说明，不要尝试自行获取。
+- 你必须给出真实的 0-100 评分（0=完全不合格、100=完美），基于执行结果对验收标准的满足程度打分；禁止默认填 0 分，禁止把评审当成任务去执行或"帮忙整理/帮忙做"。
+- 唯一输出是一个 JSON 对象（第一个字符是 {{，最后一个字符是 }}），不要 markdown 代码块、不要解释、不要思考过程。
 
 【强制规则】
-- 唯一输出是 JSON，第一个字符必须是左大括号，最后一个字符必须是右大括号
-- 不要 markdown 代码块、不要解释、不要思考过程
-- 严禁调用任何工具
+- 严禁调用任何工具（包括 view_image / read_image / read_file / web_search / shell 等）
 - 严禁请求授权或等待用户确认
 
 【评审维度】
@@ -225,13 +228,13 @@ export const REVIEW_PROMPT_RULES = `你是 myteam 的 Reviewer agent。
 - P3: nice to have
 
 严格按以下 JSON 返回：
-{
+{{
   "verdict": "<pass|rework>",
   "severity": "<none|P1|P2|P3>",
-  "score": <0-10 整数>,
+  "score": <0-100 整数>,
   "findings": ["<具体问题1>", "<具体问题2>"],
   "suggestion": "<给执行 agent 的下一步建议，一句话>"
-}`;
+}}`;
 
 const _reviewTemplate = ChatPromptTemplate.fromMessages([
   SystemMessagePromptTemplate.fromTemplate(REVIEW_PROMPT_RULES),
@@ -246,6 +249,9 @@ const _reviewTemplate = ChatPromptTemplate.fromMessages([
 
 【执行结果】
 {executionResult}
+
+【产物证据】（执行 agent 已产出的文件，无需你再核实，直接基于此评审）
+{evidence}
 
 请给出结构化 review JSON。`),
 ]);
@@ -264,6 +270,18 @@ export async function buildReviewPrompt(task = {}, executorAgent = '', execution
   const handoff = handoffParts.length ? `\n【原始交接五件套】\n${handoffParts.join('\n')}` : '';
   const steps = (task.steps ?? []).map((s, i) => `${i + 1}. ${s}`).join('\n');
 
+  // 产物证据摘要：把 task.artifacts 喂给 reviewer，避免它为核实而调用工具
+  const artifacts = Array.isArray(task.artifacts) ? task.artifacts : [];
+  const evidence = artifacts.length
+    ? artifacts.map(a => {
+        const name = a.path || a.type || '产物';
+        const t = a.type || (a.lang ? a.lang : '?');
+        const size = String(a.content || '').length;
+        const preview = String(a.preview || a.content || '').slice(0, 120).replace(/\s+/g, ' ').trim();
+        return `- ${name} [${t}|${size}字]${preview ? `：${preview}` : ''}`;
+      }).join('\n')
+    : '（无产物证据）';
+
   return _reviewTemplate.format({
     title: task.title || '',
     goal: task.goal || '',
@@ -272,5 +290,6 @@ export async function buildReviewPrompt(task = {}, executorAgent = '', execution
     steps: steps || '（无）',
     accept: task.accept || '（未指定）',
     executionResult: String(executionResult || '').slice(0, 2000),
+    evidence,
   });
 }

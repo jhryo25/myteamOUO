@@ -127,6 +127,19 @@ node server.mjs --port 7878
 
 打开 [http://localhost:7878](http://localhost:7878)。首次进入时，状态栏会检查 Agent 路径与可启动性；也可以在设置页修改工作区和 Agent 配置。
 
+### 桌面客户端（可选）
+
+项目附带 Electron 桌面客户端，打包后无需单独启动 Node 服务：
+
+```bash
+cd desktop
+npm install
+npm start          # 开发模式
+npm run dist       # 打包 .exe
+```
+
+详见 [desktop/README.md](desktop/README.md)。
+
 ## 使用方式
 
 ### 直接对话
@@ -186,6 +199,7 @@ myteamOUO/
 ├─ server/                    # 渐进拆分的配置、路由和领域服务
 ├─ workflow/                  # LangGraph 图、端口、检查点和清理
 ├─ web/                       # 原生 Web UI、样式和模块化前端脚本
+├─ desktop/                   # Electron 桌面客户端（主进程内嵌 HTTP 服务）
 ├─ tests/                     # Node 测试与端到端生命周期测试
 ├─ tools/                     # 数据处理和报告工具链
 ├─ docs/                      # 分类后的架构、产品与工程文档
@@ -229,13 +243,11 @@ myteamOUO 借鉴了 [LobsterAI](https://github.com/netease-youdao/LobsterAI) 的
 
 当前坚持：
 
-- 单 Node 服务 + 原生 Web UI；
+- 单 Node 服务 + 原生 Web UI（可选 Electron 桌面客户端打包）；
 - 复用用户已有的 Agent CLI；
 - SQLite 本地持久化；
 - 显式 Reviewer 与人工 Gate；
 - LangGraph 只负责编排，不取代业务数据和权限边界。
-
-近期优先级是稳定多 Agent 协作闭环、安装体验和真实用户指标，而不是追求更多模型、Skills 数量或完整桌面运行时。
 
 ## 文档
 
@@ -247,6 +259,7 @@ myteamOUO 借鉴了 [LobsterAI](https://github.com/netease-youdao/LobsterAI) 的
 - [竞品对比与迭代路线](docs/architecture/roadmap-vs-lobsterai-clowder.md)
 - [代码审查报告](docs/reviews/code-review.md)
 - [前端审查报告](docs/reviews/frontend-review.md)
+- [2026-06-29 代码审查](docs/reviews/code-review-2026-06-29.md)
 
 ## License
 

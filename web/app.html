@@ -15,7 +15,7 @@
   <link rel="stylesheet" href="css/task-panel.css">
   <link rel="stylesheet" href="app.css">
   <!-- marked.js：轻量 Markdown 渲染（27KB） -->
-  <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
+  <script src="vendor/marked.min.js"></script>
 </head>
 <body>
 
@@ -32,6 +32,7 @@
   <button class="hub-btn magnetic" id="hubBtn" title="打开 Hub">Hub</button>
   <button class="skills-page-btn magnetic" id="skillsPageBtn" title="Skills 管理">Skills</button>
   <button class="settings-btn magnetic" id="settingsBtn" title="Agent 配置">⚙</button>
+  <button class="log-btn magnetic hidden" id="logBtn" title="桌面端日志监控">📋</button>
 </div>
 
 <!-- ── Agent 管理抽屉 ── -->
@@ -363,6 +364,15 @@
   document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('themeToggle').addEventListener('click', toggleTheme);
     updateIcon(ROOT.classList.contains('dark') ? 'dark' : 'light');
+
+    // 桌面端：显示日志监控按钮
+    if (window.myteamDesktop && window.myteamDesktop.isDesktop) {
+      const logBtn = document.getElementById('logBtn');
+      if (logBtn) {
+        logBtn.classList.remove('hidden');
+        logBtn.addEventListener('click', () => window.myteamDesktop.openLogWindow());
+      }
+    }
   });
 })();
 </script>

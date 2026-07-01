@@ -15,6 +15,7 @@
 
 ### Product
 
+- [产品与面试说明](product/interview-playbook.md)
 - [Plan 模式交互分析](product/plan-ux-analysis.md)
 
 ### Engineering

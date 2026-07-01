@@ -203,3 +203,71 @@ myteamOUO/
 ├── docs/reviews/refactor-summary.md
 └── HANDOVER.md                   (本文件)
 ```
+
+---
+
+## 七、2026-06-29 更新
+
+### 7.1 代码审查
+
+对全栈代码进行了完整审查，综合评分 **6.1/10**。
+
+**P0 严重问题（3 个）**:
+1. `server/index.mjs` 是死代码 — 引用不存在的 `handle` export，从未成功运行
+2. `server/config.mjs` 与 `server.mjs` 存在重复定义（SKILL_SOURCES、STUDIO_TEMPLATES 等）
+3. `server/routes/legacy-handle.mjs` 是空壳文件（109 行，无函数实现）
+
+**P1 重要问题（4 个）**:
+4. CORS `Access-Control-Allow-Origin: *` 过于宽松
+5. Shell 执行器依赖正则做危险命令检测，可被绕过
+6. 前端 `esc()` 函数未转义单引号，存在 XSS 残留风险
+7. `.mjs` 和 `.ts` 双文件并存但 `noEmit: true`，类型安全形同虚设
+
+**P2 改进建议（6 个）**: 空 catch 块、server.mjs 仍有 4315 行、app.js 5975 行、CI 测试排除策略、check 脚本维护成本、tsconfig moduleResolution 不匹配
+
+完整报告: `docs/reviews/code-review-2026-06-29.md`
+
+### 7.2 Electron 桌面客户端
+
+新增 `desktop/` 目录，实现 Electron 桌面客户端打包方案。
+
+**技术方案**:
+- Electron 35.7.5 + electron-builder（NSIS + portable）
+- 主进程内嵌 HTTP 服务（动态 `import('server.mjs')`）
+- `MYTEAM_DB_PATH` 环境变量指向用户数据目录
+- `NODE_OPTIONS=--experimental-sqlite` 启用 node:sqlite
+- `asarUnpack` 配置 better-sqlite3 原生模块
+
+**日志系统（四路输出）**:
+1. 文件: `%APPDATA%/myteam/data/desktop.log`
+2. 日志监控窗口: 顶栏 📋 按钮（仅桌面端显示），IPC 实时推送
+3. DevTools: 开发模式自动打开（detach 模式）
+4. 终端: 开发模式 console.log 输出
+
+**启动验证通过**:
+- HTTP 服务 7878 端口正常
+- SQLite 读写正常
+- 前端页面加载完成
+- API 全部返回 200
+
+**关键修复（4 个问题）**:
+1. `ELECTRON_RUN_AS_NODE=1` 环境变量导致 Electron 以纯 Node 模式运行 → 必须 `delete env.ELECTRON_RUN_AS_NODE`
+2. `mainWindow` 在 `log()` 函数中被引用但未声明 → 前向声明移到 log() 之前
+3. `better-sqlite3` 的 NODE_MODULE_VERSION 不匹配（127 vs 133）→ `npx @electron/rebuild -f -o better-sqlite3 -v 35.7.5` 重新编译
+4. 单实例锁残留（旧进程未退出）→ 需先 `Stop-Process -Name electron -Force`
+
+**前端适配**:
+- `marked.js` 从 CDN 改为本地 `web/vendor/marked.min.js`
+- 新增桌面端日志监控按钮（顶栏 📋，通过 `window.myteamDesktop.isDesktop` 检测显示）
+
+### 7.3 待办
+
+| 优先级 | 内容 |
+|--------|------|
+| P0 | 删除 server/index.mjs 死代码 + legacy-handle.mjs 空壳 |
+| P0 | 消除 config 重复定义（server.mjs vs server/config.mjs） |
+| P1 | 收紧 CORS 配置（限制为 localhost） |
+| P1 | 修复 esc() 单引号转义 |
+| P1 | server.mjs 静态文件路由未覆盖 web/vendor/ 子目录（404） |
+| P2 | desktop/ 的 npm install 需用户手动执行（Electron 二进制下载） |
+| P2 | 继续拆分 server.mjs（目标 <500 行）和 app-core.js |

@@ -38,3 +38,9 @@ Thumbs.db
 # 服务日志（本地运行时产生）
 .server-stderr.log
 .server-stdout.log
+
+# Electron 桌面客户端
+desktop/node_modules/
+desktop/.userdata/
+desktop_app/
+dist/

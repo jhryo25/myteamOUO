@@ -1,0 +1,156 @@
+{
+  "name": "myteam-desktop",
+  "version": "0.1.0",
+  "description": "myteam A2A 协作控制台 — 桌面客户端",
+  "main": "main.js",
+  "author": "myteam",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "rebuild": "electron-rebuild -f -w better-sqlite3"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^26.0.0",
+    "@electron/rebuild": "^4.0.0"
+  },
+  "build": {
+    "appId": "cn.myteam.desktop",
+    "productName": "myteam",
+    "copyright": "Copyright © 2026 myteam",
+    "directories": {
+      "output": "../dist"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "myteam"
+    },
+    "portable": {
+      "artifactName": "myteam-${version}-portable.exe"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "splash.html",
+      "assets/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../server.mjs",
+        "to": "server.mjs"
+      },
+      {
+        "from": "../agent-utils.mjs",
+        "to": "agent-utils.mjs"
+      },
+      {
+        "from": "../callbacks.mjs",
+        "to": "callbacks.mjs"
+      },
+      {
+        "from": "../collaboration-context.mjs",
+        "to": "collaboration-context.mjs"
+      },
+      {
+        "from": "../commandSafety.mjs",
+        "to": "commandSafety.mjs"
+      },
+      {
+        "from": "../dispatch.mjs",
+        "to": "dispatch.mjs"
+      },
+      {
+        "from": "../dispatch-context-cache.mjs",
+        "to": "dispatch-context-cache.mjs"
+      },
+      {
+        "from": "../governance.mjs",
+        "to": "governance.mjs"
+      },
+      {
+        "from": "../output-parsers.mjs",
+        "to": "output-parsers.mjs"
+      },
+      {
+        "from": "../plan.mjs",
+        "to": "plan.mjs"
+      },
+      {
+        "from": "../product-guidance.mjs",
+        "to": "product-guidance.mjs"
+      },
+      {
+        "from": "../prompts.mjs",
+        "to": "prompts.mjs"
+      },
+      {
+        "from": "../scheduler.mjs",
+        "to": "scheduler.mjs"
+      },
+      {
+        "from": "../storage.mjs",
+        "to": "storage.mjs"
+      },
+      {
+        "from": "../workflow-state.mjs",
+        "to": "workflow-state.mjs"
+      },
+      {
+        "from": "../workflow",
+        "to": "workflow"
+      },
+      {
+        "from": "../server",
+        "to": "server"
+      },
+      {
+        "from": "../skills-registry",
+        "to": "skills-registry"
+      },
+      {
+        "from": "../web",
+        "to": "web"
+      },
+      {
+        "from": "../package.json",
+        "to": "package.json"
+      },
+      {
+        "from": "../node_modules",
+        "to": "node_modules",
+        "filter": [
+          "**/*",
+          "!**/.bin/**",
+          "!**/.cache/**",
+          "!**/test/**",
+          "!**/tests/**",
+          "!**/*.md",
+          "!**/LICENSE*",
+          "!**/CHANGELOG*"
+        ]
+      }
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "**/node_modules/better-sqlite3/**/*"
+    ]
+  }
+}
